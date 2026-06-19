@@ -1,10 +1,10 @@
 import streamlit as st
 import sqlite3
 import time
+import requests
 from datetime import datetime, timedelta
-from twilio.rest import Client
 
-# --- PAGE SETUP & COMPONENT STYLING ---
+# --- 1. PAGE SETUP & COMPONENT STYLING ---
 st.set_page_config(page_title="Facility Command Hub", page_icon="⏱️", layout="wide")
 st.markdown("""
     <style>
@@ -13,9 +13,9 @@ st.markdown("""
     h3 { margin-top: 15px !important; color: #1e293b; font-weight: 700; }
     .stButton>button { border-radius: 6px; }
     </style>
-""", unsafe_with_html=True)
+""", unsafe_allow_html=True)
 
-# --- DATABASE SETUP (Shared Persistent Multi-User Matrix) ---
+# --- 2. DATABASE SETUP (Shared Persistent Multi-User Matrix) ---
 def init_shared_db():
     conn = sqlite3.connect("shared_facility_matrix.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -48,20 +48,20 @@ conn = init_shared_db()
 cursor = conn.cursor()
 CURRENT_DATE = datetime.now().strftime("%Y-%m-%d")
 
-# --- TWILIO REAL SMS DISPATCHER ---
-def dispatch_real_time_sms(message_body):
+# --- 3. GOOGLE CHAT WEBHOOK DISPATCHER ENGINE ---
+def dispatch_real_time_alert(message_body):
+    """Sends a real-time notification directly to your Google Chat Space."""
     try:
-        if "twilio" in st.secrets:
-            cfg = st.secrets["twilio"]
-            client = Client(cfg["account_sid"], cfg["auth_token"])
-            for number in cfg["supervisor_numbers"]:
-                client.messages.create(body=message_body, from_=cfg["twilio_number"], to=number)
-            return True
+        if "google_chat" in st.secrets:
+            url = st.secrets["google_chat"]["webhook_url"]
+            payload = {"text": message_body}
+            response = requests.post(url, json=payload, headers={"Content-Type": "application/json"})
+            return response.status_code == 200
     except Exception as e:
-        st.sidebar.error(f"SMS Node Warning: {str(e)}")
+        st.sidebar.error(f"Google Chat Node Warning: {str(e)}")
     return False
 
-# --- RENDERING ENGINE FOR WORKER GRID ROWS ---
+# --- 4. RENDERING ENGINE FOR WORKER GRID ROWS ---
 def render_synchronized_matrix(db_table, goals_dict, prefix, dept_label):
     cursor.execute("SELECT tech_name FROM global_roster WHERE dept_prefix=?", (prefix,))
     active_roster = [row[0] for row in cursor.fetchall()]
@@ -117,7 +117,7 @@ def render_synchronized_matrix(db_table, goals_dict, prefix, dept_label):
                         elif not db_sub:
                             st.error("🛑 Timer Expired!")
                             if db_t_not == 0:
-                                dispatch_real_time_sms(f"ALERT: Tech {worker} timer expired for {dept_label} Slot {slot_num}!")
+                                dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} has reached zero on {dept_label} Slot {slot_num} without submitted metrics.")
                                 cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                             if current_now < escalation_time:
@@ -128,10 +128,10 @@ def render_synchronized_matrix(db_table, goals_dict, prefix, dept_label):
                                 st.rerun()
                             else:
                                 if db_s_not == 0:
-                                    dispatch_real_time_sms(f"🚨 CRITICAL ESCALATION: Tech {worker} missed metrics submission for {dept_label} Slot {slot_num}!")
+                                    dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed the metrics window for {dept_label} Slot {slot_num}. Immediate attention required.")
                                     cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                     conn.commit()
-                                st.error("🚨 Supervisors texted.")
+                                st.error("🚨 Supervisor alert sent to Google Chat.")
                         
                         if not db_sub:
                             val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{worker}_{slot_num}")
@@ -146,7 +146,7 @@ def render_synchronized_matrix(db_table, goals_dict, prefix, dept_label):
                                 conn.commit()
                                 st.rerun()
 
-# --- CORPORATE CONFIGURATIONS ---
+# --- 5. CORPORATE CONFIGURATIONS ---
 GOALS = {
     "de": {"Queue Alpha - Tier 1": "15 tickets", "Queue Beta - Network Ops": "5 alerts"},
     "cc": {"Inbound Support Line": "20 calls", "Outbound Follow-ups": "15 checks"},
@@ -164,7 +164,7 @@ with tab_cc: render_synchronized_matrix("call_center_slots", GOALS["cc"], "cc", 
 with tab_sh: render_synchronized_matrix("shipping_slots", GOALS["sh"], "sh", "Shipping")
 with tab_fi: render_synchronized_matrix("fill_slots", GOALS["fi"], "fi", "Fill")
 
-# --- REAL-TIME GRAPHICAL ANALYTICS ---
+# --- 6. REAL-TIME GRAPHICAL ANALYTICS ---
 with tab_analytics:
     st.header("📊 Cumulative Corporate Analytics Ledger")
     totals = {"Blocks": 0, "Units": 0, "Alerts": 0}
@@ -172,75 +172,3 @@ with tab_analytics:
     dept_chart_series = {"Data Entry": 0, "Call Center": 0, "Shipping": 0, "Fill": 0}
     
     labels_map = {"data_entry_slots": "Data Entry", "call_center_slots": "Call Center", "shipping_slots": "Shipping", "fill_slots": "Fill"}
-    for table, label in labels_map.items():
-        cursor.execute(f"SELECT tech_name, input_number, supervisor_notified, submitted FROM {table}")
-        for row in cursor.fetchall():
-            if row[3] == 1:
-                totals["Blocks"] += 1
-                totals["Units"] += int(row[1])
-                dept_chart_series[label] += 1
-                tech_chart_series[row[0]] = tech_chart_series.get(row[0], 0) + int(row[1])
-            if row[2] == 1: totals["Alerts"] += 1
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("⏱️ Completed Shift Blocks", f"{totals['Blocks']} Blocks")
-    k2.metric("📦 Processed Volume", f"{totals['Units']} Units")
-    k3.metric("🚨 System Alerts Triggered", f"{totals['Alerts']} Escalations")
-    
-    if tech_chart_series:
-        st.markdown("### Production Units per Technician")
-        st.bar_chart(tech_chart_series)
-    st.markdown("### Operational Load Volume by Department")
-    st.line_chart(dept_chart_series)
-
-# --- BUSINESS-WIDE VERIFICATION CHECKLIST ---
-st.markdown("<br><br>", unsafe_with_html=True)
-with st.container(border=True):
-    st.header("📋 Global Facility Daily Queue Verification Log (Business-Wide)")
-    cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
-    chk = cursor.fetchone()
-    if not chk:
-        cursor.execute("INSERT OR IGNORE INTO daily_checklist (log_date) VALUES (?)", (CURRENT_DATE,))
-        conn.commit()
-        cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
-        chk = cursor.fetchone()
-        
-    c_col, f_col = st.columns([2, 1])
-    with f_col:
-        with st.container(border=True):
-            t_obj = datetime.strptime(chk[6], "%H:%M").time()
-            new_target_time = st.time_input("Set Verification Deadline:", value=t_obj)
-            if new_target_time.strftime("%H:%M") != chk[6]:
-                cursor.execute("UPDATE daily_checklist SET reminder_time=? WHERE log_date=?", (new_target_time.strftime("%H:%M"), CURRENT_DATE))
-                conn.commit()
-                st.rerun()
-            
-    with c_col:
-        with st.form("master_checklist_form"):
-            opt = ["Pending", "Yes", "No"]
-            r1 = st.radio("1. Rejection Queue Status", opt, index=opt.index(chk[1]), horizontal=True)
-            r2 = st.radio("2. PA Queue Status", opt, index=opt.index(chk[2]), horizontal=True)
-            r3 = st.radio("3. Untransmitted Claims Status", opt, index=opt.index(chk[3]), horizontal=True)
-            r4 = st.radio("4. Future Bill Status", opt, index=opt.index(chk[4]), horizontal=True)
-            r5 = st.radio("5. Data-Re-Entry Status", opt, index=opt.index(chk[5]), horizontal=True)
-            
-            if st.form_submit_button("Save Global Checklist Progress", type="primary", use_container_width=True):
-                cursor.execute("UPDATE daily_checklist SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=? WHERE log_date=?", (r1, r2, r3, r4, r5, CURRENT_DATE))
-                conn.commit()
-                st.rerun()
-
-    # Checklist background scheduling routine rules
-    sys_now = datetime.now()
-    alert_target_datetime = datetime.combine(sys_now.date(), t_obj)
-    escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
-    
-    if sys_now >= alert_target_datetime and sys_now < escalation_target_datetime:
-        if "Pending" in [r1, r2, r3, r4, r5]:
-            dispatch_real_time_sms("REMINDER: Enterprise daily queue verification checklist configurations remain PENDING.")
-            
-    if sys_now >= escalation_target_datetime and chk[7] == 0:
-        if "Pending" in [chk[1], chk[2], chk[3], chk[4], chk[5]]:
-            dispatch_real_time_sms("🚨 LATE COMPLIANCE ESCALATION: Global business operational queues remain unchecked past deadline window.")
-            cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
-            conn.commit()
-            st.rerun()
