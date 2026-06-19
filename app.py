@@ -34,13 +34,14 @@ def init_shared_db():
         )
     """)
     
-    # 4 Core department production grids
+    # 4 Core department production grids (Added duration_minutes column)
     for dept in ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]:
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS {dept} (
                 log_date TEXT, tech_name TEXT, slot_id INTEGER, queue TEXT, goal TEXT,
                 start_time TEXT, input_number INTEGER, tech_notified INTEGER DEFAULT 0,
                 supervisor_notified INTEGER DEFAULT 0, submitted INTEGER DEFAULT 0,
+                duration_minutes INTEGER DEFAULT 120,
                 PRIMARY KEY (log_date, tech_name, slot_id)
             )
         """)
@@ -145,28 +146,55 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         for slot_num in range(1, 5):
             with cols[slot_num - 1]:
                 with st.container(border=True):
-                    st.markdown(f"**🕒 Slot {slot_num}** ({((slot_num-1)*2)+1}-{slot_num*2} Hrs)")
+                    st.markdown(f"**🕒 Slot {slot_num}**")
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
                     
+                    # CONDITION A: Unstarted Slot Container (Selectable Durations)
                     if not slot_row:
                         if goals_dict:
                             chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{worker}_{slot_num}")
                             st.caption(f"🎯 Target: {goals_dict[chosen_q]}")
+                            
+                            # Custom selectable countdown blocks
+                            durations = {
+                                "30 Minutes": 30,
+                                "1 Hour": 60,
+                                "2 Hours": 120,
+                                "4 Hours": 240,
+                                "8 Hours": 480
+                            }
+                            chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), index=2, key=f"dur_{prefix}_{worker}_{slot_num}")
+                            chosen_dur_min = durations[chosen_dur_label]
+                            
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{worker}_{slot_num}", use_container_width=True):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                local_cursor.execute(f"INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time) VALUES (?, ?, ?, ?, ?, ?)", (CURRENT_DATE, worker, slot_num, chosen_q, goals_dict[chosen_q], now_str))
+                                local_cursor.execute(f"""
+                                    INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) 
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (CURRENT_DATE, worker, slot_num, chosen_q, goals_dict[chosen_q], now_str, chosen_dur_min))
                                 conn.commit()
                                 st.rerun()
                         else:
                             st.warning("Please configure queues in Management panel.")
+                    
+                    # CONDITION B: Clock running or finished
                     else:
-                        _, _, _, db_queue, db_goal, db_start, db_input, db_t_not, db_s_not, db_sub = slot_row
+                        # Grab parameters out of database (safely handling possible missing index items)
+                        db_queue = slot_row[3]
+                        db_goal = slot_row[4]
+                        db_start = slot_row[5]
+                        db_input = slot_row[6]
+                        db_t_not = slot_row[7]
+                        db_s_not = slot_row[8]
+                        db_sub = slot_row[9]
+                        db_dur_min = slot_row[10] if len(slot_row) > 10 else 120 # Fallback default
+                        
                         st.markdown(f"Queue: `{db_queue}`")
-                        st.caption(f"Target Goal: {db_goal}")
+                        st.caption(f"Target Goal: {db_goal} ({db_dur_min} min block)")
                         
                         start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
-                        end_time = start_time + timedelta(hours=2)
+                        end_time = start_time + timedelta(minutes=db_dur_min)
                         escalation_time = end_time + timedelta(minutes=10)
                         current_now = datetime.now()
                         
@@ -181,7 +209,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             h, r = divmod(rem.seconds, 3600)
                             m, s = divmod(r, 60)
                             st.metric(label="⏳ Time Remaining", value=f"{int(h):02d}:{int(m):02d}:{int(s):02d}")
-                            st.progress(1.0 - (rem.total_seconds() / 7200.0))
+                            st.progress(1.0 - (rem.total_seconds() / (db_dur_min * 60.0)))
                             time.sleep(0.5)
                             st.rerun()
                         elif not db_sub:
@@ -217,7 +245,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.rerun()
 
 # --- 6. CORE APP ROUTING INTERFACE ---
-st.title("⏱️ Enterprise Facility Command Center")
 tab_de, tab_cc, tab_sh, tab_fi, tab_analytics, tab_mgmt = st.tabs([
     "💻 Data Entry Line", "📞 Call Center Desk", "📦 Shipping Floor", "🧪 Fill Department", "📊 Cumulative Analytics", "⚙️ Queue Management"
 ])
@@ -263,92 +290,4 @@ with tab_mgmt:
                 dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
                 with st.container(border=True):
                     st.markdown(f"**[{dept_lbl}]** `{q_name}`")
-                    st.caption(f"Goal Vector: {q_goal}")
-                    
-                    if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{q_name}", use_container_width=True):
-                        local_cursor.execute("DELETE FROM dynamic_queues WHERE dept_prefix=? AND queue_name=?", (q_prefix, q_name))
-                        conn.commit()
-                        st.rerun()
-
-# --- 8. REAL-TIME GRAPHICAL ANALYTICS ---
-with tab_analytics:
-    st.header("📊 Cumulative Corporate Analytics Ledger")
-    totals = {"Blocks": 0, "Units": 0, "Alerts": 0}
-    tech_chart_series = {}
-    dept_chart_series = {"Data Entry": 0, "Call Center": 0, "Shipping": 0, "Fill": 0}
-    
-    local_cursor = conn.cursor()
-    labels_map = {"data_entry_slots": "Data Entry", "call_center_slots": "Call Center", "shipping_slots": "Shipping", "fill_slots": "Fill"}
-    for table, label in labels_map.items():
-        local_cursor.execute(f"SELECT tech_name, input_number, supervisor_notified, submitted FROM {table}")
-        for row in local_cursor.fetchall():
-            if row[3] == 1:
-                totals["Blocks"] += 1
-                totals["Units"] += int(row[1])
-                dept_chart_series[label] += 1
-                tech_chart_series[row[0]] = tech_chart_series.get(row[0], 0) + int(row[1])
-            if row[2] == 1: totals["Alerts"] += 1
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("⏱️ Completed Shift Blocks", f"{totals['Blocks']} Blocks")
-    k2.metric("📦 Processed Volume", f"{totals['Units']} Units")
-    k3.metric("🚨 Chat Alerts Triggered", f"{totals['Alerts']} Escalations")
-    
-    if tech_chart_series:
-        st.markdown("### Production Units per Technician")
-        st.bar_chart(tech_chart_series)
-    st.markdown("### Operational Load Volume by Department")
-    st.line_chart(dept_chart_series)
-
-# --- 9. BUSINESS-WIDE VERIFICATION CHECKLIST ---
-st.markdown("<br><br>", unsafe_allow_html=True)
-with st.container(border=True):
-    st.header("📋 Global Facility Daily Queue Verification Log (Business-Wide)")
-    local_cursor = conn.cursor()
-    local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
-    chk = local_cursor.fetchone()
-    if not chk:
-        local_cursor.execute("INSERT OR IGNORE INTO daily_checklist (log_date) VALUES (?)", (CURRENT_DATE,))
-        conn.commit()
-        local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
-        chk = local_cursor.fetchone()
-        
-    c_col, f_col = st.columns([2, 1])
-    with f_col:
-        with st.container(border=True):
-            t_obj = datetime.strptime(chk[6], "%H:%M").time()
-            new_target_time = st.time_input("Set Verification Deadline:", value=t_obj, key="checklist_deadline_widget")
-            if new_target_time.strftime("%H:%M") != chk[6]:
-                local_cursor.execute("UPDATE daily_checklist SET reminder_time=? WHERE log_date=?", (new_target_time.strftime("%H:%M"), CURRENT_DATE))
-                conn.commit()
-                st.rerun()
-            
-    with c_col:
-        with st.form("master_checklist_form"):
-            opt = ["Pending", "Yes", "No"]
-            r1 = st.radio("1. Rejection Queue Status", opt, index=opt.index(chk[1]), horizontal=True)
-            r2 = st.radio("2. PA Queue Status", opt, index=opt.index(chk[2]), horizontal=True)
-            r3 = st.radio("3. Untransmitted Claims Status", opt, index=opt.index(chk[3]), horizontal=True)
-            r4 = st.radio("4. Future Bill Status", opt, index=opt.index(chk[4]), horizontal=True)
-            r5 = st.radio("5. Data-Re-Entry Status", opt, index=opt.index(chk[5]), horizontal=True)
-            
-            if st.form_submit_button("Save Global Checklist Progress", type="primary", use_container_width=True):
-                local_cursor.execute("UPDATE daily_checklist SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=? WHERE log_date=?", (r1, r2, r3, r4, r5, CURRENT_DATE))
-                conn.commit()
-                st.rerun()
-
-    # Checklist background scheduling logic
-    sys_now = datetime.now()
-    alert_target_datetime = datetime.combine(sys_now.date(), t_obj)
-    escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
-    
-    if sys_now >= alert_target_datetime and sys_now < escalation_target_datetime:
-        if "Pending" in [r1, r2, r3, r4, r5]:
-            dispatch_real_time_alert("⚠️ REMINDER: Global daily queue verification checklist fields are still PENDING.")
-            
-    if sys_now >= escalation_target_datetime and chk[7] == 0:
-        if "Pending" in [chk[1], chk[2], chk[3], chk[4], chk[5]]:
-            dispatch_real_time_alert("🚨 LATE COMPLIANCE ESCALATION: Global business operational queues remain unchecked past the 1-hour grace window.")
-            local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
-            conn.commit()
-            st.rerun()
+                    st.caption(f"Goal Vector: {
