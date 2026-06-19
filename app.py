@@ -15,27 +15,24 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. DATABASE SETUP (Shared Persistent Multi-User Matrix) ---
+# --- 2. DATABASE SETUP ---
 def init_shared_db():
     conn = sqlite3.connect("shared_facility_matrix.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
-    # Global roster table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS global_roster (
             dept_prefix TEXT, tech_name TEXT, PRIMARY KEY (dept_prefix, tech_name)
         )
     """)
     
-    # Dynamic Queues & Goals Matrix Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dynamic_queues (
             dept_prefix TEXT, queue_name TEXT, goal_target TEXT, PRIMARY KEY (dept_prefix, queue_name)
         )
     """)
     
-    # 4 Core department production grids
     for dept in ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]:
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS {dept} (
@@ -51,7 +48,6 @@ def init_shared_db():
         except sqlite3.OperationalError:
             cursor.execute(f"ALTER TABLE {dept} ADD COLUMN duration_minutes INTEGER DEFAULT 120")
         
-    # Global daily checklist table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_checklist (
             log_date TEXT PRIMARY KEY, 
@@ -65,7 +61,6 @@ def init_shared_db():
         )
     """)
     
-    # Dynamic signature tracking & context notes columns
     schema_extensions = [
         ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"),
         ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"),
@@ -79,7 +74,6 @@ def init_shared_db():
         except sqlite3.OperationalError:
             cursor.execute(f"ALTER TABLE daily_checklist ADD COLUMN {col_name} {col_type}")
         
-    # Seeding defaults
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
         defaults = [
@@ -284,17 +278,21 @@ with tab_mgmt:
             
             if not all_qs:
                 st.info("No customized tracking queues available.")
-            for q_row in all_qs:
-                q_prefix, q_name, q_goal = q_row["dept_prefix"], q_row["queue_name"], q_row["goal_target"]
-                dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
-                with st.container(border=True):
-                    st.markdown(f"**[{dept_lbl}]** `{q_name}`")
-                    st.caption(f"Goal Vector: {q_goal}")
+            else:
+                for q_row in all_qs:
+                    q_prefix = q_row["dept_prefix"]
+                    q_name = q_row["queue_name"]
+                    q_goal = q_row["goal_target"]
                     
-                    if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{q_name}", use_container_width=True):
-                        local_cursor.execute("DELETE FROM dynamic_queues WHERE dept_prefix=? AND queue_name=?", (q_prefix, q_name))
-                        conn.commit()
-                        st.rerun()
+                    dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
+                    with st.container(border=True):
+                        st.markdown(f"**[{dept_lbl}]** `{q_name}`")
+                        st.caption(f"Goal Vector: {q_goal}")
+                        
+                        if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{q_name}", use_container_width=True):
+                            local_cursor.execute("DELETE FROM dynamic_queues WHERE dept_prefix=? AND queue_name=?", (q_prefix, q_name))
+                            conn.commit()
+                            st.rerun()
 
 # --- 8. REAL-TIME GRAPHICAL ANALYTICS ---
 with tab_analytics:
@@ -354,31 +352,26 @@ with st.container(border=True):
         with st.form("master_checklist_form"):
             opt = ["Pending", "Yes", "No"]
             
-            # Row 1: Rejection Queue
             r1_c1, r1_c2, r1_c3 = st.columns([2, 1, 2])
             r1 = r1_c1.radio("1. Rejection Queue Status", opt, index=opt.index(chk["rejection_queue"]), horizontal=True)
             r1_by = r1_c2.text_input("Sign:", value=chk["rejection_queue_by"], key="by_r1", placeholder="User")
             r1_nt = r1_c3.text_input("Operational Notes:", value=chk["rejection_queue_notes"], key="nt_r1", placeholder="Add context...")
             
-            # Row 2: PA Queue
             r2_c1, r2_c2, r2_c3 = st.columns([2, 1, 2])
             r2 = r2_c1.radio("2. PA Queue Status", opt, index=opt.index(chk["pa_queue"]), horizontal=True)
             r2_by = r2_c2.text_input("Sign:", value=chk["pa_queue_by"], key="by_r2", placeholder="User")
             r2_nt = r2_c3.text_input("Operational Notes:", value=chk["pa_queue_notes"], key="nt_r2", placeholder="Add context...")
             
-            # Row 3: Untransmitted Claims
             r3_c1, r3_c2, r3_c3 = st.columns([2, 1, 2])
             r3 = r3_c1.radio("3. Untransmitted Claims Status", opt, index=opt.index(chk["untransmitted_claims"]), horizontal=True)
             r3_by = r3_c2.text_input("Sign:", value=chk["untransmitted_claims_by"], key="by_r3", placeholder="User")
             r3_nt = r3_c3.text_input("Operational Notes:", value=chk["untransmitted_claims_notes"], key="nt_r3", placeholder="Add context...")
             
-            # Row 4: Future Bill
             r4_c1, r4_c2, r4_c3 = st.columns([2, 1, 2])
             r4 = r4_c1.radio("4. Future Bill Status", opt, index=opt.index(chk["future_bill"]), horizontal=True)
             r4_by = r4_c2.text_input("Sign:", value=chk["future_bill_by"], key="by_r4", placeholder="User")
             r4_nt = r4_c3.text_input("Operational Notes:", value=chk["future_bill_notes"], key="nt_r4", placeholder="Add context...")
             
-            # Row 5: Data-Re-Entry
             r5_c1, r5_c2, r5_c3 = st.columns([2, 1, 2])
             r5 = r5_c1.radio("5. Data-Re-Entry Status", opt, index=opt.index(chk["data_re_entry"]), horizontal=True)
             r5_by = r5_c2.text_input("Sign:", value=chk["data_re_entry_by"], key="by_r5", placeholder="User")
@@ -396,7 +389,6 @@ with st.container(border=True):
                 conn.commit()
                 st.rerun()
 
-    # --- Compliance Tracker & Descriptive Alert Engine ---
     sys_now = datetime.now()
     alert_target_datetime = datetime.combine(sys_now.date(), t_obj)
     escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
