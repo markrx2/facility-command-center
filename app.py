@@ -18,6 +18,7 @@ st.markdown("""
 # --- 2. DATABASE SETUP (Shared Persistent Multi-User Matrix) ---
 def init_shared_db():
     conn = sqlite3.connect("shared_facility_matrix.db", check_same_thread=False)
+    conn.row_factory = sqlite3.Row  # Enables access via text column names instead of volatile integers
     cursor = conn.cursor()
     
     # Global roster table
@@ -34,7 +35,7 @@ def init_shared_db():
         )
     """)
     
-    # 4 Core department production grids (With duration_minutes column)
+    # 4 Core department production grids
     for dept in ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]:
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS {dept} (
@@ -45,8 +46,6 @@ def init_shared_db():
                 PRIMARY KEY (log_date, tech_name, slot_id)
             )
         """)
-        
-        # AUTOMATIC SCHEMA MIGRATION: Forcefully inject column if table already existed without it
         try:
             cursor.execute(f"SELECT duration_minutes FROM {dept} LIMIT 1")
         except sqlite3.OperationalError:
@@ -55,28 +54,32 @@ def init_shared_db():
     # Global daily checklist table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_checklist (
-            log_date TEXT PRIMARY KEY, rejection_queue TEXT DEFAULT 'Pending',
-            pa_queue TEXT DEFAULT 'Pending', untransmitted_claims TEXT DEFAULT 'Pending',
-            future_bill TEXT DEFAULT 'Pending', data_re_entry TEXT DEFAULT 'Pending',
-            reminder_time TEXT DEFAULT '16:00', supervisor_escaped INTEGER DEFAULT 0
+            log_date TEXT PRIMARY KEY, 
+            rejection_queue TEXT DEFAULT 'Pending',
+            pa_queue TEXT DEFAULT 'Pending', 
+            untransmitted_claims TEXT DEFAULT 'Pending',
+            future_bill TEXT DEFAULT 'Pending', 
+            data_re_entry TEXT DEFAULT 'Pending',
+            reminder_time TEXT DEFAULT '16:00', 
+            supervisor_escaped INTEGER DEFAULT 0
         )
     """)
     
-    # AUTOMATIC CHECKLIST SCHEMA MIGRATION: Inject signature validation columns
-    signature_cols = [
-        ("rejection_queue_by", "TEXT DEFAULT ''"),
-        ("pa_queue_by", "TEXT DEFAULT ''"),
-        ("untransmitted_claims_by", "TEXT DEFAULT ''"),
-        ("future_bill_by", "TEXT DEFAULT ''"),
-        ("data_re_entry_by", "TEXT DEFAULT ''")
+    # SYSTEM UPGRADE MIGRATION: Robust column injection verification for signature tracking & context notes
+    schema_extensions = [
+        ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"),
+        ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"),
+        ("untransmitted_claims_by", "TEXT DEFAULT ''"), ("untransmitted_claims_notes", "TEXT DEFAULT ''"),
+        ("future_bill_by", "TEXT DEFAULT ''"), ("future_bill_notes", "TEXT DEFAULT ''"),
+        ("data_re_entry_by", "TEXT DEFAULT ''"), ("data_re_entry_notes", "TEXT DEFAULT ''")
     ]
-    for col_name, col_type in signature_cols:
+    for col_name, col_type in schema_extensions:
         try:
             cursor.execute(f"SELECT {col_name} FROM daily_checklist LIMIT 1")
         except sqlite3.OperationalError:
             cursor.execute(f"ALTER TABLE daily_checklist ADD COLUMN {col_name} {col_type}")
         
-    # Core seeding mechanism: ensures tables are populated for all departments
+    # Core seeding mechanism
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
         defaults = [
@@ -122,27 +125,12 @@ is_manager = check_manager_access()
 def render_synchronized_matrix(db_table, prefix, dept_label):
     local_cursor = conn.cursor()
     
-    # Force sync base queues if left empty
-    local_cursor.execute("SELECT COUNT(*) FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
-    if local_cursor.fetchone()[0] == 0:
-        emergency_defaults = {
-            "de": [("Queue Alpha - Tier 1", "15 tickets"), ("Queue Beta - Network Ops", "5 alerts")],
-            "cc": [("Inbound Support Line", "20 calls"), ("Outbound Follow-ups", "15 checks")],
-            "sh": [("Standard Ground Sorting", "40 orders"), ("Priority/Overnight Air", "20 shipments")],
-            "fi": [("Automated Dispensing", "10 cells"), ("Manual Counter Line", "50 fills")]
-        }
-        for q_n, g_t in emergency_defaults[prefix]:
-            local_cursor.execute("INSERT OR IGNORE INTO dynamic_queues VALUES (?, ?, ?)", (prefix, q_n, g_t))
-        conn.commit()
-
-    # Pull active queues and active personnel
     local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
-    goals_dict = {row[0]: row[1] for row in local_cursor.fetchall()}
+    goals_dict = {row["queue_name"]: row["goal_target"] for row in local_cursor.fetchall()}
     
     local_cursor.execute("SELECT tech_name FROM global_roster WHERE dept_prefix=?", (prefix,))
-    active_roster = [row[0] for row in local_cursor.fetchall()]
+    active_roster = [row["tech_name"] for row in local_cursor.fetchall()]
         
-    # Roster Management Module
     with st.expander(f"➕ Manage Live {dept_label} On-Duty Roster", expanded=True):
         col_in, col_bt = st.columns([3, 1])
         with col_in:
@@ -170,18 +158,13 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
                     
-                    # CONDITION A: Unstarted Slot Container (Selectable Durations)
                     if not slot_row:
                         if goals_dict:
                             chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{worker}_{slot_num}")
                             st.caption(f"🎯 Target: {goals_dict[chosen_q]}")
                             
                             durations = {
-                                "30 Minutes": 30,
-                                "1 Hour": 60,
-                                "2 Hours": 120,
-                                "4 Hours": 240,
-                                "8 Hours": 480
+                                "30 Minutes": 30, "1 Hour": 60, "2 Hours": 120, "4 Hours": 240, "8 Hours": 480
                             }
                             chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), index=2, key=f"dur_{prefix}_{worker}_{slot_num}")
                             chosen_dur_min = durations[chosen_dur_label]
@@ -196,17 +179,15 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.rerun()
                         else:
                             st.warning("Please configure queues in Management panel.")
-                    
-                    # CONDITION B: Clock running or finished
                     else:
-                        db_queue = slot_row[3]
-                        db_goal = slot_row[4]
-                        db_start = slot_row[5]
-                        db_input = slot_row[6]
-                        db_t_not = slot_row[7]
-                        db_s_not = slot_row[8]
-                        db_sub = slot_row[9]
-                        db_dur_min = slot_row[10] if len(slot_row) > 10 else 120
+                        db_queue = slot_row["queue"]
+                        db_goal = slot_row["goal"]
+                        db_start = slot_row["start_time"]
+                        db_input = slot_row["input_number"]
+                        db_t_not = slot_row["tech_notified"]
+                        db_s_not = slot_row["supervisor_notified"]
+                        db_sub = slot_row["submitted"]
+                        db_dur_min = slot_row["duration_minutes"]
                         
                         st.markdown(f"Queue: `{db_queue}`")
                         st.caption(f"Target Goal: {db_goal} ({db_dur_min} min block)")
@@ -275,7 +256,6 @@ with tab_fi: render_synchronized_matrix("fill_slots", "fi", "Fill")
 # --- 7. DYNAMIC QUEUE MANAGEMENT CONFIGURATION TAB ---
 with tab_mgmt:
     st.header("⚙️ System Queue & Target Goal Adjustments")
-    st.markdown("Add, edit targets, or delete tracking line items.")
     st.markdown("---")
     
     if not is_manager:
@@ -304,7 +284,8 @@ with tab_mgmt:
             
             if not all_qs:
                 st.info("No customized tracking queues available.")
-            for q_prefix, q_name, q_goal in all_qs:
+            for q_row in all_qs:
+                q_prefix, q_name, q_goal = q_row["dept_prefix"], q_row["queue_name"], q_row["goal_target"]
                 dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
                 with st.container(border=True):
                     st.markdown(f"**[{dept_lbl}]** `{q_name}`")
@@ -327,12 +308,12 @@ with tab_analytics:
     for table, label in labels_map.items():
         local_cursor.execute(f"SELECT tech_name, input_number, supervisor_notified, submitted FROM {table}")
         for row in local_cursor.fetchall():
-            if row[3] == 1:
+            if row["submitted"] == 1:
                 totals["Blocks"] += 1
-                totals["Units"] += int(row[1])
+                totals["Units"] += int(row["input_number"])
                 dept_chart_series[label] += 1
-                tech_chart_series[row[0]] = tech_chart_series.get(row[0], 0) + int(row[1])
-            if row[2] == 1: totals["Alerts"] += 1
+                tech_chart_series[row["tech_name"]] = tech_chart_series.get(row["tech_name"], 0) + int(row["input_number"])
+            if row["supervisor_notified"] == 1: totals["Alerts"] += 1
 
     k1, k2, k3 = st.columns(3)
     k1.metric("⏱️ Completed Shift Blocks", f"{totals['Blocks']} Blocks")
@@ -345,13 +326,14 @@ with tab_analytics:
     st.markdown("### Operational Load Volume by Department")
     st.line_chart(dept_chart_series)
 
-# --- 9. BUSINESS-WIDE VERIFICATION CHECKLIST ---
+# --- 9. BUSINESS-WIDE VERIFICATION CHECKLIST (ROBUST RE-ANCHOR) ---
 st.markdown("<br><br>", unsafe_allow_html=True)
 with st.container(border=True):
     st.header("📋 Global Facility Daily Queue Verification Log (Business-Wide)")
     local_cursor = conn.cursor()
     local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
     chk = local_cursor.fetchone()
+    
     if not chk:
         local_cursor.execute("INSERT OR IGNORE INTO daily_checklist (log_date) VALUES (?)", (CURRENT_DATE,))
         conn.commit()
@@ -361,9 +343,9 @@ with st.container(border=True):
     c_col, f_col = st.columns([2, 1])
     with f_col:
         with st.container(border=True):
-            t_obj = datetime.strptime(chk[6], "%H:%M").time()
+            t_obj = datetime.strptime(chk["reminder_time"], "%H:%M").time()
             new_target_time = st.time_input("Set Verification Deadline:", value=t_obj, key="checklist_deadline_widget")
-            if new_target_time.strftime("%H:%M") != chk[6]:
+            if new_target_time.strftime("%H:%M") != chk["reminder_time"]:
                 local_cursor.execute("UPDATE daily_checklist SET reminder_time=? WHERE log_date=?", (new_target_time.strftime("%H:%M"), CURRENT_DATE))
                 conn.commit()
                 st.rerun()
@@ -373,37 +355,44 @@ with st.container(border=True):
             opt = ["Pending", "Yes", "No"]
             
             # Row 1: Rejection Queue
-            r1_col1, r1_col2 = st.columns([2, 1])
-            r1 = r1_col1.radio("1. Rejection Queue Status", opt, index=opt.index(chk[1]), horizontal=True)
-            r1_by = r1_col2.text_input("Checked By:", value=chk[8] if chk[8] else "", key="chk_by_r1", placeholder="Initials/Name")
+            r1_c1, r1_c2, r1_c3 = st.columns([2, 1, 2])
+            r1 = r1_c1.radio("1. Rejection Queue Status", opt, index=opt.index(chk["rejection_queue"]), horizontal=True)
+            r1_by = r1_c2.text_input("Sign:", value=chk["rejection_queue_by"], key="by_r1", placeholder="User")
+            r1_nt = r1_c3.text_input("Operational Notes:", value=chk["rejection_queue_notes"], key="nt_r1", placeholder="Add context...")
             
             # Row 2: PA Queue
-            r2_col1, r2_col2 = st.columns([2, 1])
-            r2 = r2_col1.radio("2. PA Queue Status", opt, index=opt.index(chk[2]), horizontal=True)
-            r2_by = r2_col2.text_input("Checked By:", value=chk[9] if chk[9] else "", key="chk_by_r2", placeholder="Initials/Name")
+            r2_c1, r2_c2, r2_c3 = st.columns([2, 1, 2])
+            r2 = r2_c1.radio("2. PA Queue Status", opt, index=opt.index(chk["pa_queue"]), horizontal=True)
+            r2_by = r2_c2.text_input("Sign:", value=chk["pa_queue_by"], key="by_r2", placeholder="User")
+            r2_nt = r2_c3.text_input("Operational Notes:", value=chk["pa_queue_notes"], key="nt_r2", placeholder="Add context...")
             
             # Row 3: Untransmitted Claims
-            r3_col1, r3_col2 = st.columns([2, 1])
-            r3 = r3_col1.radio("3. Untransmitted Claims Status", opt, index=opt.index(chk[3]), horizontal=True)
-            r3_by = r3_col2.text_input("Checked By:", value=chk[10] if chk[10] else "", key="chk_by_r3", placeholder="Initials/Name")
+            r3_c1, r3_c2, r3_c3 = st.columns([2, 1, 2])
+            r3 = r3_c1.radio("3. Untransmitted Claims Status", opt, index=opt.index(chk["untransmitted_claims"]), horizontal=True)
+            r3_by = r3_c2.text_input("Sign:", value=chk["untransmitted_claims_by"], key="by_r3", placeholder="User")
+            r3_nt = r3_c3.text_input("Operational Notes:", value=chk["untransmitted_claims_notes"], key="nt_r3", placeholder="Add context...")
             
             # Row 4: Future Bill
-            r4_col1, r4_col2 = st.columns([2, 1])
-            r4 = r4_col1.radio("4. Future Bill Status", opt, index=opt.index(chk[4]), horizontal=True)
-            r4_by = r4_col2.text_input("Checked By:", value=chk[11] if chk[11] else "", key="chk_by_r4", placeholder="Initials/Name")
+            r4_c1, r4_c2, r4_c3 = st.columns([2, 1, 2])
+            r4 = r4_c1.radio("4. Future Bill Status", opt, index=opt.index(chk["future_bill"]), horizontal=True)
+            r4_by = r4_c2.text_input("Sign:", value=chk["future_bill_by"], key="by_r4", placeholder="User")
+            r4_nt = r4_c3.text_input("Operational Notes:", value=chk["future_bill_notes"], key="nt_r4", placeholder="Add context...")
             
             # Row 5: Data-Re-Entry
-            r5_col1, r5_col2 = st.columns([2, 1])
-            r5 = r5_col1.radio("5. Data-Re-Entry Status", opt, index=opt.index(chk[5]), horizontal=True)
-            r5_by = r5_col2.text_input("Checked By:", value=chk[12] if chk[12] else "", key="chk_by_r5", placeholder="Initials/Name")
+            r5_c1, r5_c2, r5_c3 = st.columns([2, 1, 2])
+            r5 = r5_c1.radio("5. Data-Re-Entry Status", opt, index=opt.index(chk["data_re_entry"]), horizontal=True)
+            r5_by = r5_c2.text_input("Sign:", value=chk["data_re_entry_by"], key="by_r5", placeholder="User")
+            r5_nt = r5_c3.text_input("Operational Notes:", value=chk["data_re_entry_notes"], key="nt_r5", placeholder="Add context...")
             
             if st.form_submit_button("Save Global Checklist Progress", type="primary", use_container_width=True):
                 local_cursor.execute("""
                     UPDATE daily_checklist 
                     SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=?,
-                        rejection_queue_by=?, pa_queue_by=?, untransmitted_claims_by=?, future_bill_by=?, data_re_entry_by=?
+                        rejection_queue_by=?, rejection_queue_notes=?, pa_queue_by=?, pa_queue_notes=?, 
+                        untransmitted_claims_by=?, untransmitted_claims_notes=?, future_bill_by=?, future_bill_notes=?, 
+                        data_re_entry_by=?, data_re_entry_notes=?
                     WHERE log_date=?
-                """, (r1, r2, r3, r4, r5, r1_by, r2_by, r3_by, r4_by, r5_by, CURRENT_DATE))
+                """, (r1, r2, r3, r4, r5, r1_by, r1_nt, r2_by, r2_nt, r3_by, r3_nt, r4_by, r4_nt, r5_by, r5_nt, CURRENT_DATE))
                 conn.commit()
                 st.rerun()
 
@@ -412,43 +401,38 @@ with st.container(border=True):
     alert_target_datetime = datetime.combine(sys_now.date(), t_obj)
     escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
     
-    # 1. CRITICAL GATEWAY: Only evaluate if the current time has hit or passed the deadline
     if sys_now >= alert_target_datetime:
-        
         queue_map = [
-            {"name": "Rejection Queue", "status": r1, "user": r1_by},
-            {"name": "PA Queue", "status": r2, "user": r2_by},
-            {"name": "Untransmitted Claims", "status": r3, "user": r3_by},
-            {"name": "Future Bill", "status": r4, "user": r4_by},
-            {"name": "Data-Re-Entry", "status": r5, "user": r5_by},
+            {"name": "Rejection Queue", "status": r1, "user": r1_by, "note": r1_nt},
+            {"name": "PA Queue", "status": r2, "user": r2_by, "note": r2_nt},
+            {"name": "Untransmitted Claims", "status": r3, "user": r3_by, "note": r3_nt},
+            {"name": "Future Bill", "status": r4, "user": r4_by, "note": r4_nt},
+            {"name": "Data-Re-Entry", "status": r5, "user": r5_by, "note": r5_nt},
         ]
         
-        # 2. FILTER LAYER: Isolate only exceptions (Pending or No) and format them individually
         exception_lines = []
         for q in queue_map:
+            user_string = f" [By: {q['user'].strip()}]" if q['user'].strip() else ""
+            note_string = f" - Note: \"{q['note'].strip()}\"" if q['note'].strip() else ""
+            
             if q["status"] == "Pending":
                 exception_lines.append(f"❌ {q['name']}: PENDING")
             elif q["status"] == "No":
-                sign_off = f" by {q['user'].strip()}" if q['user'].strip() else ""
-                exception_lines.append(f"⚠️ {q['name']}: MARKED NO{sign_off}")
+                exception_lines.append(f"⚠️ {q['name']}: MARKED NO{user_string}{note_string}")
         
-        # 3. DISPATCH LAYER: Only text the team if there is actually an issue to report
         if exception_lines:
             status_ledger_string = "\n".join(exception_lines)
             
-            # Scenario A: Warning Reminder Window (Between Deadline and 1-Hour Grace Window)
             if sys_now < escalation_target_datetime:
                 dispatch_real_time_alert(
                     f"⚠️ **FACILITY REMINDER: DEADLINE REACHED** ⚠️\n"
-                    f"The following items require immediate operational attention:\n\n"
+                    f"The following exceptions require immediate operational adjustment:\n\n"
                     f"{status_ledger_string}"
                 )
-                
-            # Scenario B: Critical Late Escalation Window (Past 1-Hour Grace Window)
-            elif chk[7] == 0:
+            elif chk["supervisor_escaped"] == 0:
                 dispatch_real_time_alert(
                     f"🚨 **CRITICAL COMPLIANCE ESCALATION: PAST GRACE WINDOW** 🚨\n"
-                    f"The following facility items remain unresolved past the 1-hour grace timeline:\n\n"
+                    f"The following facility lines remain incomplete past the 1-hour grace parameters:\n\n"
                     f"{status_ledger_string}"
                 )
                 local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
