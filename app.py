@@ -412,36 +412,45 @@ with st.container(border=True):
     alert_target_datetime = datetime.combine(sys_now.date(), t_obj)
     escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
     
-    # Track the active state of each queue for descriptive reporting
-    queue_map = [
-        {"name": "Rejection Queue", "status": r1, "user": r1_by},
-        {"name": "PA Queue", "status": r2, "user": r2_by},
-        {"name": "Untransmitted Claims", "status": r3, "user": r3_by},
-        {"name": "Future Bill", "status": r4, "user": r4_by},
-        {"name": "Data-Re-Entry", "status": r5, "user": r5_by},
-    ]
-    
-    missing_queues = [f"{q['name']}" for q in queue_map if q["status"] == "Pending"]
-    signed_queues = [f"{q['name']} ({q['status']} by {q['user'] if q['user'] else 'Unknown'})" for q in queue_map if q["status"] != "Pending"]
-
-    if missing_queues:
-        # Construct dynamic summaries for cleaner alert payloads
-        missing_str = ", ".join(missing_queues)
-        completed_str = ", ".join(signed_queues) if signed_queues else "None"
+    # 1. CRITICAL GATEWAY: Only evaluate if the current time has hit or passed the deadline
+    if sys_now >= alert_target_datetime:
         
-        # Warning Reminder Window (Between Deadline and Grace Window)
-        if alert_target_datetime <= sys_now < escalation_target_datetime:
-            dispatch_real_time_alert(
-                f"⚠️ REMINDER: The following facility queues are still PENDING: {missing_str}.\n"
-                f"Processed So Far: {completed_str}"
-            )
+        queue_map = [
+            {"name": "Rejection Queue", "status": r1, "user": r1_by},
+            {"name": "PA Queue", "status": r2, "user": r2_by},
+            {"name": "Untransmitted Claims", "status": r3, "user": r3_by},
+            {"name": "Future Bill", "status": r4, "user": r4_by},
+            {"name": "Data-Re-Entry", "status": r5, "user": r5_by},
+        ]
+        
+        # 2. FILTER LAYER: Isolate only exceptions (Pending or No) and format them individually
+        exception_lines = []
+        for q in queue_map:
+            if q["status"] == "Pending":
+                exception_lines.append(f"❌ {q['name']}: PENDING")
+            elif q["status"] == "No":
+                sign_off = f" by {q['user'].strip()}" if q['user'].strip() else ""
+                exception_lines.append(f"⚠️ {q['name']}: MARKED NO{sign_off}")
+        
+        # 3. DISPATCH LAYER: Only text the team if there is actually an issue to report
+        if exception_lines:
+            status_ledger_string = "\n".join(exception_lines)
             
-        # Critical Late Escalation Window (Past 1-Hour Grace Window)
-        elif sys_now >= escalation_target_datetime and chk[7] == 0:
-            dispatch_real_time_alert(
-                f"🚨 LATE COMPLIANCE ESCALATION: The following business queues remain unchecked past the 1-hour grace window: {missing_str}.\n"
-                f"Verified Actions Taken: {completed_str}"
-            )
-            local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
-            conn.commit()
-            st.rerun()
+            # Scenario A: Warning Reminder Window (Between Deadline and 1-Hour Grace Window)
+            if sys_now < escalation_target_datetime:
+                dispatch_real_time_alert(
+                    f"⚠️ **FACILITY REMINDER: DEADLINE REACHED** ⚠️\n"
+                    f"The following items require immediate operational attention:\n\n"
+                    f"{status_ledger_string}"
+                )
+                
+            # Scenario B: Critical Late Escalation Window (Past 1-Hour Grace Window)
+            elif chk[7] == 0:
+                dispatch_real_time_alert(
+                    f"🚨 **CRITICAL COMPLIANCE ESCALATION: PAST GRACE WINDOW** 🚨\n"
+                    f"The following facility items remain unresolved past the 1-hour grace timeline:\n\n"
+                    f"{status_ledger_string}"
+                )
+                local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
+                conn.commit()
+                st.rerun()
