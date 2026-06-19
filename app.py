@@ -16,11 +16,29 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- HEARTBEAT ENGINE (Forces Streamlit to refresh the UI every 30 seconds) ---
-# This prevents the countdown timers from looking "stuck" or frozen.
-st.logo("https://img.icons8.com/flat-round/64/time-span.png-disabled", icon_image=None) # cosmetic placeholder anchor
-if "last_heartbeat" not in st.session_state:
-    st.session_state.last_heartbeat = datetime.now()
+# --- TRUE BROWSER HEARTBEAT ENGINE ---
+# This injects a hidden iframe that executes a JavaScript loop to pull the 
+# parent Streamlit widget array and force a rerun event node every 15 seconds.
+st.components.v1.html(
+    """
+    <script>
+        const interval = setInterval(function() {
+            window.parent.document.querySelector('.stButton button')?.click();
+            // Fallback strategy if button anchors are changing context:
+            const streamlitDoc = window.parent.document;
+            const updateTrigger = streamlitDoc.createElement('button');
+            updateTrigger.style.display = 'none';
+            streamlitDoc.body.appendChild(updateTrigger);
+            updateTrigger.addEventListener('click', () => {
+                window.parent.postMessage({type: 'streamlit:rerun'}, '*');
+            });
+            window.parent.postMessage({type: 'streamlit:render'}, '*');
+        }, 15000); // 15000ms = 15 Seconds Heartbeat Ticker
+    </script>
+    """,
+    height=0,
+    width=0,
+)
 
 # --- 2. DATABASE SETUP ---
 def init_shared_db():
@@ -471,9 +489,3 @@ with st.container(border=True):
                 local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
                 conn.commit()
                 st.rerun()
-
-# --- DYNAMIC APP-WIDE HEARTBEAT AUTO-REFRESH MATRIX ---
-# If 30 seconds have elapsed since the last render pass, force a visual refresh to update clock data.
-if (datetime.now() - st.session_state.last_heartbeat).total_seconds() > 30:
-    st.session_state.last_heartbeat = datetime.now()
-    st.rerun()
