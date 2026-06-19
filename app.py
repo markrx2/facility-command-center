@@ -55,7 +55,7 @@ def init_shared_db():
         )
     """)
     
-    # Seed default data if table is brand new so the app isn't blank
+    # Core seeding mechanism: ensures tables are populated for all departments
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
         defaults = [
@@ -64,7 +64,7 @@ def init_shared_db():
             ("sh", "Standard Ground Sorting", "40 orders"), ("sh", "Priority/Overnight Air", "20 shipments"),
             ("fi", "Automated Dispensing", "10 cells"), ("fi", "Manual Counter Line", "50 fills")
         ]
-        cursor.executemany("INSERT INTO dynamic_queues VALUES (?, ?, ?)", defaults)
+        cursor.executemany("INSERT OR IGNORE INTO dynamic_queues VALUES (?, ?, ?)", defaults)
         
     conn.commit()
     return conn
@@ -87,7 +87,7 @@ def dispatch_real_time_alert(message_body):
 # --- 4. MANAGER OVERRIDE AUTHENTICATION LAYER ---
 def check_manager_access():
     st.sidebar.header("🔐 Administrative Controls")
-    pwd_input = st.sidebar.text_input("Enter Manager Override Password:", type="password")
+    pwd_input = st.sidebar.text_input("Enter Manager Override Password:", type="password", key="mgr_pwd_input_field")
     if pwd_input == "admin123":
         st.sidebar.success("🔑 Admin Privileges Active")
         return True
@@ -99,21 +99,33 @@ is_manager = check_manager_access()
 
 # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
 def render_synchronized_matrix(db_table, prefix, dept_label):
-    # Create isolated cursor for this execution track
     local_cursor = conn.cursor()
     
-    # Pull fresh queues out of the dynamic database table
+    # Always forcefully sync base queues if a department was left empty
+    local_cursor.execute("SELECT COUNT(*) FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
+    if cursor.fetchone()[0] == 0:
+        emergency_defaults = {
+            "de": [("Queue Alpha - Tier 1", "15 tickets"), ("Queue Beta - Network Ops", "5 alerts")],
+            "cc": [("Inbound Support Line", "20 calls"), ("Outbound Follow-ups", "15 checks")],
+            "sh": [("Standard Ground Sorting", "40 orders"), ("Priority/Overnight Air", "20 shipments")],
+            "fi": [("Automated Dispensing", "10 cells"), ("Manual Counter Line", "50 fills")]
+        }
+        for q_n, g_t in emergency_defaults[prefix]:
+            local_cursor.execute("INSERT OR IGNORE INTO dynamic_queues VALUES (?, ?, ?)", (prefix, q_n, g_t))
+        conn.commit()
+
+    # Pull fresh operational paths
     local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
     goals_dict = {row[0]: row[1] for row in local_cursor.fetchall()}
     
     local_cursor.execute("SELECT tech_name FROM global_roster WHERE dept_prefix=?", (prefix,))
     active_roster = [row[0] for row in local_cursor.fetchall()]
         
-    # Roster Management Container
-    with st.expander(f"➕ Manage Live {dept_label} On-Duty Roster"):
+    # Roster management module
+    with st.expander(f"➕ Manage Live {dept_label} On-Duty Roster", expanded=True):
         col_in, col_bt = st.columns([3, 1])
         with col_in:
-            new_worker = st.text_input("Enter Employee Name:", key=f"add_input_{prefix}").strip()
+            new_worker = st.text_input(f"Enter Employee Name for {dept_label}:", key=f"add_input_{prefix}").strip()
         with col_bt:
             st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
             if st.button("Add to Floor", key=f"add_btn_{prefix}", use_container_width=True) and new_worker:
@@ -122,8 +134,12 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     conn.commit()
                     st.rerun()
 
+    if not active_roster:
+        st.info(f"💡 No personnel assigned to {dept_label} currently. Add employees above to populate production slots.")
+        return
+
     for worker in active_roster:
-        st.subheader(f"👤 TECHNICIAN: {worker.upper()}")
+        st.markdown(f"### 👤 TECHNICIAN: {worker.upper()}")
         cols = st.columns(4)
         
         for slot_num in range(1, 5):
@@ -133,7 +149,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
                     
-                    # CONDITION A: Unstarted Slot Container
                     if not slot_row:
                         if goals_dict:
                             chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{worker}_{slot_num}")
@@ -144,9 +159,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 conn.commit()
                                 st.rerun()
                         else:
-                            st.warning("Please add queues in management tab.")
-                            
-                    # CONDITION B: Clock running or finished
+                            st.warning("Please configure queues in Management panel.")
                     else:
                         _, _, _, db_queue, db_goal, db_start, db_input, db_t_not, db_s_not, db_sub = slot_row
                         st.markdown(f"Queue: `{db_queue}`")
@@ -157,7 +170,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         escalation_time = end_time + timedelta(minutes=10)
                         current_now = datetime.now()
                         
-                        # Manager Override Action Box mid-timer
                         if is_manager:
                             if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{worker}_{slot_num}", use_container_width=True, type="secondary"):
                                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
@@ -205,6 +217,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.rerun()
 
 # --- 6. CORE APP ROUTING INTERFACE ---
+st.title("⏱️ Enterprise Facility Command Center")
 tab_de, tab_cc, tab_sh, tab_fi, tab_analytics, tab_mgmt = st.tabs([
     "💻 Data Entry Line", "📞 Call Center Desk", "📦 Shipping Floor", "🧪 Fill Department", "📊 Cumulative Analytics", "⚙️ Queue Management"
 ])
@@ -217,22 +230,22 @@ with tab_fi: render_synchronized_matrix("fill_slots", "fi", "Fill")
 # --- 7. DYNAMIC QUEUE MANAGEMENT CONFIGURATION TAB ---
 with tab_mgmt:
     st.header("⚙️ System Queue & Target Goal Adjustments")
-    st.markdown("Add, edit targets, or delete tracking line items. *Requires an active Manager Override Password in the sidebar.*")
+    st.markdown("Add, edit targets, or delete tracking line items.")
     st.markdown("---")
     
     if not is_manager:
-        st.warning("🔒 Access Locked: Enter the valid password in the left sidebar to unlock modifications.")
+        st.warning("🔒 Access Locked: Enter the valid password (`admin123`) in the left sidebar to unlock modifications.")
     else:
         m_col1, m_col2 = st.columns(2)
         local_cursor = conn.cursor()
         
         with m_col1:
             st.subheader("➕ Create Custom Queue Trackers")
-            target_dept = st.selectbox("Select Department Destination:", [("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")])
-            new_q_name = st.text_input("New Queue Name:", placeholder="e.g., Priority Tier 3 Verification").strip()
-            new_q_goal = st.text_input("Production Unit Goal Target:", placeholder="e.g., 25 claims processed").strip()
+            target_dept = st.selectbox("Select Department Destination:", [("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")], key="mgmt_dept_selector")
+            new_q_name = st.text_input("New Queue Name:", placeholder="e.g., Priority Tier 3 Verification", key="mgmt_q_name_input").strip()
+            new_q_goal = st.text_input("Production Unit Goal Target:", placeholder="e.g., 25 claims processed", key="mgmt_goal_input").strip()
             
-            if st.button("Save New Queue Component", type="primary", use_container_width=True):
+            if st.button("Save New Queue Component", type="primary", use_container_width=True, key="mgmt_save_btn"):
                 if new_q_name and new_q_goal:
                     local_cursor.execute("INSERT OR REPLACE INTO dynamic_queues VALUES (?, ?, ?)", (target_dept[1], new_q_name, new_q_goal))
                     conn.commit()
@@ -244,13 +257,15 @@ with tab_mgmt:
             local_cursor.execute("SELECT dept_prefix, queue_name, goal_target FROM dynamic_queues")
             all_qs = local_cursor.fetchall()
             
+            if not all_qs:
+                st.info("No customized tracking queues available.")
             for q_prefix, q_name, q_goal in all_qs:
                 dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
                 with st.container(border=True):
                     st.markdown(f"**[{dept_lbl}]** `{q_name}`")
                     st.caption(f"Goal Vector: {q_goal}")
                     
-                    if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{q_name}"):
+                    if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{q_name}", use_container_width=True):
                         local_cursor.execute("DELETE FROM dynamic_queues WHERE dept_prefix=? AND queue_name=?", (q_prefix, q_name))
                         conn.commit()
                         st.rerun()
@@ -302,7 +317,7 @@ with st.container(border=True):
     with f_col:
         with st.container(border=True):
             t_obj = datetime.strptime(chk[6], "%H:%M").time()
-            new_target_time = st.time_input("Set Verification Deadline:", value=t_obj)
+            new_target_time = st.time_input("Set Verification Deadline:", value=t_obj, key="checklist_deadline_widget")
             if new_target_time.strftime("%H:%M") != chk[6]:
                 local_cursor.execute("UPDATE daily_checklist SET reminder_time=? WHERE log_date=?", (new_target_time.strftime("%H:%M"), CURRENT_DATE))
                 conn.commit()
