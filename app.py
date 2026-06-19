@@ -3,6 +3,7 @@ import sqlite3
 import time
 import requests
 import hashlib
+import re
 from datetime import datetime, timedelta
 
 # --- 1. PAGE SETUP & COMPONENT STYLING ---
@@ -148,7 +149,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         return
 
     for worker in active_roster:
-        # Create a unique MD5 hash signature of the worker's name to guarantee isolated widget IDs
         w_id = hashlib.md5(worker.encode('utf-8')).hexdigest()[:8]
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()}")
@@ -197,6 +197,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         
                         start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
                         end_time = start_time + timedelta(minutes=db_dur_min)
+                        
+                        # New 15-Minute Alert Threshold
+                        fifteen_min_overdue_time = end_time + timedelta(minutes=15)
                         escalation_time = end_time + timedelta(minutes=10)
                         current_now = datetime.now()
                         
@@ -219,6 +222,19 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 
+                            # --- NEW: Check if metrics are missing 15+ minutes after expiration ---
+                            if current_now >= fifteen_min_overdue_time and db_s_not < 2:
+                                dispatch_real_time_alert(
+                                    f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\n"
+                                    f"Technician: {worker.upper()}\n"
+                                    f"Department: {dept_label}\n"
+                                    f"Slot: {slot_num} | Queue: `{db_queue}`\n"
+                                    f"Status: **Metrics have NOT been logged** and 15 minutes have passed since the block expired."
+                                )
+                                # Setting supervisor tracking state value to 2 guarantees this won't loop fire 
+                                local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=2 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                                conn.commit()
+
                             if current_now < escalation_time:
                                 grace = escalation_time - current_now
                                 gm, gs = divmod(grace.seconds, 60)
@@ -228,11 +244,29 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
                                     local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                     conn.commit()
-                                st.error("🚨 Supervisor alert sent to Google Chat.")
+                                if db_s_not == 1:
+                                    st.error("🚨 Supervisor alert sent to Google Chat.")
+                                elif db_s_not == 2:
+                                    st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
                         
                         if not db_sub:
                             val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{w_id}_{slot_num}")
                             if st.button("Submit Metrics", key=f"sub_{prefix}_{w_id}_{slot_num}", type="primary", use_container_width=True) and val is not None:
+                                target_numeric_value = 0
+                                match_digits = re.search(r'\d+', str(db_goal))
+                                if match_digits:
+                                    target_numeric_value = int(match_digits.group())
+                                
+                                if val < target_numeric_value:
+                                    dispatch_real_time_alert(
+                                        f"📉 **PRODUCTION ALERT: GOAL NOT MET** 📉\n"
+                                        f"Technician: {worker.upper()}\n"
+                                        f"Department: {dept_label}\n"
+                                        f"Queue Segment: {db_queue}\n"
+                                        f"Assigned Goal Vector: {db_goal}\n"
+                                        f"Logged Metrics Value: **{val}** (Deficit of {target_numeric_value - val} units)"
+                                    )
+                                
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 st.rerun()
@@ -317,7 +351,7 @@ with tab_analytics:
                 totals["Units"] += int(row["input_number"])
                 dept_chart_series[label] += 1
                 tech_chart_series[row["tech_name"]] = tech_chart_series.get(row["tech_name"], 0) + int(row["input_number"])
-            if row["supervisor_notified"] == 1: totals["Alerts"] += 1
+            if int(row["supervisor_notified"]) > 0: totals["Alerts"] += 1
 
     k1, k2, k3 = st.columns(3)
     k1.metric("⏱️ Completed Shift Blocks", f"{totals['Blocks']} Blocks")
@@ -395,7 +429,6 @@ with st.container(border=True):
                 conn.commit()
                 st.rerun()
 
-    # --- Fixed Grace Period & Multi-tab Exception Trigger Engine ---
     sys_now = datetime.now()
     alert_target_datetime = datetime.combine(sys_now.date(), t_obj)
     escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
