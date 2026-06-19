@@ -1,6 +1,5 @@
 import streamlit as st
 import sqlite3
-import time
 import requests
 import hashlib
 import re
@@ -16,6 +15,12 @@ st.markdown("""
     .stButton>button { border-radius: 6px; }
     </style>
 """, unsafe_allow_html=True)
+
+# --- HEARTBEAT ENGINE (Forces Streamlit to refresh the UI every 30 seconds) ---
+# This prevents the countdown timers from looking "stuck" or frozen.
+st.logo("https://img.icons8.com/flat-round/64/time-span.png-disabled", icon_image=None) # cosmetic placeholder anchor
+if "last_heartbeat" not in st.session_state:
+    st.session_state.last_heartbeat = datetime.now()
 
 # --- 2. DATABASE SETUP ---
 def init_shared_db():
@@ -129,7 +134,6 @@ if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type
         sidebar_cursor.execute("INSERT OR IGNORE INTO global_roster (dept_prefix, tech_name) VALUES (?, ?)", (dest_dept[1], new_worker_name))
         conn.commit()
         st.sidebar.success(f"Deployed {new_worker_name} to {dest_dept[0]}!")
-        time.sleep(0.4)
         st.rerun()
     else:
         st.sidebar.warning("Please type a valid employee name first.")
@@ -198,7 +202,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
                         end_time = start_time + timedelta(minutes=db_dur_min)
                         
-                        # New 15-Minute Alert Threshold
                         fifteen_min_overdue_time = end_time + timedelta(minutes=15)
                         escalation_time = end_time + timedelta(minutes=10)
                         current_now = datetime.now()
@@ -222,7 +225,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 
-                            # --- NEW: Check if metrics are missing 15+ minutes after expiration ---
                             if current_now >= fifteen_min_overdue_time and db_s_not < 2:
                                 dispatch_real_time_alert(
                                     f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\n"
@@ -231,7 +233,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     f"Slot: {slot_num} | Queue: `{db_queue}`\n"
                                     f"Status: **Metrics have NOT been logged** and 15 minutes have passed since the block expired."
                                 )
-                                # Setting supervisor tracking state value to 2 guarantees this won't loop fire 
                                 local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=2 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
 
@@ -470,3 +471,9 @@ with st.container(border=True):
                 local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
                 conn.commit()
                 st.rerun()
+
+# --- DYNAMIC APP-WIDE HEARTBEAT AUTO-REFRESH MATRIX ---
+# If 30 seconds have elapsed since the last render pass, force a visual refresh to update clock data.
+if (datetime.now() - st.session_state.last_heartbeat).total_seconds() > 30:
+    st.session_state.last_heartbeat = datetime.now()
+    st.rerun()
