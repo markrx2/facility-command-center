@@ -301,7 +301,7 @@ with tab_analytics:
     st.line_chart(dept_chart_series)
 
 # --- 9. BUSINESS-WIDE VERIFICATION CHECKLIST ---
-st.markdown("<br><br>", unsafe_with_html=True)
+st.markdown("<br><br>", unsafe_allow_html=True)
 with st.container(border=True):
     st.header("📋 Global Facility Daily Queue Verification Log (Business-Wide)")
     local_cursor = conn.cursor()
