@@ -2,6 +2,7 @@ import streamlit as st
 import sqlite3
 import time
 import requests
+import hashlib
 from datetime import datetime, timedelta
 
 # --- 1. PAGE SETUP & COMPONENT STYLING ---
@@ -115,7 +116,6 @@ elif pwd_input != "":
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Quick Add Personnel to Floor")
 
-# Form completely stripped down to pure sequential execution layout
 dest_dept = st.sidebar.selectbox("Assign to Department:", options=[
     ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
 ], format_func=lambda x: x[0], key="global_target_dept_sel")
@@ -148,6 +148,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         return
 
     for worker in active_roster:
+        # Create a unique MD5 hash signature of the worker's name to guarantee isolated widget IDs
+        w_id = hashlib.md5(worker.encode('utf-8')).hexdigest()[:8]
+        
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()}")
         cols = st.columns(4)
         
@@ -160,16 +163,16 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     
                     if not slot_row:
                         if goals_dict:
-                            chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{worker}_{slot_num}")
+                            chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{w_id}_{slot_num}")
                             st.caption(f"🎯 Target: {goals_dict[chosen_q]}")
                             
                             durations = {
                                 "30 Minutes": 30, "1 Hour": 60, "2 Hours": 120, "4 Hours": 240, "8 Hours": 480
                             }
-                            chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), index=2, key=f"dur_{prefix}_{worker}_{slot_num}")
+                            chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), index=2, key=f"dur_{prefix}_{w_id}_{slot_num}")
                             chosen_dur_min = durations[chosen_dur_label]
                             
-                            if st.button("🚀 Start Clock", key=f"str_{prefix}_{worker}_{slot_num}", use_container_width=True):
+                            if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 local_cursor.execute(f"""
                                     INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) 
@@ -178,7 +181,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 conn.commit()
                                 st.rerun()
                         else:
-                            st.warning("Please configure queues in Management panel.")
+                            st.warning("Configure queues in Management panel.")
                     else:
                         db_queue = slot_row["queue"]
                         db_goal = slot_row["goal"]
@@ -198,7 +201,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         current_now = datetime.now()
                         
                         if is_manager:
-                            if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{worker}_{slot_num}", use_container_width=True, type="secondary"):
+                            if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 st.rerun()
@@ -209,20 +212,17 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             m, s = divmod(r, 60)
                             st.metric(label="⏳ Time Remaining", value=f"{int(h):02d}:{int(m):02d}:{int(s):02d}")
                             st.progress(1.0 - (rem.total_seconds() / (db_dur_min * 60.0)))
-                            time.sleep(0.5)
-                            st.rerun()
                         elif not db_sub:
                             st.error("🛑 Timer Expired!")
                             if db_t_not == 0:
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
                                 local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
+                                
                             if current_now < escalation_time:
                                 grace = escalation_time - current_now
                                 gm, gs = divmod(grace.seconds, 60)
                                 st.warning(f"⚠️ Escalation in: {int(gm):02d}:{int(gs):02d}")
-                                time.sleep(0.5)
-                                st.rerun()
                             else:
                                 if db_s_not == 0:
                                     dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
@@ -231,14 +231,14 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.error("🚨 Supervisor alert sent to Google Chat.")
                         
                         if not db_sub:
-                            val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{worker}_{slot_num}")
-                            if st.button("Submit Metrics", key=f"sub_{prefix}_{worker}_{slot_num}", type="primary", use_container_width=True) and val is not None:
+                            val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{w_id}_{slot_num}")
+                            if st.button("Submit Metrics", key=f"sub_{prefix}_{w_id}_{slot_num}", type="primary", use_container_width=True) and val is not None:
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
-                            if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{worker}_{slot_num}", use_container_width=True):
+                            if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 st.rerun()
@@ -295,7 +295,7 @@ with tab_mgmt:
                         st.markdown(f"**[{dept_lbl}]** `{q_name}`")
                         st.caption(f"Goal Vector: {q_goal}")
                         
-                        if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{q_name}", use_container_width=True):
+                        if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{hash(q_name)}", use_container_width=True):
                             local_cursor.execute("DELETE FROM dynamic_queues WHERE dept_prefix=? AND queue_name=?", (q_prefix, q_name))
                             conn.commit()
                             st.rerun()
@@ -395,6 +395,7 @@ with st.container(border=True):
                 conn.commit()
                 st.rerun()
 
+    # --- Fixed Grace Period & Multi-tab Exception Trigger Engine ---
     sys_now = datetime.now()
     alert_target_datetime = datetime.combine(sys_now.date(), t_obj)
     escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
