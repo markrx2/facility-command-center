@@ -290,4 +290,4 @@ with tab_mgmt:
                 dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
                 with st.container(border=True):
                     st.markdown(f"**[{dept_lbl}]** `{q_name}`")
-                    st.caption(f"Goal Vector: {
+                    st.caption(f"Goal Vector: {q_goal}")
