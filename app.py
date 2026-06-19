@@ -46,6 +46,12 @@ def init_shared_db():
             )
         """)
         
+        # AUTOMATIC SCHEMA MIGRATION: Forcefully inject column if table already existed without it
+        try:
+            cursor.execute(f"SELECT duration_minutes FROM {dept} LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute(f"ALTER TABLE {dept} ADD COLUMN duration_minutes INTEGER DEFAULT 120")
+        
     # Global daily checklist table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_checklist (
@@ -102,7 +108,7 @@ is_manager = check_manager_access()
 def render_synchronized_matrix(db_table, prefix, dept_label):
     local_cursor = conn.cursor()
     
-    # Always forcefully sync base queues if a department was left empty
+    # Force sync base queues if left empty
     local_cursor.execute("SELECT COUNT(*) FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
     if local_cursor.fetchone()[0] == 0:
         emergency_defaults = {
@@ -115,14 +121,14 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
             local_cursor.execute("INSERT OR IGNORE INTO dynamic_queues VALUES (?, ?, ?)", (prefix, q_n, g_t))
         conn.commit()
 
-    # Pull fresh operational paths
+    # Pull active queues and active personnel
     local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
     goals_dict = {row[0]: row[1] for row in local_cursor.fetchall()}
     
     local_cursor.execute("SELECT tech_name FROM global_roster WHERE dept_prefix=?", (prefix,))
     active_roster = [row[0] for row in local_cursor.fetchall()]
         
-    # Roster management module
+    # Roster Management Module
     with st.expander(f"➕ Manage Live {dept_label} On-Duty Roster", expanded=True):
         col_in, col_bt = st.columns([3, 1])
         with col_in:
