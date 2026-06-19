@@ -103,7 +103,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
     
     # Always forcefully sync base queues if a department was left empty
     local_cursor.execute("SELECT COUNT(*) FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
-    if cursor.fetchone()[0] == 0:
+    if local_cursor.fetchone()[0] == 0:
         emergency_defaults = {
             "de": [("Queue Alpha - Tier 1", "15 tickets"), ("Queue Beta - Network Ops", "5 alerts")],
             "cc": [("Inbound Support Line", "20 calls"), ("Outbound Follow-ups", "15 checks")],
