@@ -18,7 +18,7 @@ st.markdown("""
 # --- 2. DATABASE SETUP (Shared Persistent Multi-User Matrix) ---
 def init_shared_db():
     conn = sqlite3.connect("shared_facility_matrix.db", check_same_thread=False)
-    conn.row_factory = sqlite3.Row  # Enables access via text column names instead of volatile integers
+    conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
     # Global roster table
@@ -65,7 +65,7 @@ def init_shared_db():
         )
     """)
     
-    # SYSTEM UPGRADE MIGRATION: Robust column injection verification for signature tracking & context notes
+    # Dynamic signature tracking & context notes columns
     schema_extensions = [
         ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"),
         ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"),
@@ -79,7 +79,7 @@ def init_shared_db():
         except sqlite3.OperationalError:
             cursor.execute(f"ALTER TABLE daily_checklist ADD COLUMN {col_name} {col_type}")
         
-    # Core seeding mechanism
+    # Seeding defaults
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
         defaults = [
@@ -134,10 +134,10 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
     with st.expander(f"➕ Manage Live {dept_label} On-Duty Roster", expanded=True):
         col_in, col_bt = st.columns([3, 1])
         with col_in:
-            new_worker = st.text_input(f"Enter Employee Name for {dept_label}:", key=f"add_input_{prefix}").strip()
+            new_worker = st.text_input(f"Enter Employee Name for {dept_label}:", key=f"add_input_field_str_{prefix}").strip()
         with col_bt:
             st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
-            if st.button("Add to Floor", key=f"add_btn_{prefix}", use_container_width=True) and new_worker:
+            if st.button("Add to Floor", key=f"add_btn_submit_{prefix}", use_container_width=True) and new_worker:
                 if new_worker not in active_roster:
                     local_cursor.execute("INSERT OR IGNORE INTO global_roster (dept_prefix, tech_name) VALUES (?, ?)", (prefix, new_worker))
                     conn.commit()
@@ -326,7 +326,7 @@ with tab_analytics:
     st.markdown("### Operational Load Volume by Department")
     st.line_chart(dept_chart_series)
 
-# --- 9. BUSINESS-WIDE VERIFICATION CHECKLIST (ROBUST RE-ANCHOR) ---
+# --- 9. BUSINESS-WIDE VERIFICATION CHECKLIST ---
 st.markdown("<br><br>", unsafe_allow_html=True)
 with st.container(border=True):
     st.header("📋 Global Facility Daily Queue Verification Log (Business-Wide)")
