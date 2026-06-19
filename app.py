@@ -71,7 +71,7 @@ def render_synchronized_matrix(db_table, goals_dict, prefix, dept_label):
         with col_in:
             new_worker = st.text_input("Enter Employee Name:", key=f"add_input_{prefix}").strip()
         with col_bt:
-            st.markdown("<div style='padding-top:24px;'></div>", unsafe_with_html=True)
+            st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
             if st.button("Add to Floor", key=f"add_btn_{prefix}", use_container_width=True) and new_worker:
                 if new_worker not in active_roster:
                     cursor.execute("INSERT OR IGNORE INTO global_roster (dept_prefix, tech_name) VALUES (?, ?)", (prefix, new_worker))
