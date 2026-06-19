@@ -114,20 +114,24 @@ elif pwd_input != "":
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Quick Add Personnel to Floor")
-with st.sidebar.form("global_roster_form", clear_on_submit=True):
-    dest_dept = st.selectbox("Assign to Department:", options=[
-        ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
-    ], format_func=lambda x: x[0], key="global_target_dept_sel")
-    new_worker_name = st.text_input("Employee Full Name:", placeholder="John Doe", key="global_name_field").strip()
-    
-    if st.form_submit_button("Deploy to Department Grid", use_container_width=True):
-        if new_worker_name:
-            sidebar_cursor = conn.cursor()
-            sidebar_cursor.execute("INSERT OR IGNORE INTO global_roster (dept_prefix, tech_name) VALUES (?, ?)", (dest_dept[1], new_worker_name))
-            conn.commit()
-            st.success(f"Deployed {new_worker_name} to {dest_dept[0]}!")
-            time.sleep(0.5)
-            st.rerun()
+
+# Form completely stripped down to pure sequential execution layout
+dest_dept = st.sidebar.selectbox("Assign to Department:", options=[
+    ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
+], format_func=lambda x: x[0], key="global_target_dept_sel")
+
+new_worker_name = st.sidebar.text_input("Employee Full Name:", placeholder="John Doe", key="global_name_field").strip()
+
+if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type="primary"):
+    if new_worker_name:
+        sidebar_cursor = conn.cursor()
+        sidebar_cursor.execute("INSERT OR IGNORE INTO global_roster (dept_prefix, tech_name) VALUES (?, ?)", (dest_dept[1], new_worker_name))
+        conn.commit()
+        st.sidebar.success(f"Deployed {new_worker_name} to {dest_dept[0]}!")
+        time.sleep(0.4)
+        st.rerun()
+    else:
+        st.sidebar.warning("Please type a valid employee name first.")
 
 # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
 def render_synchronized_matrix(db_table, prefix, dept_label):
