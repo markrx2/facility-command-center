@@ -183,7 +183,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 gm, gs = divmod(grace.seconds, 60)
                                 st.warning(f"⚠️ Escalation in: {int(gm):02d}:{int(gs):02d}")
                                 time.sleep(0.5)
-                                rerun()
+                                st.rerun()
                             else:
                                 if db_s_not == 0:
                                     dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
