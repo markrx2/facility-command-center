@@ -102,18 +102,32 @@ def dispatch_real_time_alert(message_body):
         st.sidebar.error(f"Google Chat Node Warning: {str(e)}")
     return False
 
-# --- 4. MANAGER OVERRIDE AUTHENTICATION LAYER ---
-def check_manager_access():
-    st.sidebar.header("🔐 Administrative Controls")
-    pwd_input = st.sidebar.text_input("Enter Manager Override Password:", type="password", key="mgr_pwd_input_field")
-    if pwd_input == "admin123":
-        st.sidebar.success("🔑 Admin Privileges Active")
-        return True
-    elif pwd_input != "":
-        st.sidebar.error("❌ Incorrect Password")
-    return False
+# --- 4. GLOBAL SIDEBAR MANAGEMENT CONTROL HUB ---
+st.sidebar.header("🔐 Global System Control Deck")
+pwd_input = st.sidebar.text_input("Enter Manager Override Password:", type="password", key="mgr_pwd_input_field")
+is_manager = False
+if pwd_input == "admin123":
+    st.sidebar.success("🔑 Admin Privileges Active")
+    is_manager = True
+elif pwd_input != "":
+    st.sidebar.error("❌ Incorrect Password")
 
-is_manager = check_manager_access()
+st.sidebar.markdown("---")
+st.sidebar.subheader("➕ Quick Add Personnel to Floor")
+with st.sidebar.form("global_roster_form", clear_on_submit=True):
+    dest_dept = st.selectbox("Assign to Department:", options=[
+        ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
+    ], format_func=lambda x: x[0], key="global_target_dept_sel")
+    new_worker_name = st.text_input("Employee Full Name:", placeholder="John Doe", key="global_name_field").strip()
+    
+    if st.form_submit_button("Deploy to Department Grid", use_container_width=True):
+        if new_worker_name:
+            sidebar_cursor = conn.cursor()
+            sidebar_cursor.execute("INSERT OR IGNORE INTO global_roster (dept_prefix, tech_name) VALUES (?, ?)", (dest_dept[1], new_worker_name))
+            conn.commit()
+            st.success(f"Deployed {new_worker_name} to {dest_dept[0]}!")
+            time.sleep(0.5)
+            st.rerun()
 
 # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
 def render_synchronized_matrix(db_table, prefix, dept_label):
@@ -124,21 +138,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
     
     local_cursor.execute("SELECT tech_name FROM global_roster WHERE dept_prefix=?", (prefix,))
     active_roster = [row["tech_name"] for row in local_cursor.fetchall()]
-        
-    with st.expander(f"➕ Manage Live {dept_label} On-Duty Roster", expanded=True):
-        col_in, col_bt = st.columns([3, 1])
-        with col_in:
-            new_worker = st.text_input(f"Enter Employee Name for {dept_label}:", key=f"add_input_field_str_{prefix}").strip()
-        with col_bt:
-            st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
-            if st.button("Add to Floor", key=f"add_btn_submit_{prefix}", use_container_width=True) and new_worker:
-                if new_worker not in active_roster:
-                    local_cursor.execute("INSERT OR IGNORE INTO global_roster (dept_prefix, tech_name) VALUES (?, ?)", (prefix, new_worker))
-                    conn.commit()
-                    st.rerun()
 
     if not active_roster:
-        st.info(f"💡 No personnel assigned to {dept_label} currently. Add employees above to populate production slots.")
+        st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
     for worker in active_roster:
