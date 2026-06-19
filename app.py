@@ -62,6 +62,20 @@ def init_shared_db():
         )
     """)
     
+    # AUTOMATIC CHECKLIST SCHEMA MIGRATION: Inject signature validation columns
+    signature_cols = [
+        ("rejection_queue_by", "TEXT DEFAULT ''"),
+        ("pa_queue_by", "TEXT DEFAULT ''"),
+        ("untransmitted_claims_by", "TEXT DEFAULT ''"),
+        ("future_bill_by", "TEXT DEFAULT ''"),
+        ("data_re_entry_by", "TEXT DEFAULT ''")
+    ]
+    for col_name, col_type in signature_cols:
+        try:
+            cursor.execute(f"SELECT {col_name} FROM daily_checklist LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute(f"ALTER TABLE daily_checklist ADD COLUMN {col_name} {col_type}")
+        
     # Core seeding mechanism: ensures tables are populated for all departments
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
@@ -357,29 +371,77 @@ with st.container(border=True):
     with c_col:
         with st.form("master_checklist_form"):
             opt = ["Pending", "Yes", "No"]
-            r1 = st.radio("1. Rejection Queue Status", opt, index=opt.index(chk[1]), horizontal=True)
-            r2 = st.radio("2. PA Queue Status", opt, index=opt.index(chk[2]), horizontal=True)
-            r3 = st.radio("3. Untransmitted Claims Status", opt, index=opt.index(chk[3]), horizontal=True)
-            r4 = st.radio("4. Future Bill Status", opt, index=opt.index(chk[4]), horizontal=True)
-            r5 = st.radio("5. Data-Re-Entry Status", opt, index=opt.index(chk[5]), horizontal=True)
+            
+            # Row 1: Rejection Queue
+            r1_col1, r1_col2 = st.columns([2, 1])
+            r1 = r1_col1.radio("1. Rejection Queue Status", opt, index=opt.index(chk[1]), horizontal=True)
+            r1_by = r1_col2.text_input("Checked By:", value=chk[8] if chk[8] else "", key="chk_by_r1", placeholder="Initials/Name")
+            
+            # Row 2: PA Queue
+            r2_col1, r2_col2 = st.columns([2, 1])
+            r2 = r2_col1.radio("2. PA Queue Status", opt, index=opt.index(chk[2]), horizontal=True)
+            r2_by = r2_col2.text_input("Checked By:", value=chk[9] if chk[9] else "", key="chk_by_r2", placeholder="Initials/Name")
+            
+            # Row 3: Untransmitted Claims
+            r3_col1, r3_col2 = st.columns([2, 1])
+            r3 = r3_col1.radio("3. Untransmitted Claims Status", opt, index=opt.index(chk[3]), horizontal=True)
+            r3_by = r3_col2.text_input("Checked By:", value=chk[10] if chk[10] else "", key="chk_by_r3", placeholder="Initials/Name")
+            
+            # Row 4: Future Bill
+            r4_col1, r4_col2 = st.columns([2, 1])
+            r4 = r4_col1.radio("4. Future Bill Status", opt, index=opt.index(chk[4]), horizontal=True)
+            r4_by = r4_col2.text_input("Checked By:", value=chk[11] if chk[11] else "", key="chk_by_r4", placeholder="Initials/Name")
+            
+            # Row 5: Data-Re-Entry
+            r5_col1, r5_col2 = st.columns([2, 1])
+            r5 = r5_col1.radio("5. Data-Re-Entry Status", opt, index=opt.index(chk[5]), horizontal=True)
+            r5_by = r5_col2.text_input("Checked By:", value=chk[12] if chk[12] else "", key="chk_by_r5", placeholder="Initials/Name")
             
             if st.form_submit_button("Save Global Checklist Progress", type="primary", use_container_width=True):
-                local_cursor.execute("UPDATE daily_checklist SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=? WHERE log_date=?", (r1, r2, r3, r4, r5, CURRENT_DATE))
+                local_cursor.execute("""
+                    UPDATE daily_checklist 
+                    SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=?,
+                        rejection_queue_by=?, pa_queue_by=?, untransmitted_claims_by=?, future_bill_by=?, data_re_entry_by=?
+                    WHERE log_date=?
+                """, (r1, r2, r3, r4, r5, r1_by, r2_by, r3_by, r4_by, r5_by, CURRENT_DATE))
                 conn.commit()
                 st.rerun()
 
-    # Checklist background scheduling logic
+    # --- Compliance Tracker & Descriptive Alert Engine ---
     sys_now = datetime.now()
     alert_target_datetime = datetime.combine(sys_now.date(), t_obj)
     escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
     
-    if sys_now >= alert_target_datetime and sys_now < escalation_target_datetime:
-        if "Pending" in [r1, r2, r3, r4, r5]:
-            dispatch_real_time_alert("⚠️ REMINDER: Global daily queue verification checklist fields are still PENDING.")
+    # Track the active state of each queue for descriptive reporting
+    queue_map = [
+        {"name": "Rejection Queue", "status": r1, "user": r1_by},
+        {"name": "PA Queue", "status": r2, "user": r2_by},
+        {"name": "Untransmitted Claims", "status": r3, "user": r3_by},
+        {"name": "Future Bill", "status": r4, "user": r4_by},
+        {"name": "Data-Re-Entry", "status": r5, "user": r5_by},
+    ]
+    
+    missing_queues = [f"{q['name']}" for q in queue_map if q["status"] == "Pending"]
+    signed_queues = [f"{q['name']} ({q['status']} by {q['user'] if q['user'] else 'Unknown'})" for q in queue_map if q["status"] != "Pending"]
+
+    if missing_queues:
+        # Construct dynamic summaries for cleaner alert payloads
+        missing_str = ", ".join(missing_queues)
+        completed_str = ", ".join(signed_queues) if signed_queues else "None"
+        
+        # Warning Reminder Window (Between Deadline and Grace Window)
+        if alert_target_datetime <= sys_now < escalation_target_datetime:
+            dispatch_real_time_alert(
+                f"⚠️ REMINDER: The following facility queues are still PENDING: {missing_str}.\n"
+                f"Processed So Far: {completed_str}"
+            )
             
-    if sys_now >= escalation_target_datetime and chk[7] == 0:
-        if "Pending" in [chk[1], chk[2], chk[3], chk[4], chk[5]]:
-            dispatch_real_time_alert("🚨 LATE COMPLIANCE ESCALATION: Global business operational queues remain unchecked past the 1-hour grace window.")
+        # Critical Late Escalation Window (Past 1-Hour Grace Window)
+        elif sys_now >= escalation_target_datetime and chk[7] == 0:
+            dispatch_real_time_alert(
+                f"🚨 LATE COMPLIANCE ESCALATION: The following business queues remain unchecked past the 1-hour grace window: {missing_str}.\n"
+                f"Verified Actions Taken: {completed_str}"
+            )
             local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
             conn.commit()
             st.rerun()
