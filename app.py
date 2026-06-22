@@ -13,8 +13,18 @@ st.markdown("""
     div[data-testid="stExpander"] { border: 1px solid #e0e0e0; background-color: #ffffff; border-radius: 8px; }
     h3 { margin-top: 15px !important; color: #1e293b; font-weight: 700; }
     .stButton>button { border-radius: 6px; }
-    /* Tighten form cell components horizontally */
-    [data-testid="column"] { padding: 0px 4px !important; }
+    
+    /* Global Compact Padding Tweaks for Dashboard Layout Grid */
+    [data-testid="column"] { padding: 0px 2px !important; }
+    div[data-testid="stForm"] { padding: 8px !important; }
+    
+    /* Shrink sizes of checklist widgets so they pack tightly horizontally */
+    .stRadio div[role="radiogroup"] label { font-size: 11px !important; padding: 2px 4px !important; }
+    div[data-testid="stDateInput"] input { padding: 4px 6px !important; font-size: 12px !important; }
+    div[data-testid="stTextInput"] input { padding: 4px 6px !important; font-size: 12px !important; }
+    div.stMarkdown h5 { font-size: 13px !important; margin-bottom: 2px !important; margin-top: 4px !important; }
+    div.stMarkdown caption { font-size: 10px !important; }
+    hr { margin: 6px 0px !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -393,9 +403,9 @@ with tab_analytics:
     st.line_chart(dept_chart_series)
 
 # --- 9. BUSINESS-WIDE VERIFICATION CHECKLIST ---
-st.markdown("<br><br>", unsafe_allow_html=True)
+st.markdown("<br>", unsafe_allow_html=True)
 with st.container(border=True):
-    st.header("📋 Global Facility Daily Queue Verification Log (Business-Wide)")
+    st.header("📋 Global Facility Daily Queue Verification Log")
     local_cursor = conn.cursor()
     
     try:
@@ -414,7 +424,7 @@ with st.container(border=True):
         local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
         chk = local_cursor.fetchone()
         
-    c_col, f_col = st.columns([2.8, 1])
+    c_col, f_col = st.columns([3.2, 1])
     with f_col:
         with st.container(border=True):
             t_obj = datetime.strptime(chk["reminder_time"], "%H:%M").time()
@@ -436,44 +446,42 @@ with st.container(border=True):
 
             def render_checklist_row(form_container, label, db_prefix, prefix_key):
                 form_container.markdown(f"##### {label}")
-                # Compact width grids adjusted explicitly to map nicely side-by-side
-                cols = form_container.columns([1.3, 1.2, 1.2, 0.8, 0.9, 1.8])
+                # Highly compressed column spacing blueprint
+                cols = form_container.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
                 
-                stored_status = chk[db_prefix] if (db_prefix in chk.keys() and chk[db_prefix]) else "Pending"
-                stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in chk.keys() else ""
-                stored_tdt = chk[f"{db_prefix}_target"] if f"{db_prefix}_target" in chk.keys() else ""
-                stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in chk.keys() else ""
-                stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in chk.keys() else ""
+                row_keys = chk.keys() if hasattr(chk, "keys") else []
+                stored_status = chk[db_prefix] if (db_prefix in row_keys and chk[db_prefix]) else "Pending"
+                stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in row_keys else ""
+                stored_tdt = chk[f"{db_prefix}_target"] if f"{db_prefix}_target" in row_keys else ""
+                stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in row_keys else ""
+                stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
 
                 status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(stored_status if stored_status in opt else "Pending"), horizontal=True, key=f"status_{prefix_key}", label_visibility="collapsed")
-                oldest_dt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}", format="MM/DD/YYYY")
-                target_dt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY")
+                oldest_dt = cols[1].date_input("Oldest", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
+                target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
                 sign_by = cols[3].text_input("Sign", value=stored_by, key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
                 
-                # Dynamic calculated calculation column for window gaps
                 days_gap = (target_dt - oldest_dt).days
                 if days_gap > 7:
-                    cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:5px 2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
+                    cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
                 else:
-                    cols[4].markdown(f"<div style='background-color:#f1f5f9; border:1px solid #cbd5e1; color:#475569; border-radius:4px; text-align:center; padding:5px 2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
+                    cols[4].markdown(f"<div style='background-color:#f1f5f9; border:1px solid #cbd5e1; color:#475569; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
                 
-                notes_val = cols[5].text_input("Notes", value=stored_notes, key=f"nt_{prefix_key}", placeholder="Operational Notes...", label_visibility="collapsed")
+                notes_val = cols[5].text_input("Notes", value=stored_notes, key=f"nt_{prefix_key}", placeholder="Operational notes...", label_visibility="collapsed")
                 form_container.markdown("---")
                 return status_val, oldest_dt.strftime("%m/%d/%Y"), target_dt.strftime("%m/%d/%Y"), sign_by, notes_val
 
             this_form = st.container()
             
-            # Header Legend Labels to guide tracking layout alignment
-            h_cols = this_form.columns([1.3, 1.2, 1.2, 0.8, 0.9, 1.8])
-            h_cols[0].caption("Status Vector")
+            h_cols = this_form.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
+            h_cols[0].caption("Status")
             h_cols[1].caption("Oldest Date")
             h_cols[2].caption("Target Date")
-            h_cols[3].caption("Sign (Initials)")
-            h_cols[4].caption("Aging Backlog")
+            h_cols[3].caption("Sign")
+            h_cols[4].caption("Backlog")
             h_cols[5].caption("Queue Line Comments")
             this_form.markdown("---")
             
-            # 9 Rows with newly requested labels mapped directly to variables
             r1, r1_oldest, r1_target, r1_by, r1_nt = render_checklist_row(this_form, "1. Reject Queue Current", "rejection_queue", "r1")
             r2, r2_oldest, r2_target, r2_by, r2_nt = render_checklist_row(this_form, "2. PA Queue Addressed", "pa_queue", "r2")
             r3, r3_oldest, r3_target, r3_by, r3_nt = render_checklist_row(this_form, "3. Untransmitted Claims Completed", "untransmitted_claims", "r3")
@@ -555,9 +563,13 @@ with st.container(border=True):
         if exception_lines:
             status_ledger_string = "\n".join(exception_lines)
             
+            chk_keys = chk.keys() if hasattr(chk, "keys") else []
+            is_reminder_sent = int(chk["reminder_sent"]) if "reminder_sent" in chk_keys else 0
+            is_sup_escaped = int(chk["supervisor_escaped"]) if "supervisor_escaped" in chk_keys else 0
+            
             # 1. Standard Summary Notification (4:00 PM EST)
             if alert_target_datetime <= sys_now < escalation_target_datetime:
-                if int(chk.get("reminder_sent", 0)) == 0:
+                if is_reminder_sent == 0:
                     dispatch_real_time_alert(
                         f"⚠️ **FACILITY DAILY SUMMARY: ITEMS OUTSTANDING** ⚠️\n"
                         f"The following exceptions require immediate operational adjustment before the grace window closes:\n\n"
@@ -569,7 +581,7 @@ with st.container(border=True):
                     
             # 2. Critical Escalation Notification (5:00 PM EST)
             elif sys_now >= escalation_target_datetime:
-                if int(chk.get("supervisor_escaped", 0)) == 0:
+                if is_sup_escaped == 0:
                     dispatch_real_time_alert(
                         f"🚨 **CRITICAL COMPLIANCE ESCALATION: PAST GRACE WINDOW** 🚨\n"
                         f"The following facility lines remain incomplete past the 1-hour grace parameters:\n\n"
