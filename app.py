@@ -17,8 +17,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- TRUE BROWSER HEARTBEAT ENGINE ---
-# This injects a hidden iframe that executes a JavaScript loop to pull the 
-# parent Streamlit widget array and force a rerun event node every 15 seconds.
 st.components.v1.html(
     """
     <script>
@@ -87,11 +85,11 @@ def init_shared_db():
     """)
     
     schema_extensions = [
-        ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"),
-        ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"),
-        ("untransmitted_claims_by", "TEXT DEFAULT ''"), ("untransmitted_claims_notes", "TEXT DEFAULT ''"),
-        ("future_bill_by", "TEXT DEFAULT ''"), ("future_bill_notes", "TEXT DEFAULT ''"),
-        ("data_re_entry_by", "TEXT DEFAULT ''"), ("data_re_entry_notes", "TEXT DEFAULT ''")
+        ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"), ("rejection_queue_date", "TEXT DEFAULT ''"),
+        ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"), ("pa_queue_date", "TEXT DEFAULT ''"),
+        ("untransmitted_claims_by", "TEXT DEFAULT ''"), ("untransmitted_claims_notes", "TEXT DEFAULT ''"), ("untransmitted_claims_date", "TEXT DEFAULT ''"),
+        ("future_bill_by", "TEXT DEFAULT ''"), ("future_bill_notes", "TEXT DEFAULT ''"), ("future_bill_date", "TEXT DEFAULT ''"),
+        ("data_re_entry_by", "TEXT DEFAULT ''"), ("data_re_entry_notes", "TEXT DEFAULT ''"), ("data_re_entry_date", "TEXT DEFAULT ''")
     ]
     for col_name, col_type in schema_extensions:
         try:
@@ -419,40 +417,66 @@ with st.container(border=True):
         with st.form("master_checklist_form"):
             opt = ["Pending", "Yes", "No"]
             
-            r1_c1, r1_c2, r1_c3 = st.columns([2, 1, 2])
+            def parse_stored_date(val):
+                try:
+                    return datetime.strptime(val, "%Y-%m-%d").date() if val else datetime.now().date()
+                except ValueError:
+                    return datetime.now().date()
+
+            # Row 1: Rejection Queue
+            r1_c1, r1_c2, r1_c3, r1_c4 = st.columns([2, 1.5, 1, 2.5])
             r1 = r1_c1.radio("1. Rejection Queue Status", opt, index=opt.index(chk["rejection_queue"]), horizontal=True)
-            r1_by = r1_c2.text_input("Sign:", value=chk["rejection_queue_by"], key="by_r1", placeholder="User")
-            r1_nt = r1_c3.text_input("Operational Notes:", value=chk["rejection_queue_notes"], key="nt_r1", placeholder="Add context...")
+            r1_dt = r1_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["rejection_queue_date"]), key="dt_r1")
+            r1_by = r1_c3.text_input("Sign:", value=chk["rejection_queue_by"], key="by_r1", placeholder="Initials")
+            r1_nt = r1_c4.text_input("Operational Notes:", value=chk["rejection_queue_notes"], key="nt_r1", placeholder="Add context...")
             
-            r2_c1, r2_c2, r2_c3 = st.columns([2, 1, 2])
+            # Row 2: PA Queue
+            r2_c1, r2_c2, r2_c3, r2_c4 = st.columns([2, 1.5, 1, 2.5])
             r2 = r2_c1.radio("2. PA Queue Status", opt, index=opt.index(chk["pa_queue"]), horizontal=True)
-            r2_by = r2_c2.text_input("Sign:", value=chk["pa_queue_by"], key="by_r2", placeholder="User")
-            r2_nt = r2_c3.text_input("Operational Notes:", value=chk["pa_queue_notes"], key="nt_r2", placeholder="Add context...")
+            r2_dt = r2_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["pa_queue_date"]), key="dt_r2")
+            r2_by = r2_c3.text_input("Sign:", value=chk["pa_queue_by"], key="by_r2", placeholder="Initials")
+            r2_nt = r2_c4.text_input("Operational Notes:", value=chk["pa_queue_notes"], key="nt_r2", placeholder="Add context...")
             
-            r3_c1, r3_c2, r3_c3 = st.columns([2, 1, 2])
+            # Row 3: Untransmitted Claims
+            r3_c1, r3_c2, r3_c3, r3_c4 = st.columns([2, 1.5, 1, 2.5])
             r3 = r3_c1.radio("3. Untransmitted Claims Status", opt, index=opt.index(chk["untransmitted_claims"]), horizontal=True)
-            r3_by = r3_c2.text_input("Sign:", value=chk["untransmitted_claims_by"], key="by_r3", placeholder="User")
-            r3_nt = r3_c3.text_input("Operational Notes:", value=chk["untransmitted_claims_notes"], key="nt_r3", placeholder="Add context...")
+            r3_dt = r3_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["untransmitted_claims_date"]), key="dt_r3")
+            r3_by = r3_c3.text_input("Sign:", value=chk["untransmitted_claims_by"], key="by_r3", placeholder="Initials")
+            r3_nt = r3_c4.text_input("Operational Notes:", value=chk["untransmitted_claims_notes"], key="nt_r3", placeholder="Add context...")
             
-            r4_c1, r4_c2, r4_c3 = st.columns([2, 1, 2])
+            # Row 4: Future Bill
+            r4_c1, r4_c2, r4_c3, r4_c4 = st.columns([2, 1.5, 1, 2.5])
             r4 = r4_c1.radio("4. Future Bill Status", opt, index=opt.index(chk["future_bill"]), horizontal=True)
-            r4_by = r4_c2.text_input("Sign:", value=chk["future_bill_by"], key="by_r4", placeholder="User")
-            r4_nt = r4_c3.text_input("Operational Notes:", value=chk["future_bill_notes"], key="nt_r4", placeholder="Add context...")
+            r4_dt = r4_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["future_bill_date"]), key="dt_r4")
+            r4_by = r4_c3.text_input("Sign:", value=chk["future_bill_by"], key="by_r4", placeholder="Initials")
+            r4_nt = r4_c4.text_input("Operational Notes:", value=chk["future_bill_notes"], key="nt_r4", placeholder="Add context...")
             
-            r5_c1, r5_c2, r5_c3 = st.columns([2, 1, 2])
+            # Row 5: Data-Re-Entry
+            r5_c1, r5_c2, r5_c3, r5_c4 = st.columns([2, 1.5, 1, 2.5])
             r5 = r5_c1.radio("5. Data-Re-Entry Status", opt, index=opt.index(chk["data_re_entry"]), horizontal=True)
-            r5_by = r5_c2.text_input("Sign:", value=chk["data_re_entry_by"], key="by_r5", placeholder="User")
-            r5_nt = r5_c3.text_input("Operational Notes:", value=chk["data_re_entry_notes"], key="nt_r5", placeholder="Add context...")
+            r5_dt = r5_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["data_re_entry_date"]), key="dt_r5")
+            r5_by = r5_c3.text_input("Sign:", value=chk["data_re_entry_by"], key="by_r5", placeholder="Initials")
+            r5_nt = r5_c4.text_input("Operational Notes:", value=chk["data_re_entry_notes"], key="nt_r5", placeholder="Add context...")
             
             if st.form_submit_button("Save Global Checklist Progress", type="primary", use_container_width=True):
                 local_cursor.execute("""
                     UPDATE daily_checklist 
                     SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=?,
-                        rejection_queue_by=?, rejection_queue_notes=?, pa_queue_by=?, pa_queue_notes=?, 
-                        untransmitted_claims_by=?, untransmitted_claims_notes=?, future_bill_by=?, future_bill_notes=?, 
-                        data_re_entry_by=?, data_re_entry_notes=?
+                        rejection_queue_by=?, rejection_queue_notes=?, rejection_queue_date=?,
+                        pa_queue_by=?, pa_queue_notes=?, pa_queue_date=?,
+                        untransmitted_claims_by=?, untransmitted_claims_notes=?, untransmitted_claims_date=?,
+                        future_bill_by=?, future_bill_notes=?, future_bill_date=?,
+                        data_re_entry_by=?, data_re_entry_notes=?, data_re_entry_date=?
                     WHERE log_date=?
-                """, (r1, r2, r3, r4, r5, r1_by, r1_nt, r2_by, r2_nt, r3_by, r3_nt, r4_by, r4_nt, r5_by, r5_nt, CURRENT_DATE))
+                """, (
+                    r1, r2, r3, r4, r5, 
+                    r1_by, r1_nt, r1_dt.strftime("%Y-%m-%d"),
+                    r2_by, r2_nt, r2_dt.strftime("%Y-%m-%d"),
+                    r3_by, r3_nt, r3_dt.strftime("%Y-%m-%d"),
+                    r4_by, r4_nt, r4_dt.strftime("%Y-%m-%d"),
+                    r5_by, r5_nt, r5_dt.strftime("%Y-%m-%d"),
+                    CURRENT_DATE
+                ))
                 conn.commit()
                 st.rerun()
 
@@ -472,27 +496,28 @@ with st.container(border=True):
         escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
         
         queue_map = [
-            {"name": "Rejection Queue", "status": r1, "user": r1_by, "note": r1_nt},
-            {"name": "PA Queue", "status": r2, "user": r2_by, "note": r2_nt},
-            {"name": "Untransmitted Claims", "status": r3, "user": r3_by, "note": r3_nt},
-            {"name": "Future Bill", "status": r4, "user": r4_by, "note": r4_nt},
-            {"name": "Data-Re-Entry", "status": r5, "user": r5_by, "note": r5_nt},
+            {"name": "Rejection Queue", "status": r1, "user": r1_by, "note": r1_nt, "oldest": r1_dt.strftime("%m/%d/%Y")},
+            {"name": "PA Queue", "status": r2, "user": r2_by, "note": r2_nt, "oldest": r2_dt.strftime("%m/%d/%Y")},
+            {"name": "Untransmitted Claims", "status": r3, "user": r3_by, "note": r3_nt, "oldest": r3_dt.strftime("%m/%d/%Y")},
+            {"name": "Future Bill", "status": r4, "user": r4_by, "note": r4_nt, "oldest": r4_dt.strftime("%m/%d/%Y")},
+            {"name": "Data-Re-Entry", "status": r5, "user": r5_by, "note": r5_nt, "oldest": r5_dt.strftime("%m/%d/%Y")},
         ]
         
         exception_lines = []
         for q in queue_map:
             user_string = f" [By: {q['user'].strip()}]" if q['user'].strip() else ""
             note_string = f" - Note: \"{q['note'].strip()}\"" if q['note'].strip() else ""
+            oldest_string = f" (Oldest Item: {q['oldest']})"
             
             if q["status"] == "Pending":
                 exception_lines.append(f"❌ {q['name']}: PENDING")
             elif q["status"] == "No":
-                exception_lines.append(f"⚠️ {q['name']}: MARKED NO{user_string}{note_string}")
+                exception_lines.append(f"⚠️ {q['name']}: MARKED NO{oldest_string}{user_string}{note_string}")
         
         if exception_lines:
             status_ledger_string = "\n".join(exception_lines)
             
-            # 1. Standard Summary Notification (e.g., 4:00 PM EST)
+            # 1. Standard Summary Notification (4:00 PM EST)
             if alert_target_datetime <= sys_now < escalation_target_datetime:
                 if int(chk.get("reminder_sent", 0)) == 0:
                     dispatch_real_time_alert(
@@ -504,7 +529,7 @@ with st.container(border=True):
                     conn.commit()
                     st.rerun()
                     
-            # 2. Critical Escalation Notification (e.g., 5:00 PM EST)
+            # 2. Critical Escalation Notification (5:00 PM EST)
             elif sys_now >= escalation_target_datetime:
                 if int(chk.get("supervisor_escaped", 0)) == 0:
                     dispatch_real_time_alert(
