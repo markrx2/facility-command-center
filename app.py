@@ -24,6 +24,7 @@ st.components.v1.html(
     <script>
         const interval = setInterval(function() {
             window.parent.document.querySelector('.stButton button')?.click();
+            // Fallback strategy if button anchors are changing context:
             const streamlitDoc = window.parent.document;
             const updateTrigger = streamlitDoc.createElement('button');
             updateTrigger.style.display = 'none';
@@ -32,7 +33,7 @@ st.components.v1.html(
                 window.parent.postMessage({type: 'streamlit:rerun'}, '*');
             });
             window.parent.postMessage({type: 'streamlit:render'}, '*');
-        }, 15000); // 15 Seconds Heartbeat Ticker
+        }, 15000); // 15000ms = 15 Seconds Heartbeat Ticker
     </script>
     """,
     height=0,
@@ -81,7 +82,6 @@ def init_shared_db():
             future_bill TEXT DEFAULT 'Pending', 
             data_re_entry TEXT DEFAULT 'Pending',
             reminder_time TEXT DEFAULT '16:00', 
-            reminder_sent INTEGER DEFAULT 0,
             supervisor_escaped INTEGER DEFAULT 0
         )
     """)
@@ -388,19 +388,11 @@ st.markdown("<br><br>", unsafe_allow_html=True)
 with st.container(border=True):
     st.header("📋 Global Facility Daily Queue Verification Log (Business-Wide)")
     local_cursor = conn.cursor()
-    
-    try:
-        local_cursor.execute("SELECT reminder_sent, supervisor_escaped FROM daily_checklist LIMIT 1")
-    except sqlite3.OperationalError:
-        try:
-            local_cursor.execute("ALTER TABLE daily_checklist ADD COLUMN reminder_sent INTEGER DEFAULT 0")
-        except: pass
-    
     local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
     chk = local_cursor.fetchone()
     
     if not chk:
-        local_cursor.execute("INSERT OR IGNORE INTO daily_checklist (log_date, reminder_sent, supervisor_escaped) VALUES (?, 0, 0)", (CURRENT_DATE,))
+        local_cursor.execute("INSERT OR IGNORE INTO daily_checklist (log_date) VALUES (?)", (CURRENT_DATE,))
         conn.commit()
         local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
         chk = local_cursor.fetchone()
@@ -409,9 +401,9 @@ with st.container(border=True):
     with f_col:
         with st.container(border=True):
             t_obj = datetime.strptime(chk["reminder_time"], "%H:%M").time()
-            new_target_time = st.time_input("Set Verification Deadline (EST):", value=t_obj, key="checklist_deadline_widget")
+            new_target_time = st.time_input("Set Verification Deadline:", value=t_obj, key="checklist_deadline_widget")
             if new_target_time.strftime("%H:%M") != chk["reminder_time"]:
-                local_cursor.execute("UPDATE daily_checklist SET reminder_time=?, reminder_sent=0, supervisor_escaped=0 WHERE log_date=?", (new_target_time.strftime("%H:%M"), CURRENT_DATE))
+                local_cursor.execute("UPDATE daily_checklist SET reminder_time=? WHERE log_date=?", (new_target_time.strftime("%H:%M"), CURRENT_DATE))
                 conn.commit()
                 st.rerun()
             
@@ -456,21 +448,11 @@ with st.container(border=True):
                 conn.commit()
                 st.rerun()
 
-    # --- TIMEZONE AND WEEKEND HANDLING ENGINE ---
-    try:
-        import zoneinfo
-        est_tz = zoneinfo.ZoneInfo("America/New_York")
-    except ImportError:
-        from datetime import timezone
-        est_tz = timezone(timedelta(hours=-5))
-        
-    sys_now = datetime.now(est_tz)
-    is_weekend = sys_now.weekday() in [5, 6]
-
-    if not is_weekend:
-        alert_target_datetime = datetime.combine(sys_now.date(), t_obj, tzinfo=est_tz)
-        escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
-        
+    sys_now = datetime.now()
+    alert_target_datetime = datetime.combine(sys_now.date(), t_obj)
+    escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
+    
+    if sys_now >= alert_target_datetime:
         queue_map = [
             {"name": "Rejection Queue", "status": r1, "user": r1_by, "note": r1_nt},
             {"name": "PA Queue", "status": r2, "user": r2_by, "note": r2_nt},
@@ -492,26 +474,18 @@ with st.container(border=True):
         if exception_lines:
             status_ledger_string = "\n".join(exception_lines)
             
-            # 1. Standard Summary Notification (e.g., 4:00 PM EST)
-            if alert_target_datetime <= sys_now < escalation_target_datetime:
-                if int(chk.get("reminder_sent", 0)) == 0:
-                    dispatch_real_time_alert(
-                        f"⚠️ **FACILITY DAILY SUMMARY: ITEMS OUTSTANDING** ⚠️\n"
-                        f"The following exceptions require immediate operational adjustment before the grace window closes:\n\n"
-                        f"{status_ledger_string}"
-                    )
-                    local_cursor.execute("UPDATE daily_checklist SET reminder_sent=1 WHERE log_date=?", (CURRENT_DATE,))
-                    conn.commit()
-                    st.rerun()
-                    
-            # 2. Critical Escalation Notification (e.g., 5:00 PM EST)
-            elif sys_now >= escalation_target_datetime:
-                if int(chk.get("supervisor_escaped", 0)) == 0:
-                    dispatch_real_time_alert(
-                        f"🚨 **CRITICAL COMPLIANCE ESCALATION: PAST GRACE WINDOW** 🚨\n"
-                        f"The following facility lines remain incomplete past the 1-hour grace parameters:\n\n"
-                        f"{status_ledger_string}"
-                    )
-                    local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
-                    conn.commit()
-                    st.rerun()
+            if sys_now < escalation_target_datetime:
+                dispatch_real_time_alert(
+                    f"⚠️ **FACILITY REMINDER: DEADLINE REACHED** ⚠️\n"
+                    f"The following exceptions require immediate operational adjustment:\n\n"
+                    f"{status_ledger_string}"
+                )
+            elif chk["supervisor_escaped"] == 0:
+                dispatch_real_time_alert(
+                    f"🚨 **CRITICAL COMPLIANCE ESCALATION: PAST GRACE WINDOW** 🚨\n"
+                    f"The following facility lines remain incomplete past the 1-hour grace parameters:\n\n"
+                    f"{status_ledger_string}"
+                )
+                local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
+                conn.commit()
+                st.rerun()
