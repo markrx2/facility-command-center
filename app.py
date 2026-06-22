@@ -74,6 +74,22 @@ def init_shared_db():
             dept_prefix TEXT, queue_name TEXT, goal_target TEXT, PRIMARY KEY (dept_prefix, queue_name)
         )
     """)
+
+    # PERMANENT HISTORICAL ARCHIVE LAYER
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS metrics_history (
+            archive_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            log_date TEXT,
+            department TEXT,
+            tech_name TEXT,
+            slot_id INTEGER,
+            queue TEXT,
+            goal TEXT,
+            input_number INTEGER,
+            escalated INTEGER DEFAULT 0,
+            timestamp TEXT
+        )
+    """)
     
     for dept in ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]:
         cursor.execute(f"""
@@ -303,7 +319,8 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 if match_digits:
                                     target_numeric_value = int(match_digits.group())
                                 
-                                if val < target_numeric_value:
+                                is_escalated = 1 if val < target_numeric_value else 0
+                                if is_escalated:
                                     dispatch_real_time_alert(
                                         f"📉 **PRODUCTION ALERT: GOAL NOT MET** 📉\n"
                                         f"Technician: {worker.upper()}\n"
@@ -313,6 +330,12 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                         f"Logged Metrics Value: **{val}** (Deficit of {target_numeric_value - val} units)"
                                     )
                                 
+                                # WRITE TO PERMANENT HISTORICAL ARCHIVE LAYER
+                                local_cursor.execute("""
+                                    INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 st.rerun()
@@ -380,34 +403,47 @@ with tab_mgmt:
                             conn.commit()
                             st.rerun()
 
-# --- 8. REAL-TIME GRAPHICAL ANALYTICS ---
+# --- 8. REAL-TIME HISTORICAL GRAPHICAL ANALYTICS ---
 with tab_analytics:
-    st.header("📊 Cumulative Corporate Analytics Ledger")
+    st.header("📊 Cumulative Corporate Analytics Ledger (Permanent History)")
+    local_cursor = conn.cursor()
+    
+    st.subheader("🔍 Historical Data Range Filters")
+    date_cols = st.columns(2)
+    start_filt = date_cols[0].date_input("Start History Date", value=datetime.now() - timedelta(days=30))
+    end_filt = date_cols[1].date_input("End History Date", value=datetime.now())
+    
+    local_cursor.execute("""
+        SELECT log_date, department, tech_name, input_number, escalated 
+        FROM metrics_history 
+        WHERE log_date >= ? AND log_date <= ?
+    """, (start_filt.strftime("%Y-%m-%d"), end_filt.strftime("%Y-%m-%d")))
+    
+    historical_records = local_cursor.fetchall()
+    
     totals = {"Blocks": 0, "Units": 0, "Alerts": 0}
     tech_chart_series = {}
     dept_chart_series = {"Data Entry": 0, "Call Center": 0, "Shipping": 0, "Fill": 0}
     
-    local_cursor = conn.cursor()
-    labels_map = {"data_entry_slots": "Data Entry", "call_center_slots": "Call Center", "shipping_slots": "Shipping", "fill_slots": "Fill"}
-    for table, label in labels_map.items():
-        local_cursor.execute(f"SELECT tech_name, input_number, supervisor_notified, submitted FROM {table}")
-        for row in local_cursor.fetchall():
-            if row["submitted"] == 1:
-                totals["Blocks"] += 1
-                totals["Units"] += int(row["input_number"])
-                dept_chart_series[label] += 1
-                tech_chart_series[row["tech_name"]] = tech_chart_series.get(row["tech_name"], 0) + int(row["input_number"])
-            if int(row["supervisor_notified"]) > 0: totals["Alerts"] += 1
+    for row in historical_records:
+        totals["Blocks"] += 1
+        totals["Units"] += int(row["input_number"])
+        if int(row["escalated"]) > 0: 
+            totals["Alerts"] += 1
+        
+        dept_chart_series[row["department"]] = dept_chart_series.get(row["department"], 0) + int(row["input_number"])
+        tech_chart_series[row["tech_name"]] = tech_chart_series.get(row["tech_name"], 0) + int(row["input_number"])
 
     k1, k2, k3 = st.columns(3)
-    k1.metric("⏱️ Completed Shift Blocks", f"{totals['Blocks']} Blocks")
-    k2.metric("📦 Processed Volume", f"{totals['Units']} Units")
-    k3.metric("🚨 Chat Alerts Triggered", f"{totals['Alerts']} Escalations")
+    k1.metric("⏱️ Lifetime Shift Blocks Logged", f"{totals['Blocks']} Blocks")
+    k2.metric("📦 Cumulative Processed Volume", f"{totals['Units']} Units")
+    k3.metric("🚨 Total Goal Deficit Infractions", f"{totals['Alerts']} Incidents")
     
+    st.markdown("---")
     if tech_chart_series:
-        st.markdown("### Production Units per Technician")
+        st.markdown("### Historical Production Metrics per Technician")
         st.bar_chart(tech_chart_series)
-    st.markdown("### Operational Load Volume by Department")
+    st.markdown("### Historical Production Load Volume by Department")
     st.line_chart(dept_chart_series)
 
 # --- 9. BUSINESS-WIDE VERIFICATION CHECKLIST ---
@@ -447,9 +483,13 @@ with st.container(border=True):
             opt = ["Pending", "Yes", "No"]
             
             def parse_stored_date(val):
+                if not val:
+                    return datetime.now().date()
                 try:
-                    return datetime.strptime(val, "%m/%d/%Y").date() if val else datetime.now().date()
-                except (ValueError, TypeError):
+                    if "-" in str(val):
+                        return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
+                    return datetime.strptime(str(val).strip(), "%m/%d/%Y").date()
+                except:
                     return datetime.now().date()
 
             def render_checklist_row(form_container, label, db_prefix, prefix_key):
@@ -468,8 +508,13 @@ with st.container(border=True):
                 target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
                 sign_by = cols[3].text_input("Sign", value=stored_by, key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
                 
-                days_gap = (target_dt - oldest_dt).days
-                if days_gap > 7:
+                # STRICT PYTHON DATE CASTING CALCULATION
+                d1 = parse_stored_date(oldest_dt) if not isinstance(oldest_dt, type(datetime.now().date())) else oldest_dt
+                d2 = parse_stored_date(target_dt) if not isinstance(target_dt, type(datetime.now().date())) else target_dt
+                days_gap = (d2 - d1).days
+                
+                # CRITICAL SEVERITY COLOR ENGINE SWITCH
+                if days_gap >= 7:
                     cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
                 else:
                     cols[4].markdown(f"<div style='background-color:#f1f5f9; border:1px solid #cbd5e1; color:#475569; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
