@@ -521,13 +521,13 @@ with st.container(border=True):
             # Real-time mathematical difference evaluation
             days_gap = (target_dt - oldest_dt).days
             
-            # CUSTOM ALARM THRESHOLD ROUTING TRIGGER
             limit_trigger = 14 if is_fourteen_day_threshold else 7
             
+            # CRITICAL LOOK AND FEEL UPDATE: Dynamic Green vs Red styling engine logic block
             if days_gap >= limit_trigger:
                 cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
             else:
-                cols[4].markdown(f"<div style='background-color:#f1f5f9; border:1px solid #cbd5e1; color:#475569; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
+                cols[4].markdown(f"<div style='background-color:#dcfce7; border:1px solid #22c55e; color:#15803d; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
             
             notes_val = cols[5].text_input("Notes", value=stored_notes, key=nt_key, placeholder="Operational notes...", label_visibility="collapsed")
             form_container.markdown("---")
@@ -554,8 +554,6 @@ with st.container(border=True):
         r7, r7_oldest, r7_target, r7_by, r7_nt = render_checklist_row(this_form, "7. Billing Queue Current", "billing", "r7")
         r8, r8_oldest, r8_target, r8_by, r8_nt = render_checklist_row(this_form, "8. Order Queue Current", "ordering", "r8")
         r9, r9_oldest, r9_target, r9_by, r9_nt = render_checklist_row(this_form, "9. Dispense Queue Current", "dispense", "r9")
-        
-        # ROW 10 IMPLEMENTED WITH SPECIAL 14-DAY CALCULATION
         r10, r10_oldest, r10_target, r10_by, r10_nt = render_checklist_row(this_form, "10. 14 Day Return Current", "return_fourteen_queue", "r10", is_fourteen_day_threshold=True)
         
         if st.button("Save Global Checklist Progress", type="primary", use_container_width=True, key="save_global_checklist_direct_btn"):
