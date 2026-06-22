@@ -25,6 +25,14 @@ st.markdown("""
     div.stMarkdown h5 { font-size: 13px !important; margin-bottom: 2px !important; margin-top: 4px !important; }
     div.stMarkdown caption { font-size: 10px !important; }
     hr { margin: 6px 0px !important; }
+
+    /* CRITICAL: Enforce maximum component widths to stop cells from being too wide */
+    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(1) { max-width: 150px !important; } /* Status */
+    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(2) { max-width: 120px !important; } /* Oldest */
+    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(3) { max-width: 120px !important; } /* Target */
+    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(4) { max-width: 75px !important;  } /* Sign */
+    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(5) { max-width: 85px !important;  } /* Backlog Widget */
+    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; } /* Notes Component */
     </style>
 """, unsafe_allow_html=True)
 
@@ -446,7 +454,6 @@ with st.container(border=True):
 
             def render_checklist_row(form_container, label, db_prefix, prefix_key):
                 form_container.markdown(f"##### {label}")
-                # Highly compressed column spacing blueprint
                 cols = form_container.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
                 
                 row_keys = chk.keys() if hasattr(chk, "keys") else []
