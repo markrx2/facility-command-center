@@ -16,7 +16,6 @@ st.markdown("""
     
     /* Global Compact Padding Tweaks for Dashboard Layout Grid */
     [data-testid="column"] { padding: 0px 2px !important; }
-    div[data-testid="stForm"] { padding: 8px !important; }
     
     /* Shrink sizes of checklist widgets so they pack tightly horizontally */
     .stRadio div[role="radiogroup"] label { font-size: 11px !important; padding: 2px 4px !important; }
@@ -27,12 +26,12 @@ st.markdown("""
     hr { margin: 6px 0px !important; }
 
     /* CRITICAL: Enforce maximum component widths to stop cells from being too wide */
-    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(1) { max-width: 150px !important; } /* Status */
-    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(2) { max-width: 120px !important; } /* Oldest */
-    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(3) { max-width: 120px !important; } /* Target */
-    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(4) { max-width: 75px !important;  } /* Sign */
-    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(5) { max-width: 85px !important;  } /* Backlog Widget */
-    div[data-testid="stForm"] [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; } /* Notes Component */
+    [data-testid="column"]:nth-of-type(1) { max-width: 150px !important; } /* Status */
+    [data-testid="column"]:nth-of-type(2) { max-width: 120px !important; } /* Oldest */
+    [data-testid="column"]:nth-of-type(3) { max-width: 120px !important; } /* Target */
+    [data-testid="column"]:nth-of-type(4) { max-width: 75px !important;  } /* Sign */
+    [data-testid="column"]:nth-of-type(5) { max-width: 85px !important;  } /* Backlog Widget */
+    [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; } /* Notes Component */
     </style>
 """, unsafe_allow_html=True)
 
@@ -479,103 +478,104 @@ with st.container(border=True):
                 st.rerun()
             
     with c_col:
-        with st.form("master_checklist_form"):
-            opt = ["Pending", "Yes", "No"]
-            
-            def parse_stored_date(val):
-                if not val:
-                    return datetime.now().date()
-                if isinstance(val, type(datetime.now().date())):
-                    return val
-                try:
-                    val_str = str(val).strip()
-                    if "-" in val_str:
-                        return datetime.strptime(val_str, "%Y-%m-%d").date()
-                    return datetime.strptime(val_str, "%m/%d/%Y").date()
-                except:
-                    return datetime.now().date()
+        # REMOVED ISOLATING st.form WRAPPER HERE TO PERMIT TRUE REAL-TIME REACTIVE CALCULATIONS
+        opt = ["Pending", "Yes", "No"]
+        
+        def parse_stored_date(val):
+            if not val:
+                return datetime.now().date()
+            if isinstance(val, type(datetime.now().date())):
+                return val
+            try:
+                val_str = str(val).strip()
+                if "-" in val_str:
+                    return datetime.strptime(val_str, "%Y-%m-%d").date()
+                return datetime.strptime(val_str, "%m/%d/%Y").date()
+            except:
+                return datetime.now().date()
 
-            def render_checklist_row(form_container, label, db_prefix, prefix_key):
-                form_container.markdown(f"##### {label}")
-                cols = form_container.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
-                
-                row_keys = chk.keys() if hasattr(chk, "keys") else []
-                stored_status = chk[db_prefix] if (db_prefix in row_keys and chk[db_prefix]) else "Pending"
-                stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in row_keys else ""
-                stored_tdt = chk[f"{db_prefix}_target"] if f"{db_prefix}_target" in row_keys else ""
-                stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in row_keys else ""
-                stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
+        def render_checklist_row(form_container, label, db_prefix, prefix_key):
+            form_container.markdown(f"##### {label}")
+            cols = form_container.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
+            
+            row_keys = chk.keys() if hasattr(chk, "keys") else []
+            stored_status = chk[db_prefix] if (db_prefix in row_keys and chk[db_prefix]) else "Pending"
+            stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in row_keys else ""
+            stored_tdt = chk[f"{db_prefix}_target"] if f"{db_prefix}_target" in row_keys else ""
+            stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in row_keys else ""
+            stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
 
-                status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(stored_status if stored_status in opt else "Pending"), horizontal=True, key=f"status_{prefix_key}", label_visibility="collapsed")
-                
-                # Render inputs
-                oldest_dt = cols[1].date_input("Oldest", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
-                target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
-                sign_by = cols[3].text_input("Sign", value=stored_by, key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
-                
-                # CALCULATE DIRECTLY FROM THE ACTIVE UI WIDGET OBJECTS FOR REAL-TIME DISPLAY UPDATE
-                days_gap = (target_dt - oldest_dt).days
-                
-                # CRITICAL SEVERITY COLOR ENGINE SWITCH
-                if days_gap >= 7:
-                    cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
-                else:
-                    cols[4].markdown(f"<div style='background-color:#f1f5f9; border:1px solid #cbd5e1; color:#475569; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
-                
-                notes_val = cols[5].text_input("Notes", value=stored_notes, key=f"nt_{prefix_key}", placeholder="Operational notes...", label_visibility="collapsed")
-                form_container.markdown("---")
-                return status_val, oldest_dt.strftime("%m/%d/%Y"), target_dt.strftime("%m/%d/%Y"), sign_by, notes_val
+            status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(stored_status if stored_status in opt else "Pending"), horizontal=True, key=f"status_{prefix_key}", label_visibility="collapsed")
+            
+            # Form-free live reactive calendar nodes
+            oldest_dt = cols[1].date_input("Oldest", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
+            target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
+            sign_by = cols[3].text_input("Sign", value=stored_by, key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
+            
+            # EVALUATES DIRECTLY INSTANTANEOUSLY ON USER INPUT SESSIONS
+            days_gap = (target_dt - oldest_dt).days
+            
+            # CRITICAL SEVERITY COLOR ENGINE SWITCH
+            if days_gap >= 7:
+                cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
+            else:
+                cols[4].markdown(f"<div style='background-color:#f1f5f9; border:1px solid #cbd5e1; color:#475569; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
+            
+            notes_val = cols[5].text_input("Notes", value=stored_notes, key=f"nt_{prefix_key}", placeholder="Operational notes...", label_visibility="collapsed")
+            form_container.markdown("---")
+            return status_val, oldest_dt.strftime("%m/%d/%Y"), target_dt.strftime("%m/%d/%Y"), sign_by, notes_val
 
-            this_form = st.container()
-            
-            h_cols = this_form.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
-            h_cols[0].caption("Status")
-            h_cols[1].caption("Oldest Date")
-            h_cols[2].caption("Target Date")
-            h_cols[3].caption("Sign")
-            h_cols[4].caption("Backlog")
-            h_cols[5].caption("Queue Line Comments")
-            this_form.markdown("---")
-            
-            r1, r1_oldest, r1_target, r1_by, r1_nt = render_checklist_row(this_form, "1. Reject Queue Current", "rejection_queue", "r1")
-            r2, r2_oldest, r2_target, r2_by, r2_nt = render_checklist_row(this_form, "2. PA Queue Addressed", "pa_queue", "r2")
-            r3, r3_oldest, r3_target, r3_by, r3_nt = render_checklist_row(this_form, "3. Untransmitted Claims Completed", "untransmitted_claims", "r3")
-            r4, r4_oldest, r4_target, r4_by, r4_nt = render_checklist_row(this_form, "4. Future Bill Queue Current", "future_bill", "r4")
-            r5, r5_oldest, r5_target, r5_by, r5_nt = render_checklist_row(this_form, "5. Data Re-Entry Queue Cleared", "data_re_entry", "r5")
-            r6, r6_oldest, r6_target, r6_by, r6_nt = render_checklist_row(this_form, "6. AI/Tech Check Status", "ai_tech_check", "r6")
-            r7, r7_oldest, r7_target, r7_by, r7_nt = render_checklist_row(this_form, "7. Billing Queue Current", "billing", "r7")
-            r8, r8_oldest, r8_target, r8_by, r8_nt = render_checklist_row(this_form, "8. Order Queue Current", "ordering", "r8")
-            r9, r9_oldest, r9_target, r9_by, r9_nt = render_checklist_row(this_form, "9. Dispense Queue Current", "dispense", "r9")
-            
-            if st.form_submit_button("Save Global Checklist Progress", type="primary", use_container_width=True):
-                local_cursor.execute("""
-                    UPDATE daily_checklist 
-                    SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=?, ai_tech_check=?, billing=?, ordering=?, dispense=?,
-                        rejection_queue_by=?, rejection_queue_notes=?, rejection_queue_date=?, rejection_queue_target=?,
-                        pa_queue_by=?, pa_queue_notes=?, pa_queue_date=?, pa_queue_target=?,
-                        untransmitted_claims_by=?, untransmitted_claims_notes=?, untransmitted_claims_date=?, untransmitted_claims_target=?,
-                        future_bill_by=?, future_bill_notes=?, future_bill_date=?, future_bill_target=?,
-                        data_re_entry_by=?, data_re_entry_notes=?, data_re_entry_date=?, data_re_entry_target=?,
-                        ai_tech_check_by=?, ai_tech_check_notes=?, ai_tech_check_date=?, ai_tech_check_target=?,
-                        billing_by=?, billing_notes=?, billing_date=?, billing_target=?,
-                        ordering_by=?, ordering_notes=?, ordering_date=?, ordering_target=?,
-                        dispense_by=?, dispense_notes=?, dispense_date=?, dispense_target=?
-                    WHERE log_date=?
-                """, (
-                    r1, r2, r3, r4, r5, r6, r7, r8, r9,
-                    r1_by, r1_nt, r1_oldest, r1_target,
-                    r2_by, r2_nt, r2_oldest, r2_target,
-                    r3_by, r3_nt, r3_oldest, r3_target,
-                    r4_by, r4_nt, r4_oldest, r4_target,
-                    r5_by, r5_nt, r5_oldest, r5_target,
-                    r6_by, r6_nt, r6_oldest, r6_target,
-                    r7_by, r7_nt, r7_oldest, r7_target,
-                    r8_by, r8_nt, r8_oldest, r8_target,
-                    r9_by, r9_nt, r9_oldest, r9_target,
-                    CURRENT_DATE
-                ))
-                conn.commit()
-                st.rerun()
+        this_form = st.container()
+        
+        h_cols = this_form.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
+        h_cols[0].caption("Status")
+        h_cols[1].caption("Oldest Date")
+        h_cols[2].caption("Target Date")
+        h_cols[3].caption("Sign")
+        h_cols[4].caption("Backlog")
+        h_cols[5].caption("Queue Line Comments")
+        this_form.markdown("---")
+        
+        r1, r1_oldest, r1_target, r1_by, r1_nt = render_checklist_row(this_form, "1. Reject Queue Current", "rejection_queue", "r1")
+        r2, r2_oldest, r2_target, r2_by, r2_nt = render_checklist_row(this_form, "2. PA Queue Addressed", "pa_queue", "r2")
+        r3, r3_oldest, r3_target, r3_by, r3_nt = render_checklist_row(this_form, "3. Untransmitted Claims Completed", "untransmitted_claims", "r3")
+        r4, r4_oldest, r4_target, r4_by, r4_nt = render_checklist_row(this_form, "4. Future Bill Queue Current", "future_bill", "r4")
+        r5, r5_oldest, r5_target, r5_by, r5_nt = render_checklist_row(this_form, "5. Data Re-Entry Queue Cleared", "data_re_entry", "r5")
+        r6, r6_oldest, r6_target, r6_by, r6_nt = render_checklist_row(this_form, "6. AI/Tech Check Status", "ai_tech_check", "r6")
+        r7, r7_oldest, r7_target, r7_by, r7_nt = render_checklist_row(this_form, "7. Billing Queue Current", "billing", "r7")
+        r8, r8_oldest, r8_target, r8_by, r8_nt = render_checklist_row(this_form, "8. Order Queue Current", "ordering", "r8")
+        r9, r9_oldest, r9_target, r9_by, r9_nt = render_checklist_row(this_form, "9. Dispense Queue Current", "dispense", "r9")
+        
+        if st.button("Save Global Checklist Progress", type="primary", use_container_width=True, key="save_global_checklist_direct_btn"):
+            local_cursor.execute("""
+                UPDATE daily_checklist 
+                SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=?, ai_tech_check=?, billing=?, ordering=?, dispense=?,
+                    rejection_queue_by=?, rejection_queue_notes=?, rejection_queue_date=?, rejection_queue_target=?,
+                    pa_queue_by=?, pa_queue_notes=?, pa_queue_date=?, pa_queue_target=?,
+                    untransmitted_claims_by=?, untransmitted_claims_notes=?, untransmitted_claims_date=?, untransmitted_claims_target=?,
+                    future_bill_by=?, future_bill_notes=?, future_bill_date=?, future_bill_target=?,
+                    data_re_entry_by=?, data_re_entry_notes=?, data_re_entry_date=?, data_re_entry_target=?,
+                    ai_tech_check_by=?, ai_tech_check_notes=?, ai_tech_check_date=?, ai_tech_check_target=?,
+                    billing_by=?, billing_notes=?, billing_date=?, billing_target=?,
+                    ordering_by=?, ordering_notes=?, ordering_date=?, ordering_target=?,
+                    dispense_by=?, dispense_notes=?, dispense_date=?, dispense_target=?
+                WHERE log_date=?
+            """, (
+                r1, r2, r3, r4, r5, r6, r7, r8, r9,
+                r1_by, r1_nt, r1_oldest, r1_target,
+                r2_by, r2_nt, r2_oldest, r2_target,
+                r3_by, r3_nt, r3_oldest, r3_target,
+                r4_by, r4_nt, r4_oldest, r4_target,
+                r5_by, r5_nt, r5_oldest, r5_target,
+                r6_by, r6_nt, r6_oldest, r6_target,
+                r7_by, r7_nt, r7_oldest, r7_target,
+                r8_by, r8_nt, r8_oldest, r8_target,
+                r9_by, r9_nt, r9_oldest, r9_target,
+                CURRENT_DATE
+            ))
+            conn.commit()
+            st.success("🎉 All checklist parameters saved successfully!")
+            st.rerun()
 
     # --- TIMEZONE AND WEEKEND HANDLING ENGINE ---
     try:
