@@ -13,6 +13,8 @@ st.markdown("""
     div[data-testid="stExpander"] { border: 1px solid #e0e0e0; background-color: #ffffff; border-radius: 8px; }
     h3 { margin-top: 15px !important; color: #1e293b; font-weight: 700; }
     .stButton>button { border-radius: 6px; }
+    /* Tighten form cell components horizontally */
+    [data-testid="column"] { padding: 0px 4px !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -88,7 +90,6 @@ def init_shared_db():
         )
     """)
     
-    # Complete explicit column map including oldest dates and target dates
     schema_extensions = [
         ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"), ("rejection_queue_date", "TEXT DEFAULT ''"), ("rejection_queue_target", "TEXT DEFAULT ''"),
         ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"), ("pa_queue_date", "TEXT DEFAULT ''"), ("pa_queue_target", "TEXT DEFAULT ''"),
@@ -101,7 +102,6 @@ def init_shared_db():
         ("dispense_by", "TEXT DEFAULT ''"), ("dispense_notes", "TEXT DEFAULT ''"), ("dispense_date", "TEXT DEFAULT ''"), ("dispense_target", "TEXT DEFAULT ''")
     ]
     
-    # Safe alteration loop to execute physical updates to database structure if missing
     for col_name, col_type in schema_extensions:
         try:
             cursor.execute(f"SELECT {col_name} FROM daily_checklist LIMIT 1")
@@ -414,7 +414,7 @@ with st.container(border=True):
         local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
         chk = local_cursor.fetchone()
         
-    c_col, f_col = st.columns([2.5, 1])
+    c_col, f_col = st.columns([2.8, 1])
     with f_col:
         with st.container(border=True):
             t_obj = datetime.strptime(chk["reminder_time"], "%H:%M").time()
@@ -434,10 +434,10 @@ with st.container(border=True):
                 except (ValueError, TypeError):
                     return datetime.now().date()
 
-            # Fixed form routing layer to guarantee Streamlit maps elements inside the current form layout
             def render_checklist_row(form_container, label, db_prefix, prefix_key):
                 form_container.markdown(f"##### {label}")
-                cols = form_container.columns([1.8, 1.2, 1.2, 0.8, 2.0])
+                # Compact width grids adjusted explicitly to map nicely side-by-side
+                cols = form_container.columns([1.3, 1.2, 1.2, 0.8, 0.9, 1.8])
                 
                 stored_status = chk[db_prefix] if (db_prefix in chk.keys() and chk[db_prefix]) else "Pending"
                 stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in chk.keys() else ""
@@ -449,21 +449,40 @@ with st.container(border=True):
                 oldest_dt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}", format="MM/DD/YYYY")
                 target_dt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY")
                 sign_by = cols[3].text_input("Sign", value=stored_by, key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
-                notes_val = cols[4].text_input("Notes", value=stored_notes, key=f"nt_{prefix_key}", placeholder="Operational Notes...", label_visibility="collapsed")
+                
+                # Dynamic calculated calculation column for window gaps
+                days_gap = (target_dt - oldest_dt).days
+                if days_gap > 7:
+                    cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:5px 2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
+                else:
+                    cols[4].markdown(f"<div style='background-color:#f1f5f9; border:1px solid #cbd5e1; color:#475569; border-radius:4px; text-align:center; padding:5px 2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
+                
+                notes_val = cols[5].text_input("Notes", value=stored_notes, key=f"nt_{prefix_key}", placeholder="Operational Notes...", label_visibility="collapsed")
                 form_container.markdown("---")
                 return status_val, oldest_dt.strftime("%m/%d/%Y"), target_dt.strftime("%m/%d/%Y"), sign_by, notes_val
 
-            # Draw the entire 9 Row Matrix elements safely bound inside the explicit form target context
             this_form = st.container()
-            r1, r1_oldest, r1_target, r1_by, r1_nt = render_checklist_row(this_form, "1. Rejection Queue Status", "rejection_queue", "r1")
-            r2, r2_oldest, r2_target, r2_by, r2_nt = render_checklist_row(this_form, "2. PA Queue Status", "pa_queue", "r2")
-            r3, r3_oldest, r3_target, r3_by, r3_nt = render_checklist_row(this_form, "3. Untransmitted Claims Status", "untransmitted_claims", "r3")
-            r4, r4_oldest, r4_target, r4_by, r4_nt = render_checklist_row(this_form, "4. Future Bill Status", "future_bill", "r4")
-            r5, r5_oldest, r5_target, r5_by, r5_nt = render_checklist_row(this_form, "5. Data-Re-Entry Status", "data_re_entry", "r5")
+            
+            # Header Legend Labels to guide tracking layout alignment
+            h_cols = this_form.columns([1.3, 1.2, 1.2, 0.8, 0.9, 1.8])
+            h_cols[0].caption("Status Vector")
+            h_cols[1].caption("Oldest Date")
+            h_cols[2].caption("Target Date")
+            h_cols[3].caption("Sign (Initials)")
+            h_cols[4].caption("Aging Backlog")
+            h_cols[5].caption("Queue Line Comments")
+            this_form.markdown("---")
+            
+            # 9 Rows with newly requested labels mapped directly to variables
+            r1, r1_oldest, r1_target, r1_by, r1_nt = render_checklist_row(this_form, "1. Reject Queue Current", "rejection_queue", "r1")
+            r2, r2_oldest, r2_target, r2_by, r2_nt = render_checklist_row(this_form, "2. PA Queue Addressed", "pa_queue", "r2")
+            r3, r3_oldest, r3_target, r3_by, r3_nt = render_checklist_row(this_form, "3. Untransmitted Claims Completed", "untransmitted_claims", "r3")
+            r4, r4_oldest, r4_target, r4_by, r4_nt = render_checklist_row(this_form, "4. Future Bill Queue Current", "future_bill", "r4")
+            r5, r5_oldest, r5_target, r5_by, r5_nt = render_checklist_row(this_form, "5. Data Re-Entry Queue Cleared", "data_re_entry", "r5")
             r6, r6_oldest, r6_target, r6_by, r6_nt = render_checklist_row(this_form, "6. AI/Tech Check Status", "ai_tech_check", "r6")
-            r7, r7_oldest, r7_target, r7_by, r7_nt = render_checklist_row(this_form, "7. Billing Status", "billing", "r7")
-            r8, r8_oldest, r8_target, r8_by, r8_nt = render_checklist_row(this_form, "8. Ordering Status", "ordering", "r8")
-            r9, r9_oldest, r9_target, r9_by, r9_nt = render_checklist_row(this_form, "9. Dispense Status", "dispense", "r9")
+            r7, r7_oldest, r7_target, r7_by, r7_nt = render_checklist_row(this_form, "7. Billing Queue Current", "billing", "r7")
+            r8, r8_oldest, r8_target, r8_by, r8_nt = render_checklist_row(this_form, "8. Order Queue Current", "ordering", "r8")
+            r9, r9_oldest, r9_target, r9_by, r9_nt = render_checklist_row(this_form, "9. Dispense Queue Current", "dispense", "r9")
             
             if st.form_submit_button("Save Global Checklist Progress", type="primary", use_container_width=True):
                 local_cursor.execute("""
@@ -511,15 +530,15 @@ with st.container(border=True):
         escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
         
         queue_map = [
-            {"name": "Rejection Queue", "status": r1, "user": r1_by, "note": r1_nt, "oldest": r1_oldest, "target": r1_target},
-            {"name": "PA Queue", "status": r2, "user": r2_by, "note": r2_nt, "oldest": r2_oldest, "target": r2_target},
-            {"name": "Untransmitted Claims", "status": r3, "user": r3_by, "note": r3_nt, "oldest": r3_oldest, "target": r3_target},
-            {"name": "Future Bill", "status": r4, "user": r4_by, "note": r4_nt, "oldest": r4_oldest, "target": r4_target},
-            {"name": "Data-Re-Entry", "status": r5, "user": r5_by, "note": r5_nt, "oldest": r5_oldest, "target": r5_target},
-            {"name": "AI/Tech Check", "status": r6, "user": r6_by, "note": r6_nt, "oldest": r6_oldest, "target": r6_target},
-            {"name": "Billing", "status": r7, "user": r7_by, "note": r7_nt, "oldest": r7_oldest, "target": r7_target},
-            {"name": "Ordering", "status": r8, "user": r8_by, "note": r8_nt, "oldest": r8_oldest, "target": r8_target},
-            {"name": "Dispense", "status": r9, "user": r9_by, "note": r9_nt, "oldest": q_oldest, "target": r9_target},
+            {"name": "Reject Queue Current", "status": r1, "user": r1_by, "note": r1_nt, "oldest": r1_oldest, "target": r1_target},
+            {"name": "PA Queue Addressed", "status": r2, "user": r2_by, "note": r2_nt, "oldest": r2_oldest, "target": r2_target},
+            {"name": "Untransmitted Claims Completed", "status": r3, "user": r3_by, "note": r3_nt, "oldest": r3_oldest, "target": r3_target},
+            {"name": "Future Bill Queue Current", "status": r4, "user": r4_by, "note": r4_nt, "oldest": r4_oldest, "target": r4_target},
+            {"name": "Data Re-Entry Queue Cleared", "status": r5, "user": r5_by, "note": r5_nt, "oldest": r5_oldest, "target": r5_target},
+            {"name": "AI/Tech Check Status", "status": r6, "user": r6_by, "note": r6_nt, "oldest": r6_oldest, "target": r6_target},
+            {"name": "Billing Queue Current", "status": r7, "user": r7_by, "note": r7_nt, "oldest": r7_oldest, "target": r7_target},
+            {"name": "Order Queue Current", "status": r8, "user": r8_by, "note": r8_nt, "oldest": r8_oldest, "target": r8_target},
+            {"name": "Dispense Queue Current", "status": r9, "user": r9_by, "note": r9_nt, "oldest": r9_oldest, "target": r9_target},
         ]
         
         exception_lines = []
