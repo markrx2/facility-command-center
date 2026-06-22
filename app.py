@@ -37,7 +37,7 @@ st.components.v1.html(
     width=0,
 )
 
-# --- 2. DATABASE SETUP ---
+# --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
     conn = sqlite3.connect("shared_facility_matrix.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row  
@@ -88,6 +88,7 @@ def init_shared_db():
         )
     """)
     
+    # Complete explicit column map including oldest dates and target dates
     schema_extensions = [
         ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"), ("rejection_queue_date", "TEXT DEFAULT ''"), ("rejection_queue_target", "TEXT DEFAULT ''"),
         ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"), ("pa_queue_date", "TEXT DEFAULT ''"), ("pa_queue_target", "TEXT DEFAULT ''"),
@@ -99,6 +100,8 @@ def init_shared_db():
         ("ordering_by", "TEXT DEFAULT ''"), ("ordering_notes", "TEXT DEFAULT ''"), ("ordering_date", "TEXT DEFAULT ''"), ("ordering_target", "TEXT DEFAULT ''"),
         ("dispense_by", "TEXT DEFAULT ''"), ("dispense_notes", "TEXT DEFAULT ''"), ("dispense_date", "TEXT DEFAULT ''"), ("dispense_target", "TEXT DEFAULT ''")
     ]
+    
+    # Safe alteration loop to execute physical updates to database structure if missing
     for col_name, col_type in schema_extensions:
         try:
             cursor.execute(f"SELECT {col_name} FROM daily_checklist LIMIT 1")
@@ -428,32 +431,39 @@ with st.container(border=True):
             def parse_stored_date(val):
                 try:
                     return datetime.strptime(val, "%m/%d/%Y").date() if val else datetime.now().date()
-                except ValueError:
+                except (ValueError, TypeError):
                     return datetime.now().date()
 
-            # Helper rendering logic for each distinct line item row to ensure scannable columns
-            def render_checklist_row(label, db_prefix, prefix_key):
-                st.markdown(f"##### {label}")
-                cols = st.columns([1.8, 1.2, 1.2, 0.8, 2.0])
+            # Fixed form routing layer to guarantee Streamlit maps elements inside the current form layout
+            def render_checklist_row(form_container, label, db_prefix, prefix_key):
+                form_container.markdown(f"##### {label}")
+                cols = form_container.columns([1.8, 1.2, 1.2, 0.8, 2.0])
                 
-                status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(chk[db_prefix] if chk[db_prefix] in opt else "Pending"), horizontal=True, key=f"status_{prefix_key}", label_visibility="collapsed")
-                oldest_dt = cols[1].date_input("Oldest Date", value=parse_stored_date(chk[f"{db_prefix}_date"]), key=f"odt_{prefix_key}", format="MM/DD/YYYY")
-                target_dt = cols[2].date_input("Target Date", value=parse_stored_date(chk[f"{db_prefix}_target"]), key=f"tdt_{prefix_key}", format="MM/DD/YYYY")
-                sign_by = cols[3].text_input("Sign", value=chk[f"{db_prefix}_by"], key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
-                notes_val = cols[4].text_input("Notes", value=chk[f"{db_prefix}_notes"], key=f"nt_{prefix_key}", placeholder="Operational Notes...", label_visibility="collapsed")
-                st.markdown("---")
+                stored_status = chk[db_prefix] if (db_prefix in chk.keys() and chk[db_prefix]) else "Pending"
+                stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in chk.keys() else ""
+                stored_tdt = chk[f"{db_prefix}_target"] if f"{db_prefix}_target" in chk.keys() else ""
+                stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in chk.keys() else ""
+                stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in chk.keys() else ""
+
+                status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(stored_status if stored_status in opt else "Pending"), horizontal=True, key=f"status_{prefix_key}", label_visibility="collapsed")
+                oldest_dt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}", format="MM/DD/YYYY")
+                target_dt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY")
+                sign_by = cols[3].text_input("Sign", value=stored_by, key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
+                notes_val = cols[4].text_input("Notes", value=stored_notes, key=f"nt_{prefix_key}", placeholder="Operational Notes...", label_visibility="collapsed")
+                form_container.markdown("---")
                 return status_val, oldest_dt.strftime("%m/%d/%Y"), target_dt.strftime("%m/%d/%Y"), sign_by, notes_val
 
-            # Draw the 9 Row Matrix elements
-            r1, r1_oldest, r1_target, r1_by, r1_nt = render_checklist_row("1. Rejection Queue Status", "rejection_queue", "r1")
-            r2, r2_oldest, r2_target, r2_by, r2_nt = render_checklist_row("2. PA Queue Status", "pa_queue", "r2")
-            r3, r3_oldest, r3_target, r3_by, r3_nt = render_checklist_row("3. Untransmitted Claims Status", "untransmitted_claims", "r3")
-            r4, r4_oldest, r4_target, r4_by, r4_nt = render_checklist_row("4. Future Bill Status", "future_bill", "r4")
-            r5, r5_oldest, r5_target, r5_by, r5_nt = render_checklist_row("5. Data-Re-Entry Status", "data_re_entry", "r5")
-            r6, r6_oldest, r6_target, r6_by, r6_nt = render_checklist_row("6. AI/Tech Check Status", "ai_tech_check", "r6")
-            r7, r7_oldest, r7_target, r7_by, r7_nt = render_checklist_row("7. Billing Status", "billing", "r7")
-            r8, r8_oldest, r8_target, r8_by, r8_nt = render_checklist_row("8. Ordering Status", "ordering", "r8")
-            r9, r9_oldest, r9_target, r9_by, r9_nt = render_checklist_row("9. Dispense Status", "dispense", "r9")
+            # Draw the entire 9 Row Matrix elements safely bound inside the explicit form target context
+            this_form = st.container()
+            r1, r1_oldest, r1_target, r1_by, r1_nt = render_checklist_row(this_form, "1. Rejection Queue Status", "rejection_queue", "r1")
+            r2, r2_oldest, r2_target, r2_by, r2_nt = render_checklist_row(this_form, "2. PA Queue Status", "pa_queue", "r2")
+            r3, r3_oldest, r3_target, r3_by, r3_nt = render_checklist_row(this_form, "3. Untransmitted Claims Status", "untransmitted_claims", "r3")
+            r4, r4_oldest, r4_target, r4_by, r4_nt = render_checklist_row(this_form, "4. Future Bill Status", "future_bill", "r4")
+            r5, r5_oldest, r5_target, r5_by, r5_nt = render_checklist_row(this_form, "5. Data-Re-Entry Status", "data_re_entry", "r5")
+            r6, r6_oldest, r6_target, r6_by, r6_nt = render_checklist_row(this_form, "6. AI/Tech Check Status", "ai_tech_check", "r6")
+            r7, r7_oldest, r7_target, r7_by, r7_nt = render_checklist_row(this_form, "7. Billing Status", "billing", "r7")
+            r8, r8_oldest, r8_target, r8_by, r8_nt = render_checklist_row(this_form, "8. Ordering Status", "ordering", "r8")
+            r9, r9_oldest, r9_target, r9_by, r9_nt = render_checklist_row(this_form, "9. Dispense Status", "dispense", "r9")
             
             if st.form_submit_button("Save Global Checklist Progress", type="primary", use_container_width=True):
                 local_cursor.execute("""
@@ -509,7 +519,7 @@ with st.container(border=True):
             {"name": "AI/Tech Check", "status": r6, "user": r6_by, "note": r6_nt, "oldest": r6_oldest, "target": r6_target},
             {"name": "Billing", "status": r7, "user": r7_by, "note": r7_nt, "oldest": r7_oldest, "target": r7_target},
             {"name": "Ordering", "status": r8, "user": r8_by, "note": r8_nt, "oldest": r8_oldest, "target": r8_target},
-            {"name": "Dispense", "status": r9, "user": r9_by, "note": r9_nt, "oldest": r9_oldest, "target": r9_target},
+            {"name": "Dispense", "status": r9, "user": r9_by, "note": r9_nt, "oldest": q_oldest, "target": r9_target},
         ]
         
         exception_lines = []
