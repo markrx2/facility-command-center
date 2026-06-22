@@ -25,12 +25,12 @@ st.markdown("""
     div.stMarkdown caption { font-size: 10px !important; }
     hr { margin: 6px 0px !important; }
 
-    /* CRITICAL: Enforce maximum component widths to stop cells from being too wide */
+    /* CRITICAL FIX: Expanded Column 5 width slightly to stop the Day badge from being clipped on refresh */
     [data-testid="column"]:nth-of-type(1) { max-width: 150px !important; } /* Status */
     [data-testid="column"]:nth-of-type(2) { max-width: 120px !important; } /* Oldest */
     [data-testid="column"]:nth-of-type(3) { max-width: 120px !important; } /* Target */
     [data-testid="column"]:nth-of-type(4) { max-width: 75px !important;  } /* Sign */
-    [data-testid="column"]:nth-of-type(5) { max-width: 85px !important;  } /* Backlog Widget */
+    [data-testid="column"]:nth-of-type(5) { max-width: 110px !important; } /* Backlog Widget expanded from 85px */
     [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; } /* Notes Component */
     </style>
 """, unsafe_allow_html=True)
@@ -480,7 +480,6 @@ with st.container(border=True):
     with c_col:
         opt = ["Pending", "Yes", "No"]
         
-        # FIXED: CRITICAL DATETIME DESERIALIZATION SYNC ENGINE
         def parse_stored_date(val):
             if not val or str(val).strip() == "":
                 return datetime.now().date()
@@ -488,7 +487,6 @@ with st.container(border=True):
                 return val
             try:
                 val_str = str(val).strip()
-                # Safely parsing ISO standard saved formats
                 if "-" in val_str:
                     return datetime.strptime(val_str, "%Y-%m-%d").date()
                 return datetime.strptime(val_str, "%m/%d/%Y").date()
@@ -506,13 +504,19 @@ with st.container(border=True):
             stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in row_keys else ""
             stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
 
-            status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(stored_status if stored_status in opt else "Pending"), horizontal=True, key=f"status_{prefix_key}", label_visibility="collapsed")
+            status_key = f"status_{prefix_key}_{CURRENT_DATE}"
+            odt_key = f"odt_{prefix_key}_{CURRENT_DATE}"
+            tdt_key = f"tdt_{prefix_key}_{CURRENT_DATE}"
+            by_key = f"by_{prefix_key}_{CURRENT_DATE}"
+            nt_key = f"nt_{prefix_key}_{CURRENT_DATE}"
+
+            status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(stored_status if stored_status in opt else "Pending"), horizontal=True, key=status_key, label_visibility="collapsed")
             
-            oldest_dt = cols[1].date_input("Oldest", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
-            target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
-            sign_by = cols[3].text_input("Sign", value=stored_by, key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
+            oldest_dt = cols[1].date_input("Oldest", value=parse_stored_date(stored_odt), key=odt_key, format="MM/DD/YYYY", label_visibility="collapsed")
+            target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=tdt_key, format="MM/DD/YYYY", label_visibility="collapsed")
+            sign_by = cols[3].text_input("Sign", value=stored_by, key=by_key, placeholder="Initials", label_visibility="collapsed")
             
-            # Instant live state calculation
+            # Real-time mathematical difference evaluation
             days_gap = (target_dt - oldest_dt).days
             
             if days_gap >= 7:
@@ -520,10 +524,9 @@ with st.container(border=True):
             else:
                 cols[4].markdown(f"<div style='background-color:#f1f5f9; border:1px solid #cbd5e1; color:#475569; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
             
-            notes_val = cols[5].text_input("Notes", value=stored_notes, key=f"nt_{prefix_key}", placeholder="Operational notes...", label_visibility="collapsed")
+            notes_val = cols[5].text_input("Notes", value=stored_notes, key=nt_key, placeholder="Operational notes...", label_visibility="collapsed")
             form_container.markdown("---")
             
-            # FIXED: Return pure machine-readable ISO format text strings ("YYYY-MM-DD")
             return status_val, oldest_dt.strftime("%Y-%m-%d"), target_dt.strftime("%Y-%m-%d"), sign_by, notes_val
 
         this_form = st.container()
