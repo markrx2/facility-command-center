@@ -25,12 +25,12 @@ st.markdown("""
     div.stMarkdown caption { font-size: 10px !important; }
     hr { margin: 6px 0px !important; }
 
-    /* CRITICAL FIX: Expanded Column 5 width slightly to stop the Day badge from being clipped on refresh */
+    /* Column Width Allocation Layout Grid */
     [data-testid="column"]:nth-of-type(1) { max-width: 150px !important; } /* Status */
     [data-testid="column"]:nth-of-type(2) { max-width: 120px !important; } /* Oldest */
     [data-testid="column"]:nth-of-type(3) { max-width: 120px !important; } /* Target */
     [data-testid="column"]:nth-of-type(4) { max-width: 75px !important;  } /* Sign */
-    [data-testid="column"]:nth-of-type(5) { max-width: 110px !important; } /* Backlog Widget expanded from 85px */
+    [data-testid="column"]:nth-of-type(5) { max-width: 110px !important; } /* Backlog Widget */
     [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; } /* Notes Component */
     </style>
 """, unsafe_allow_html=True)
@@ -117,6 +117,7 @@ def init_shared_db():
             billing TEXT DEFAULT 'Pending',
             ordering TEXT DEFAULT 'Pending',
             dispense TEXT DEFAULT 'Pending',
+            return_fourteen_queue TEXT DEFAULT 'Pending',
             reminder_time TEXT DEFAULT '16:00', 
             reminder_sent INTEGER DEFAULT 0,
             supervisor_escaped INTEGER DEFAULT 0
@@ -132,7 +133,8 @@ def init_shared_db():
         ("ai_tech_check_by", "TEXT DEFAULT ''"), ("ai_tech_check_notes", "TEXT DEFAULT ''"), ("ai_tech_check_date", "TEXT DEFAULT ''"), ("ai_tech_check_target", "TEXT DEFAULT ''"),
         ("billing_by", "TEXT DEFAULT ''"), ("billing_notes", "TEXT DEFAULT ''"), ("billing_date", "TEXT DEFAULT ''"), ("billing_target", "TEXT DEFAULT ''"),
         ("ordering_by", "TEXT DEFAULT ''"), ("ordering_notes", "TEXT DEFAULT ''"), ("ordering_date", "TEXT DEFAULT ''"), ("ordering_target", "TEXT DEFAULT ''"),
-        ("dispense_by", "TEXT DEFAULT ''"), ("dispense_notes", "TEXT DEFAULT ''"), ("dispense_date", "TEXT DEFAULT ''"), ("dispense_target", "TEXT DEFAULT ''")
+        ("dispense_by", "TEXT DEFAULT ''"), ("dispense_notes", "TEXT DEFAULT ''"), ("dispense_date", "TEXT DEFAULT ''"), ("dispense_target", "TEXT DEFAULT ''"),
+        ("return_fourteen_queue_by", "TEXT DEFAULT ''"), ("return_fourteen_queue_notes", "TEXT DEFAULT ''"), ("return_fourteen_queue_date", "TEXT DEFAULT ''"), ("return_fourteen_queue_target", "TEXT DEFAULT ''")
     ]
     
     for col_name, col_type in schema_extensions:
@@ -493,7 +495,7 @@ with st.container(border=True):
             except:
                 return datetime.now().date()
 
-        def render_checklist_row(form_container, label, db_prefix, prefix_key):
+        def render_checklist_row(form_container, label, db_prefix, prefix_key, is_fourteen_day_threshold=False):
             form_container.markdown(f"##### {label}")
             cols = form_container.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
             
@@ -519,7 +521,10 @@ with st.container(border=True):
             # Real-time mathematical difference evaluation
             days_gap = (target_dt - oldest_dt).days
             
-            if days_gap >= 7:
+            # CUSTOM ALARM THRESHOLD ROUTING TRIGGER
+            limit_trigger = 14 if is_fourteen_day_threshold else 7
+            
+            if days_gap >= limit_trigger:
                 cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
             else:
                 cols[4].markdown(f"<div style='background-color:#f1f5f9; border:1px solid #cbd5e1; color:#475569; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
@@ -550,10 +555,13 @@ with st.container(border=True):
         r8, r8_oldest, r8_target, r8_by, r8_nt = render_checklist_row(this_form, "8. Order Queue Current", "ordering", "r8")
         r9, r9_oldest, r9_target, r9_by, r9_nt = render_checklist_row(this_form, "9. Dispense Queue Current", "dispense", "r9")
         
+        # ROW 10 IMPLEMENTED WITH SPECIAL 14-DAY CALCULATION
+        r10, r10_oldest, r10_target, r10_by, r10_nt = render_checklist_row(this_form, "10. 14 Day Return Current", "return_fourteen_queue", "r10", is_fourteen_day_threshold=True)
+        
         if st.button("Save Global Checklist Progress", type="primary", use_container_width=True, key="save_global_checklist_direct_btn"):
             local_cursor.execute("""
                 UPDATE daily_checklist 
-                SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=?, ai_tech_check=?, billing=?, ordering=?, dispense=?,
+                SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=?, ai_tech_check=?, billing=?, ordering=?, dispense=?, return_fourteen_queue=?,
                     rejection_queue_by=?, rejection_queue_notes=?, rejection_queue_date=?, rejection_queue_target=?,
                     pa_queue_by=?, pa_queue_notes=?, pa_queue_date=?, pa_queue_target=?,
                     untransmitted_claims_by=?, untransmitted_claims_notes=?, untransmitted_claims_date=?, untransmitted_claims_target=?,
@@ -562,10 +570,11 @@ with st.container(border=True):
                     ai_tech_check_by=?, ai_tech_check_notes=?, ai_tech_check_date=?, ai_tech_check_target=?,
                     billing_by=?, billing_notes=?, billing_date=?, billing_target=?,
                     ordering_by=?, ordering_notes=?, ordering_date=?, ordering_target=?,
-                    dispense_by=?, dispense_notes=?, dispense_date=?, dispense_target=?
+                    dispense_by=?, dispense_notes=?, dispense_date=?, dispense_target=?,
+                    return_fourteen_queue_by=?, return_fourteen_queue_notes=?, return_fourteen_queue_date=?, return_fourteen_queue_target=?
                 WHERE log_date=?
             """, (
-                r1, r2, r3, r4, r5, r6, r7, r8, r9,
+                r1, r2, r3, r4, r5, r6, r7, r8, r9, r10,
                 r1_by, r1_nt, r1_oldest, r1_target,
                 r2_by, r2_nt, r2_oldest, r2_target,
                 r3_by, r3_nt, r3_oldest, r3_target,
@@ -575,6 +584,7 @@ with st.container(border=True):
                 r7_by, r7_nt, r7_oldest, r7_target,
                 r8_by, r8_nt, r8_oldest, r8_target,
                 r9_by, r9_nt, r9_oldest, r9_target,
+                r10_by, r10_nt, r10_oldest, r10_target,
                 CURRENT_DATE
             ))
             conn.commit()
@@ -606,6 +616,7 @@ with st.container(border=True):
             {"name": "Billing Queue Current", "status": r7, "user": r7_by, "note": r7_nt, "oldest": r7_oldest, "target": r7_target},
             {"name": "Order Queue Current", "status": r8, "user": r8_by, "note": r8_nt, "oldest": r8_oldest, "target": r8_target},
             {"name": "Dispense Queue Current", "status": r9, "user": r9_by, "note": r9_nt, "oldest": r9_oldest, "target": r9_target},
+            {"name": "14 Day Return Current", "status": r10, "user": r10_by, "note": r10_nt, "oldest": r10_oldest, "target": r10_target},
         ]
         
         exception_lines = []
