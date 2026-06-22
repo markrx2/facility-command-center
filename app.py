@@ -482,13 +482,17 @@ with st.container(border=True):
         with st.form("master_checklist_form"):
             opt = ["Pending", "Yes", "No"]
             
+            # SAFE TRANSLATION ENGINE: Directly intercepts native date objects before processing strings
             def parse_stored_date(val):
                 if not val:
                     return datetime.now().date()
+                if isinstance(val, type(datetime.now().date())):
+                    return val  # If it is already a Python Date Object, return it directly
                 try:
-                    if "-" in str(val):
-                        return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
-                    return datetime.strptime(str(val).strip(), "%m/%d/%Y").date()
+                    val_str = str(val).strip()
+                    if "-" in val_str:
+                        return datetime.strptime(val_str, "%Y-%m-%d").date()
+                    return datetime.strptime(val_str, "%m/%d/%Y").date()
                 except:
                     return datetime.now().date()
 
@@ -508,9 +512,9 @@ with st.container(border=True):
                 target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
                 sign_by = cols[3].text_input("Sign", value=stored_by, key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
                 
-                # STRICT PYTHON DATE CASTING CALCULATION
-                d1 = parse_stored_date(oldest_dt) if not isinstance(oldest_dt, type(datetime.now().date())) else oldest_dt
-                d2 = parse_stored_date(target_dt) if not isinstance(target_dt, type(datetime.now().date())) else target_dt
+                # FIXED ABSOLUTE DATE EVALUATION LOOP
+                d1 = parse_stored_date(oldest_dt)
+                d2 = parse_stored_date(target_dt)
                 days_gap = (d2 - d1).days
                 
                 # CRITICAL SEVERITY COLOR ENGINE SWITCH
