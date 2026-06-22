@@ -230,20 +230,34 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     if not slot_row:
                         if goals_dict:
                             chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{w_id}_{slot_num}")
-                            st.caption(f"🎯 Target: {goals_dict[chosen_q]}")
+                            base_goal_str = goals_dict[chosen_q]
                             
                             durations = {
                                 "30 Minutes": 30, "1 Hour": 60, "2 Hours": 120, "4 Hours": 240, "8 Hours": 480
                             }
-                            chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), index=2, key=f"dur_{prefix}_{w_id}_{slot_num}")
+                            chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), index=1, key=f"dur_{prefix}_{w_id}_{slot_num}")
                             chosen_dur_min = durations[chosen_dur_label]
+                            
+                            # DYNAMIC MATRIX CALCULATION ENGINE (Calculates targets dynamically based on hour block selected)
+                            numeric_match = re.search(r'\d+', str(base_goal_str))
+                            if numeric_match:
+                                base_num = int(numeric_match.group())
+                                text_suffix = base_goal_str.replace(str(base_num), "").strip()
+                                
+                                # Scale value proportional to time block allocation
+                                scaled_num = int(base_num * (chosen_dur_min / 60.0))
+                                calculated_goal_str = f"{scaled_num} {text_suffix}".strip()
+                            else:
+                                calculated_goal_str = base_goal_str
+                                
+                            st.caption(f"🎯 Calculated Target: **{calculated_goal_str}** *(Base: {base_goal_str}/hr)*")
                             
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 local_cursor.execute(f"""
                                     INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) 
                                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                                """, (CURRENT_DATE, worker, slot_num, chosen_q, goals_dict[chosen_q], now_str, chosen_dur_min))
+                                """, (CURRENT_DATE, worker, slot_num, chosen_q, calculated_goal_str, now_str, chosen_dur_min))
                                 conn.commit()
                                 st.rerun()
                         else:
@@ -259,7 +273,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         db_dur_min = slot_row["duration_minutes"]
                         
                         st.markdown(f"Queue: `{db_queue}`")
-                        st.caption(f"Target Goal: {db_goal} ({db_dur_min} min block)")
+                        st.caption(f"Target Goal: **{db_goal}** ({db_dur_min} min block)")
                         
                         start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
                         end_time = start_time + timedelta(minutes=db_dur_min)
@@ -372,13 +386,15 @@ with tab_mgmt:
             st.subheader("➕ Create Custom Queue Trackers")
             target_dept = st.selectbox("Select Department Destination:", [("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")], key="mgmt_dept_selector")
             new_q_name = st.text_input("New Queue Name:", placeholder="e.g., Priority Tier 3 Verification", key="mgmt_q_name_input").strip()
-            new_q_goal = st.text_input("Production Unit Goal Target:", placeholder="e.g., 25 claims processed", key="mgmt_goal_input").strip()
+            
+            # CLEAR STRUCTURAL EXPECTATION IN INPUT FIELD HINT
+            new_q_goal = st.text_input("Production Unit Goal Target (PER 1 HOUR):", placeholder="e.g., 50 claims", key="mgmt_goal_input").strip()
             
             if st.button("Save New Queue Component", type="primary", use_container_width=True, key="mgmt_save_btn"):
                 if new_q_name and new_q_goal:
                     local_cursor.execute("INSERT OR REPLACE INTO dynamic_queues VALUES (?, ?, ?)", (target_dept[1], new_q_name, new_q_goal))
                     conn.commit()
-                    st.success(f"Added operational tracking line: {new_q_name}")
+                    st.success(f"Added baseline operational tracking line: {new_q_name} at {new_q_goal}/hr")
                     st.rerun()
                     
         with m_col2:
@@ -397,7 +413,7 @@ with tab_mgmt:
                     dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
                     with st.container(border=True):
                         st.markdown(f"**[{dept_lbl}]** `{q_name}`")
-                        st.caption(f"Goal Vector: {q_goal}")
+                        st.caption(f"Base Hourly Vector: {q_goal} per hour")
                         
                         if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{hash(q_name)}", use_container_width=True):
                             local_cursor.execute("DELETE FROM dynamic_queues WHERE dept_prefix=? AND queue_name=?", (q_prefix, q_name))
@@ -523,7 +539,6 @@ with st.container(border=True):
             
             limit_trigger = 14 if is_fourteen_day_threshold else 7
             
-            # CRITICAL LOOK AND FEEL UPDATE: Dynamic Green vs Red styling engine logic block
             if days_gap >= limit_trigger:
                 cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
             else:
