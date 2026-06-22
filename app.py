@@ -482,12 +482,11 @@ with st.container(border=True):
         with st.form("master_checklist_form"):
             opt = ["Pending", "Yes", "No"]
             
-            # SAFE TRANSLATION ENGINE: Directly intercepts native date objects before processing strings
             def parse_stored_date(val):
                 if not val:
                     return datetime.now().date()
                 if isinstance(val, type(datetime.now().date())):
-                    return val  # If it is already a Python Date Object, return it directly
+                    return val
                 try:
                     val_str = str(val).strip()
                     if "-" in val_str:
@@ -508,14 +507,14 @@ with st.container(border=True):
                 stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
 
                 status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(stored_status if stored_status in opt else "Pending"), horizontal=True, key=f"status_{prefix_key}", label_visibility="collapsed")
+                
+                # Render inputs
                 oldest_dt = cols[1].date_input("Oldest", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
                 target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
                 sign_by = cols[3].text_input("Sign", value=stored_by, key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
                 
-                # FIXED ABSOLUTE DATE EVALUATION LOOP
-                d1 = parse_stored_date(oldest_dt)
-                d2 = parse_stored_date(target_dt)
-                days_gap = (d2 - d1).days
+                # CALCULATE DIRECTLY FROM THE ACTIVE UI WIDGET OBJECTS FOR REAL-TIME DISPLAY UPDATE
+                days_gap = (target_dt - oldest_dt).days
                 
                 # CRITICAL SEVERITY COLOR ENGINE SWITCH
                 if days_gap >= 7:
