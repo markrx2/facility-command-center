@@ -78,6 +78,10 @@ def init_shared_db():
             untransmitted_claims TEXT DEFAULT 'Pending',
             future_bill TEXT DEFAULT 'Pending', 
             data_re_entry TEXT DEFAULT 'Pending',
+            ai_tech_check TEXT DEFAULT 'Pending',
+            billing TEXT DEFAULT 'Pending',
+            ordering TEXT DEFAULT 'Pending',
+            dispense TEXT DEFAULT 'Pending',
             reminder_time TEXT DEFAULT '16:00', 
             reminder_sent INTEGER DEFAULT 0,
             supervisor_escaped INTEGER DEFAULT 0
@@ -85,11 +89,15 @@ def init_shared_db():
     """)
     
     schema_extensions = [
-        ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"), ("rejection_queue_date", "TEXT DEFAULT ''"),
-        ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"), ("pa_queue_date", "TEXT DEFAULT ''"),
-        ("untransmitted_claims_by", "TEXT DEFAULT ''"), ("untransmitted_claims_notes", "TEXT DEFAULT ''"), ("untransmitted_claims_date", "TEXT DEFAULT ''"),
-        ("future_bill_by", "TEXT DEFAULT ''"), ("future_bill_notes", "TEXT DEFAULT ''"), ("future_bill_date", "TEXT DEFAULT ''"),
-        ("data_re_entry_by", "TEXT DEFAULT ''"), ("data_re_entry_notes", "TEXT DEFAULT ''"), ("data_re_entry_date", "TEXT DEFAULT ''")
+        ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"), ("rejection_queue_date", "TEXT DEFAULT ''"), ("rejection_queue_target", "TEXT DEFAULT ''"),
+        ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"), ("pa_queue_date", "TEXT DEFAULT ''"), ("pa_queue_target", "TEXT DEFAULT ''"),
+        ("untransmitted_claims_by", "TEXT DEFAULT ''"), ("untransmitted_claims_notes", "TEXT DEFAULT ''"), ("untransmitted_claims_date", "TEXT DEFAULT ''"), ("untransmitted_claims_target", "TEXT DEFAULT ''"),
+        ("future_bill_by", "TEXT DEFAULT ''"), ("future_bill_notes", "TEXT DEFAULT ''"), ("future_bill_date", "TEXT DEFAULT ''"), ("future_bill_target", "TEXT DEFAULT ''"),
+        ("data_re_entry_by", "TEXT DEFAULT ''"), ("data_re_entry_notes", "TEXT DEFAULT ''"), ("data_re_entry_date", "TEXT DEFAULT ''"), ("data_re_entry_target", "TEXT DEFAULT ''"),
+        ("ai_tech_check_by", "TEXT DEFAULT ''"), ("ai_tech_check_notes", "TEXT DEFAULT ''"), ("ai_tech_check_date", "TEXT DEFAULT ''"), ("ai_tech_check_target", "TEXT DEFAULT ''"),
+        ("billing_by", "TEXT DEFAULT ''"), ("billing_notes", "TEXT DEFAULT ''"), ("billing_date", "TEXT DEFAULT ''"), ("billing_target", "TEXT DEFAULT ''"),
+        ("ordering_by", "TEXT DEFAULT ''"), ("ordering_notes", "TEXT DEFAULT ''"), ("ordering_date", "TEXT DEFAULT ''"), ("ordering_target", "TEXT DEFAULT ''"),
+        ("dispense_by", "TEXT DEFAULT ''"), ("dispense_notes", "TEXT DEFAULT ''"), ("dispense_date", "TEXT DEFAULT ''"), ("dispense_target", "TEXT DEFAULT ''")
     ]
     for col_name, col_type in schema_extensions:
         try:
@@ -403,7 +411,7 @@ with st.container(border=True):
         local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
         chk = local_cursor.fetchone()
         
-    c_col, f_col = st.columns([2, 1])
+    c_col, f_col = st.columns([2.5, 1])
     with f_col:
         with st.container(border=True):
             t_obj = datetime.strptime(chk["reminder_time"], "%H:%M").time()
@@ -417,65 +425,61 @@ with st.container(border=True):
         with st.form("master_checklist_form"):
             opt = ["Pending", "Yes", "No"]
             
-            # Helper logic to clean parsing of stored dates into standard MM/DD/YYYY formats
             def parse_stored_date(val):
                 try:
                     return datetime.strptime(val, "%m/%d/%Y").date() if val else datetime.now().date()
                 except ValueError:
                     return datetime.now().date()
 
-            # Row 1: Rejection Queue
-            r1_c1, r1_c2, r1_c3, r1_c4 = st.columns([2, 1.5, 1, 2.5])
-            r1 = r1_c1.radio("1. Rejection Queue Status", opt, index=opt.index(chk["rejection_queue"]), horizontal=True)
-            r1_dt = r1_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["rejection_queue_date"]), key="dt_r1", format="MM/DD/YYYY")
-            r1_by = r1_c3.text_input("Sign:", value=chk["rejection_queue_by"], key="by_r1", placeholder="Initials")
-            r1_nt = r1_c4.text_input("Operational Notes:", value=chk["rejection_queue_notes"], key="nt_r1", placeholder="Add context...")
-            
-            # Row 2: PA Queue
-            r2_c1, r2_c2, r2_c3, r2_c4 = st.columns([2, 1.5, 1, 2.5])
-            r2 = r2_c1.radio("2. PA Queue Status", opt, index=opt.index(chk["pa_queue"]), horizontal=True)
-            r2_dt = r2_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["pa_queue_date"]), key="dt_r2", format="MM/DD/YYYY")
-            r2_by = r2_c3.text_input("Sign:", value=chk["pa_queue_by"], key="by_r2", placeholder="Initials")
-            r2_nt = r2_c4.text_input("Operational Notes:", value=chk["pa_queue_notes"], key="nt_r2", placeholder="Add context...")
-            
-            # Row 3: Untransmitted Claims
-            r3_c1, r3_c2, r3_c3, r3_c4 = st.columns([2, 1.5, 1, 2.5])
-            r3 = r3_c1.radio("3. Untransmitted Claims Status", opt, index=opt.index(chk["untransmitted_claims"]), horizontal=True)
-            r3_dt = r3_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["untransmitted_claims_date"]), key="dt_r3", format="MM/DD/YYYY")
-            r3_by = r3_c3.text_input("Sign:", value=chk["untransmitted_claims_by"], key="by_r3", placeholder="Initials")
-            r3_nt = r3_c4.text_input("Operational Notes:", value=chk["untransmitted_claims_notes"], key="nt_r3", placeholder="Add context...")
-            
-            # Row 4: Future Bill
-            r4_c1, r4_c2, r4_c3, r4_c4 = st.columns([2, 1.5, 1, 2.5])
-            r4 = r4_c1.radio("4. Future Bill Status", opt, index=opt.index(chk["future_bill"]), horizontal=True)
-            r4_dt = r4_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["future_bill_date"]), key="dt_r4", format="MM/DD/YYYY")
-            r4_by = r4_c3.text_input("Sign:", value=chk["future_bill_by"], key="by_r4", placeholder="Initials")
-            r4_nt = r4_c4.text_input("Operational Notes:", value=chk["future_bill_notes"], key="nt_r4", placeholder="Add context...")
-            
-            # Row 5: Data-Re-Entry
-            r5_c1, r5_c2, r5_c3, r5_c4 = st.columns([2, 1.5, 1, 2.5])
-            r5 = r5_c1.radio("5. Data-Re-Entry Status", opt, index=opt.index(chk["data_re_entry"]), horizontal=True)
-            r5_dt = r5_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["data_re_entry_date"]), key="dt_r5", format="MM/DD/YYYY")
-            r5_by = r5_c3.text_input("Sign:", value=chk["data_re_entry_by"], key="by_r5", placeholder="Initials")
-            r5_nt = r5_c4.text_input("Operational Notes:", value=chk["data_re_entry_notes"], key="nt_r5", placeholder="Add context...")
+            # Helper rendering logic for each distinct line item row to ensure scannable columns
+            def render_checklist_row(label, db_prefix, prefix_key):
+                st.markdown(f"##### {label}")
+                cols = st.columns([1.8, 1.2, 1.2, 0.8, 2.0])
+                
+                status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(chk[db_prefix] if chk[db_prefix] in opt else "Pending"), horizontal=True, key=f"status_{prefix_key}", label_visibility="collapsed")
+                oldest_dt = cols[1].date_input("Oldest Date", value=parse_stored_date(chk[f"{db_prefix}_date"]), key=f"odt_{prefix_key}", format="MM/DD/YYYY")
+                target_dt = cols[2].date_input("Target Date", value=parse_stored_date(chk[f"{db_prefix}_target"]), key=f"tdt_{prefix_key}", format="MM/DD/YYYY")
+                sign_by = cols[3].text_input("Sign", value=chk[f"{db_prefix}_by"], key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
+                notes_val = cols[4].text_input("Notes", value=chk[f"{db_prefix}_notes"], key=f"nt_{prefix_key}", placeholder="Operational Notes...", label_visibility="collapsed")
+                st.markdown("---")
+                return status_val, oldest_dt.strftime("%m/%d/%Y"), target_dt.strftime("%m/%d/%Y"), sign_by, notes_val
+
+            # Draw the 9 Row Matrix elements
+            r1, r1_oldest, r1_target, r1_by, r1_nt = render_checklist_row("1. Rejection Queue Status", "rejection_queue", "r1")
+            r2, r2_oldest, r2_target, r2_by, r2_nt = render_checklist_row("2. PA Queue Status", "pa_queue", "r2")
+            r3, r3_oldest, r3_target, r3_by, r3_nt = render_checklist_row("3. Untransmitted Claims Status", "untransmitted_claims", "r3")
+            r4, r4_oldest, r4_target, r4_by, r4_nt = render_checklist_row("4. Future Bill Status", "future_bill", "r4")
+            r5, r5_oldest, r5_target, r5_by, r5_nt = render_checklist_row("5. Data-Re-Entry Status", "data_re_entry", "r5")
+            r6, r6_oldest, r6_target, r6_by, r6_nt = render_checklist_row("6. AI/Tech Check Status", "ai_tech_check", "r6")
+            r7, r7_oldest, r7_target, r7_by, r7_nt = render_checklist_row("7. Billing Status", "billing", "r7")
+            r8, r8_oldest, r8_target, r8_by, r8_nt = render_checklist_row("8. Ordering Status", "ordering", "r8")
+            r9, r9_oldest, r9_target, r9_by, r9_nt = render_checklist_row("9. Dispense Status", "dispense", "r9")
             
             if st.form_submit_button("Save Global Checklist Progress", type="primary", use_container_width=True):
                 local_cursor.execute("""
                     UPDATE daily_checklist 
-                    SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=?,
-                        rejection_queue_by=?, rejection_queue_notes=?, rejection_queue_date=?,
-                        pa_queue_by=?, pa_queue_notes=?, pa_queue_date=?,
-                        untransmitted_claims_by=?, untransmitted_claims_notes=?, untransmitted_claims_date=?,
-                        future_bill_by=?, future_bill_notes=?, future_bill_date=?,
-                        data_re_entry_by=?, data_re_entry_notes=?, data_re_entry_date=?
+                    SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=?, ai_tech_check=?, billing=?, ordering=?, dispense=?,
+                        rejection_queue_by=?, rejection_queue_notes=?, rejection_queue_date=?, rejection_queue_target=?,
+                        pa_queue_by=?, pa_queue_notes=?, pa_queue_date=?, pa_queue_target=?,
+                        untransmitted_claims_by=?, untransmitted_claims_notes=?, untransmitted_claims_date=?, untransmitted_claims_target=?,
+                        future_bill_by=?, future_bill_notes=?, future_bill_date=?, future_bill_target=?,
+                        data_re_entry_by=?, data_re_entry_notes=?, data_re_entry_date=?, data_re_entry_target=?,
+                        ai_tech_check_by=?, ai_tech_check_notes=?, ai_tech_check_date=?, ai_tech_check_target=?,
+                        billing_by=?, billing_notes=?, billing_date=?, billing_target=?,
+                        ordering_by=?, ordering_notes=?, ordering_date=?, ordering_target=?,
+                        dispense_by=?, dispense_notes=?, dispense_date=?, dispense_target=?
                     WHERE log_date=?
                 """, (
-                    r1, r2, r3, r4, r5, 
-                    r1_by, r1_nt, r1_dt.strftime("%m/%d/%Y"),
-                    r2_by, r2_nt, r2_dt.strftime("%m/%d/%Y"),
-                    r3_by, r3_nt, r3_dt.strftime("%m/%d/%Y"),
-                    r4_by, r4_nt, r4_dt.strftime("%m/%d/%Y"),
-                    r5_by, r5_nt, r5_dt.strftime("%m/%d/%Y"),
+                    r1, r2, r3, r4, r5, r6, r7, r8, r9,
+                    r1_by, r1_nt, r1_oldest, r1_target,
+                    r2_by, r2_nt, r2_oldest, r2_target,
+                    r3_by, r3_nt, r3_oldest, r3_target,
+                    r4_by, r4_nt, r4_oldest, r4_target,
+                    r5_by, r5_nt, r5_oldest, r5_target,
+                    r6_by, r6_nt, r6_oldest, r6_target,
+                    r7_by, r7_nt, r7_oldest, r7_target,
+                    r8_by, r8_nt, r8_oldest, r8_target,
+                    r9_by, r9_nt, r9_oldest, r9_target,
                     CURRENT_DATE
                 ))
                 conn.commit()
@@ -497,23 +501,27 @@ with st.container(border=True):
         escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
         
         queue_map = [
-            {"name": "Rejection Queue", "status": r1, "user": r1_by, "note": r1_nt, "oldest": r1_dt.strftime("%m/%d/%Y")},
-            {"name": "PA Queue", "status": r2, "user": r2_by, "note": r2_nt, "oldest": r2_dt.strftime("%m/%d/%Y")},
-            {"name": "Untransmitted Claims", "status": r3, "user": r3_by, "note": r3_nt, "oldest": r3_dt.strftime("%m/%d/%Y")},
-            {"name": "Future Bill", "status": r4, "user": r4_by, "note": r4_nt, "oldest": r4_dt.strftime("%m/%d/%Y")},
-            {"name": "Data-Re-Entry", "status": r5, "user": r5_by, "note": r5_nt, "oldest": r5_dt.strftime("%m/%d/%Y")},
+            {"name": "Rejection Queue", "status": r1, "user": r1_by, "note": r1_nt, "oldest": r1_oldest, "target": r1_target},
+            {"name": "PA Queue", "status": r2, "user": r2_by, "note": r2_nt, "oldest": r2_oldest, "target": r2_target},
+            {"name": "Untransmitted Claims", "status": r3, "user": r3_by, "note": r3_nt, "oldest": r3_oldest, "target": r3_target},
+            {"name": "Future Bill", "status": r4, "user": r4_by, "note": r4_nt, "oldest": r4_oldest, "target": r4_target},
+            {"name": "Data-Re-Entry", "status": r5, "user": r5_by, "note": r5_nt, "oldest": r5_oldest, "target": r5_target},
+            {"name": "AI/Tech Check", "status": r6, "user": r6_by, "note": r6_nt, "oldest": r6_oldest, "target": r6_target},
+            {"name": "Billing", "status": r7, "user": r7_by, "note": r7_nt, "oldest": r7_oldest, "target": r7_target},
+            {"name": "Ordering", "status": r8, "user": r8_by, "note": r8_nt, "oldest": r8_oldest, "target": r8_target},
+            {"name": "Dispense", "status": r9, "user": r9_by, "note": r9_nt, "oldest": r9_oldest, "target": r9_target},
         ]
         
         exception_lines = []
         for q in queue_map:
             user_string = f" [By: {q['user'].strip()}]" if q['user'].strip() else ""
             note_string = f" - Note: \"{q['note'].strip()}\"" if q['note'].strip() else ""
-            oldest_string = f" (Oldest Item: {q['oldest']})"
+            dates_string = f" (Oldest: {q['oldest']} | Target: {q['target']})"
             
             if q["status"] == "Pending":
                 exception_lines.append(f"❌ {q['name']}: PENDING")
             elif q["status"] == "No":
-                exception_lines.append(f"⚠️ {q['name']}: MARKED NO{oldest_string}{user_string}{note_string}")
+                exception_lines.append(f"⚠️ {q['name']}: MARKED NO{dates_string}{user_string}{note_string}")
         
         if exception_lines:
             status_ledger_string = "\n".join(exception_lines)
