@@ -478,16 +478,17 @@ with st.container(border=True):
                 st.rerun()
             
     with c_col:
-        # REMOVED ISOLATING st.form WRAPPER HERE TO PERMIT TRUE REAL-TIME REACTIVE CALCULATIONS
         opt = ["Pending", "Yes", "No"]
         
+        # FIXED: CRITICAL DATETIME DESERIALIZATION SYNC ENGINE
         def parse_stored_date(val):
-            if not val:
+            if not val or str(val).strip() == "":
                 return datetime.now().date()
             if isinstance(val, type(datetime.now().date())):
                 return val
             try:
                 val_str = str(val).strip()
+                # Safely parsing ISO standard saved formats
                 if "-" in val_str:
                     return datetime.strptime(val_str, "%Y-%m-%d").date()
                 return datetime.strptime(val_str, "%m/%d/%Y").date()
@@ -507,15 +508,13 @@ with st.container(border=True):
 
             status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(stored_status if stored_status in opt else "Pending"), horizontal=True, key=f"status_{prefix_key}", label_visibility="collapsed")
             
-            # Form-free live reactive calendar nodes
             oldest_dt = cols[1].date_input("Oldest", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
             target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}", format="MM/DD/YYYY", label_visibility="collapsed")
             sign_by = cols[3].text_input("Sign", value=stored_by, key=f"by_{prefix_key}", placeholder="Initials", label_visibility="collapsed")
             
-            # EVALUATES DIRECTLY INSTANTANEOUSLY ON USER INPUT SESSIONS
+            # Instant live state calculation
             days_gap = (target_dt - oldest_dt).days
             
-            # CRITICAL SEVERITY COLOR ENGINE SWITCH
             if days_gap >= 7:
                 cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
             else:
@@ -523,7 +522,9 @@ with st.container(border=True):
             
             notes_val = cols[5].text_input("Notes", value=stored_notes, key=f"nt_{prefix_key}", placeholder="Operational notes...", label_visibility="collapsed")
             form_container.markdown("---")
-            return status_val, oldest_dt.strftime("%m/%d/%Y"), target_dt.strftime("%m/%d/%Y"), sign_by, notes_val
+            
+            # FIXED: Return pure machine-readable ISO format text strings ("YYYY-MM-DD")
+            return status_val, oldest_dt.strftime("%Y-%m-%d"), target_dt.strftime("%Y-%m-%d"), sign_by, notes_val
 
         this_form = st.container()
         
@@ -574,7 +575,7 @@ with st.container(border=True):
                 CURRENT_DATE
             ))
             conn.commit()
-            st.success("🎉 All checklist parameters saved successfully!")
+            st.success("🎉 All checklist parameters saved permanently to the database matrix!")
             st.rerun()
 
     # --- TIMEZONE AND WEEKEND HANDLING ENGINE ---
