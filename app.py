@@ -417,75 +417,47 @@ with st.container(border=True):
         with st.form("master_checklist_form"):
             opt = ["Pending", "Yes", "No"]
             
-            # Sub-function handler to draw a nullable/expandable MM/DD/YYYY date field
-            def render_nullable_date_input(label_txt, stored_val, form_key_id):
-                # If database string holds an active date string, default the checkbox wrapper to True
-                has_initial_date = (stored_val != "" and stored_val is not None)
-                
-                c1, c2 = st.columns([1, 2.5])
-                with c1:
-                    is_active = st.checkbox("Specify Date", value=has_initial_date, key=f"chk_bool_{form_key_id}")
-                with c2:
-                    if is_active:
-                        try:
-                            fallback_dt = datetime.strptime(stored_val, "%m/%d/%Y").date()
-                        except:
-                            fallback_dt = datetime.now().date()
-                        
-                        chosen_dt = st.date_input(label_txt, value=fallback_dt, key=f"date_pick_{form_key_id}", label_visibility="collapsed")
-                        return chosen_dt.strftime("%m/%d/%Y")
-                    else:
-                        st.text_input("Date Field Status:", value="[ Blank / None ]", disabled=True, key=f"blank_view_{form_key_id}", label_visibility="collapsed")
-                        return ""
+            # Helper logic to clean parsing of stored dates into standard MM/DD/YYYY formats
+            def parse_stored_date(val):
+                try:
+                    return datetime.strptime(val, "%m/%d/%Y").date() if val else datetime.now().date()
+                except ValueError:
+                    return datetime.now().date()
 
             # Row 1: Rejection Queue
-            st.markdown("**1. Rejection Queue Track**")
-            r1_c1, r1_c2, r1_c3 = st.columns([2, 3.5, 3.5])
-            r1 = r1_c1.radio("Rejection Status", opt, index=opt.index(chk["rejection_queue"]), horizontal=True, label_visibility="collapsed")
-            with r1_c2:
-                r1_dt_str = render_nullable_date_input("Oldest Date in Queue", chk["rejection_queue_date"], "r1")
-            r1_by = r1_c3.text_input("Sign Name/Initials:", value=chk["rejection_queue_by"], key="by_r1", placeholder="Initials")
-            r1_nt = st.text_input("Operational Context Notes:", value=chk["rejection_queue_notes"], key="nt_r1", placeholder="Add context notes for rejection queue...")
-            st.markdown("---")
+            r1_c1, r1_c2, r1_c3, r1_c4 = st.columns([2, 1.5, 1, 2.5])
+            r1 = r1_c1.radio("1. Rejection Queue Status", opt, index=opt.index(chk["rejection_queue"]), horizontal=True)
+            r1_dt = r1_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["rejection_queue_date"]), key="dt_r1", format="MM/DD/YYYY")
+            r1_by = r1_c3.text_input("Sign:", value=chk["rejection_queue_by"], key="by_r1", placeholder="Initials")
+            r1_nt = r1_c4.text_input("Operational Notes:", value=chk["rejection_queue_notes"], key="nt_r1", placeholder="Add context...")
             
             # Row 2: PA Queue
-            st.markdown("**2. PA Queue Track**")
-            r2_c1, r2_c2, r2_c3 = st.columns([2, 3.5, 3.5])
-            r2 = r2_c1.radio("PA Status", opt, index=opt.index(chk["pa_queue"]), horizontal=True, label_visibility="collapsed")
-            with r2_c2:
-                r2_dt_str = render_nullable_date_input("Oldest Date in Queue", chk["pa_queue_date"], "r2")
-            r2_by = r2_c3.text_input("Sign Name/Initials:", value=chk["pa_queue_by"], key="by_r2", placeholder="Initials")
-            r2_nt = st.text_input("Operational Context Notes:", value=chk["pa_queue_notes"], key="nt_r2", placeholder="Add context notes for PA queue...")
-            st.markdown("---")
+            r2_c1, r2_c2, r2_c3, r2_c4 = st.columns([2, 1.5, 1, 2.5])
+            r2 = r2_c1.radio("2. PA Queue Status", opt, index=opt.index(chk["pa_queue"]), horizontal=True)
+            r2_dt = r2_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["pa_queue_date"]), key="dt_r2", format="MM/DD/YYYY")
+            r2_by = r2_c3.text_input("Sign:", value=chk["pa_queue_by"], key="by_r2", placeholder="Initials")
+            r2_nt = r2_c4.text_input("Operational Notes:", value=chk["pa_queue_notes"], key="nt_r2", placeholder="Add context...")
             
             # Row 3: Untransmitted Claims
-            st.markdown("**3. Untransmitted Claims Track**")
-            r3_c1, r3_c2, r3_c3 = st.columns([2, 3.5, 3.5])
-            r3 = r3_c1.radio("Claims Status", opt, index=opt.index(chk["untransmitted_claims"]), horizontal=True, label_visibility="collapsed")
-            with r3_c2:
-                r3_dt_str = render_nullable_date_input("Oldest Date in Queue", chk["untransmitted_claims_date"], "r3")
-            r3_by = r3_c3.text_input("Sign Name/Initials:", value=chk["untransmitted_claims_by"], key="by_r3", placeholder="Initials")
-            r3_nt = st.text_input("Operational Context Notes:", value=chk["untransmitted_claims_notes"], key="nt_r3", placeholder="Add context notes for untransmitted claims...")
-            st.markdown("---")
+            r3_c1, r3_c2, r3_c3, r3_c4 = st.columns([2, 1.5, 1, 2.5])
+            r3 = r3_c1.radio("3. Untransmitted Claims Status", opt, index=opt.index(chk["untransmitted_claims"]), horizontal=True)
+            r3_dt = r3_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["untransmitted_claims_date"]), key="dt_r3", format="MM/DD/YYYY")
+            r3_by = r3_c3.text_input("Sign:", value=chk["untransmitted_claims_by"], key="by_r3", placeholder="Initials")
+            r3_nt = r3_c4.text_input("Operational Notes:", value=chk["untransmitted_claims_notes"], key="nt_r3", placeholder="Add context...")
             
             # Row 4: Future Bill
-            st.markdown("**4. Future Bill Track**")
-            r4_c1, r4_c2, r4_c3 = st.columns([2, 3.5, 3.5])
-            r4 = r4_c1.radio("Future Status", opt, index=opt.index(chk["future_bill"]), horizontal=True, label_visibility="collapsed")
-            with r4_c2:
-                r4_dt_str = render_nullable_date_input("Oldest Date in Queue", chk["future_bill_date"], "r4")
-            r4_by = r4_c3.text_input("Sign Name/Initials:", value=chk["future_bill_by"], key="by_r4", placeholder="Initials")
-            r4_nt = st.text_input("Operational Context Notes:", value=chk["future_bill_notes"], key="nt_r4", placeholder="Add context notes for future bill...")
-            st.markdown("---")
+            r4_c1, r4_c2, r4_c3, r4_c4 = st.columns([2, 1.5, 1, 2.5])
+            r4 = r4_c1.radio("4. Future Bill Status", opt, index=opt.index(chk["future_bill"]), horizontal=True)
+            r4_dt = r4_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["future_bill_date"]), key="dt_r4", format="MM/DD/YYYY")
+            r4_by = r4_c3.text_input("Sign:", value=chk["future_bill_by"], key="by_r4", placeholder="Initials")
+            r4_nt = r4_c4.text_input("Operational Notes:", value=chk["future_bill_notes"], key="nt_r4", placeholder="Add context...")
             
             # Row 5: Data-Re-Entry
-            st.markdown("**5. Data-Re-Entry Track**")
-            r5_c1, r5_c2, r5_c3 = st.columns([2, 3.5, 3.5])
-            r5 = r5_c1.radio("RE-Entry Status", opt, index=opt.index(chk["data_re_entry"]), horizontal=True, label_visibility="collapsed")
-            with r5_c2:
-                r5_dt_str = render_nullable_date_input("Oldest Date in Queue", chk["data_re_entry_date"], "r5")
-            r5_by = r5_c3.text_input("Sign Name/Initials:", value=chk["data_re_entry_by"], key="by_r5", placeholder="Initials")
-            r5_nt = st.text_input("Operational Context Notes:", value=chk["data_re_entry_notes"], key="nt_r5", placeholder="Add context notes for data-re-entry...")
+            r5_c1, r5_c2, r5_c3, r5_c4 = st.columns([2, 1.5, 1, 2.5])
+            r5 = r5_c1.radio("5. Data-Re-Entry Status", opt, index=opt.index(chk["data_re_entry"]), horizontal=True)
+            r5_dt = r5_c2.date_input("Oldest Date in Queue", value=parse_stored_date(chk["data_re_entry_date"]), key="dt_r5", format="MM/DD/YYYY")
+            r5_by = r5_c3.text_input("Sign:", value=chk["data_re_entry_by"], key="by_r5", placeholder="Initials")
+            r5_nt = r5_c4.text_input("Operational Notes:", value=chk["data_re_entry_notes"], key="nt_r5", placeholder="Add context...")
             
             if st.form_submit_button("Save Global Checklist Progress", type="primary", use_container_width=True):
                 local_cursor.execute("""
@@ -499,11 +471,11 @@ with st.container(border=True):
                     WHERE log_date=?
                 """, (
                     r1, r2, r3, r4, r5, 
-                    r1_by, r1_nt, r1_dt_str,
-                    r2_by, r2_nt, r2_dt_str,
-                    r3_by, r3_nt, r3_dt_str,
-                    r4_by, r4_nt, r4_dt_str,
-                    r5_by, r5_nt, r5_dt_str,
+                    r1_by, r1_nt, r1_dt.strftime("%m/%d/%Y"),
+                    r2_by, r2_nt, r2_dt.strftime("%m/%d/%Y"),
+                    r3_by, r3_nt, r3_dt.strftime("%m/%d/%Y"),
+                    r4_by, r4_nt, r4_dt.strftime("%m/%d/%Y"),
+                    r5_by, r5_nt, r5_dt.strftime("%m/%d/%Y"),
                     CURRENT_DATE
                 ))
                 conn.commit()
@@ -525,18 +497,18 @@ with st.container(border=True):
         escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
         
         queue_map = [
-            {"name": "Rejection Queue", "status": r1, "user": r1_by, "note": r1_nt, "oldest": r1_dt_str},
-            {"name": "PA Queue", "status": r2, "user": r2_by, "note": r2_nt, "oldest": r2_dt_str},
-            {"name": "Untransmitted Claims", "status": r3, "user": r3_by, "note": r3_nt, "oldest": r3_dt_str},
-            {"name": "Future Bill", "status": r4, "user": r4_by, "note": r4_nt, "oldest": r4_dt_str},
-            {"name": "Data-Re-Entry", "status": r5, "user": r5_by, "note": r5_nt, "oldest": r5_dt_str},
+            {"name": "Rejection Queue", "status": r1, "user": r1_by, "note": r1_nt, "oldest": r1_dt.strftime("%m/%d/%Y")},
+            {"name": "PA Queue", "status": r2, "user": r2_by, "note": r2_nt, "oldest": r2_dt.strftime("%m/%d/%Y")},
+            {"name": "Untransmitted Claims", "status": r3, "user": r3_by, "note": r3_nt, "oldest": r3_dt.strftime("%m/%d/%Y")},
+            {"name": "Future Bill", "status": r4, "user": r4_by, "note": r4_nt, "oldest": r4_dt.strftime("%m/%d/%Y")},
+            {"name": "Data-Re-Entry", "status": r5, "user": r5_by, "note": r5_nt, "oldest": r5_dt.strftime("%m/%d/%Y")},
         ]
         
         exception_lines = []
         for q in queue_map:
             user_string = f" [By: {q['user'].strip()}]" if q['user'].strip() else ""
             note_string = f" - Note: \"{q['note'].strip()}\"" if q['note'].strip() else ""
-            oldest_string = f" (Oldest Item: {q['oldest']})" if q['oldest'] else " (Oldest Item: None Listed)"
+            oldest_string = f" (Oldest Item: {q['oldest']})"
             
             if q["status"] == "Pending":
                 exception_lines.append(f"❌ {q['name']}: PENDING")
