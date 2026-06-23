@@ -206,36 +206,30 @@ elif pwd_input != "":
     st.sidebar.error("❌ Incorrect Password")
 
 st.sidebar.markdown("---")
+
+# --- SOLUTION: EMBED THE QUICK ADD INTO A CONTROLLED FORM ---
 st.sidebar.subheader("➕ Quick Add Personnel to Floor")
+with st.sidebar.form(key="add_personnel_form", clear_on_submit=True):
+    dest_dept = st.selectbox("Assign to Department:", options=[
+        ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
+    ], format_func=lambda x: x[0], key="form_target_dept")
 
-dest_dept = st.sidebar.selectbox("Assign to Department:", options=[
-    ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
-], format_func=lambda x: x[0], key="global_target_dept_sel")
-
-# Initialize addition helper keys inside state safely to avoid widget synchronization lockouts
-if "add_name_val" not in st.session_state: st.session_state["add_name_val"] = ""
-if "add_email_val" not in st.session_state: st.session_state["add_email_val"] = ""
-
-new_worker_name = st.sidebar.text_input("Employee Full Name:", placeholder="John Doe", value=st.session_state["add_name_val"]).strip()
-new_worker_email = st.sidebar.text_input("Employee Workspace Email:", placeholder="johndoe@company.com", value=st.session_state["add_email_val"]).strip()
-
-if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type="primary"):
-    if new_worker_name and new_worker_email:
-        sidebar_cursor = conn.cursor()
-        sidebar_cursor.execute("""
-            INSERT OR REPLACE INTO global_roster (dept_prefix, tech_name, tech_email) 
-            VALUES (?, ?, ?)
-        """, (dest_dept[1], new_worker_name, new_worker_email))
-        conn.commit()
-        
-        # Clear out text state targets safely using neutral non-attached references
-        st.session_state["add_name_val"] = ""
-        st.session_state["add_email_val"] = ""
-        
-        st.sidebar.success(f"Deployed {new_worker_name} to {dest_dept[0]}!")
-        st.rerun()
-    else:
-        st.sidebar.warning("Please input both name and email routing vectors.")
+    new_worker_name = st.text_input("Employee Full Name:", placeholder="John Doe", key="form_worker_name").strip()
+    new_worker_email = st.text_input("Employee Workspace Email:", placeholder="johndoe@company.com", key="form_worker_email").strip()
+    
+    submit_add = st.form_submit_button("Deploy to Department Grid", use_container_width=True, type="primary")
+    
+    if submit_add:
+        if new_worker_name and new_worker_email:
+            sidebar_cursor = conn.cursor()
+            sidebar_cursor.execute("""
+                INSERT OR REPLACE INTO global_roster (dept_prefix, tech_name, tech_email) 
+                VALUES (?, ?, ?)
+            """, (dest_dept[1], new_worker_name, new_worker_email))
+            conn.commit()
+            st.rerun()
+        else:
+            st.warning("Please input both name and email routing vectors.")
 
 # --- COMPACT PERSONNEL REMOVAL LAYOUT ---
 st.sidebar.markdown("---")
@@ -275,12 +269,6 @@ else:
             sidebar_cursor.execute(f"DELETE FROM {target_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, target_name))
             
         conn.commit()
-        
-        # Clean text helper keys safely to completely ensure ghost adding is impossible 
-        st.session_state["add_name_val"] = ""
-        st.session_state["add_email_val"] = ""
-        
-        st.sidebar.success(f"Successfully removed {target_name} from active track lists!")
         st.rerun()
 
 # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
