@@ -32,7 +32,7 @@ st.markdown("""
     [data-testid="column"]:nth-of-type(3) { max-width: 120px !important; } 
     [data-testid="column"]:nth-of-type(4) { max-width: 75px !important;  } 
     [data-testid="column"]:nth-of-type(5) { max-width: 110px !important; } 
-    [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; } 
+    [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -223,12 +223,17 @@ if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type
             VALUES (?, ?, ?)
         """, (dest_dept[1], new_worker_name, new_worker_email))
         conn.commit()
+        
+        # FIX: Explicitly clear registration session inputs to prevent re-adding ghosts on refresh
+        st.session_state["global_name_field"] = ""
+        st.session_state["global_email_field"] = ""
+        
         st.sidebar.success(f"Deployed {new_worker_name} ({new_worker_email}) to {dest_dept[0]}!")
         st.rerun()
     else:
         st.sidebar.warning("Please input both name and email routing vectors.")
 
-# --- NEW FEATURE: PERSONNEL OFFBOARDING & DELETION DECK ---
+# --- PERSISTENT FIX: COMPACT PERSONNEL REMOVAL LAYOUT ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("🗑️ Remove Personnel from Grid")
 
@@ -252,13 +257,13 @@ else:
         key="global_removal_selectbox"
     )
     
-    if st.sidebar.button("⚠️ Purge from Active Floor", use_container_width=True, type="secondary"):
+    if st.sidebar.button("⚠️ Remove from Active Floor", use_container_width=True, type="secondary"):
         target_prefix, target_name, _ = selected_removal_target
         
         # 1. Strip the employee from the primary corporate floor matrix roster
         sidebar_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (target_prefix, target_name))
         
-        # 2. Automatically clear out any running block timer tables so the dashboard nodes don't look orphan or corrupt
+        # 2. Automatically clear out any running block timer tables so nodes don't look corrupt or stranded
         dept_table_mapping = {"de": "data_entry_slots", "cc": "call_center_slots", "sh": "shipping_slots", "fi": "fill_slots"}
         target_table = dept_table_mapping.get(target_prefix)
         
@@ -266,6 +271,11 @@ else:
             sidebar_cursor.execute(f"DELETE FROM {target_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, target_name))
             
         conn.commit()
+        
+        # FIX: Ensure form inputs don't inadvertently pick up state data when the row indices shift down
+        st.session_state["global_name_field"] = ""
+        st.session_state["global_email_field"] = ""
+        
         st.sidebar.success(f"Successfully removed {target_name} from active track lists!")
         st.rerun()
 
