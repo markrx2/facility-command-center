@@ -4,6 +4,7 @@ import requests
 import hashlib
 import re
 import smtplib
+import os
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 
@@ -57,9 +58,11 @@ st.components.v1.html(
     width=0,
 )
 
-# --- 2. DATABASE SETUP & MIGRATION ENGINE ---
+# --- 2. DATABASE SETUP & MIGRATION ENGINE (STREAMLIT CLOUD PERSISTENT VECTOR) ---
 def init_shared_db():
-    conn = sqlite3.connect("shared_facility_matrix.db", check_same_thread=False)
+    # Write to /tmp folder so Streamlit Cloud background threads share the same persistent file space
+    db_location = "/tmp/shared_facility_matrix.db"
+    conn = sqlite3.connect(db_location, check_same_thread=False)
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
@@ -133,15 +136,21 @@ def init_shared_db():
         except sqlite3.OperationalError:
             cursor.execute(f"ALTER TABLE daily_checklist ADD COLUMN {col_name} {col_type}")
         
+    # --- SECURE CLOUD QUEUE FALLBACK RESILIENCY BLOCK ---
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
-        defaults = [
-            ("de", "Queue Alpha - Tier 1", "15 tickets"), ("de", "Queue Beta - Network Ops", "5 alerts"),
-            ("cc", "Inbound Support Line", "20 calls"), ("cc", "Outbound Follow-ups", "15 checks"),
-            ("sh", "Standard Ground Sorting", "40 orders"), ("sh", "Priority/Overnight Air", "20 shipments"),
-            ("fi", "Automated Dispensing", "10 cells"), ("fi", "Manual Counter Line", "50 fills")
-        ]
-        cursor.executemany("INSERT OR IGNORE INTO dynamic_queues VALUES (?, ?, ?)", defaults)
+        if "dynamic_queues" in st.secrets:
+            for dept_prefix, queue_list in st.secrets["dynamic_queues"].items():
+                for name, goal in queue_list:
+                    cursor.execute("INSERT OR IGNORE INTO dynamic_queues VALUES (?, ?, ?)", (dept_prefix, name, goal))
+        else:
+            defaults = [
+                ("de", "Queue Alpha - Tier 1", "15 tickets"), ("de", "Queue Beta - Network Ops", "5 alerts"),
+                ("cc", "Inbound Support Line", "20 calls"), ("cc", "Outbound Follow-ups", "15 checks"),
+                ("sh", "Standard Ground Sorting", "40 orders"), ("sh", "Priority/Overnight Air", "20 shipments"),
+                ("fi", "Automated Dispensing", "10 cells"), ("fi", "Manual Counter Line", "50 fills")
+            ]
+            cursor.executemany("INSERT OR IGNORE INTO dynamic_queues VALUES (?, ?, ?)", defaults)
         
     conn.commit()
     return conn
@@ -207,7 +216,7 @@ elif pwd_input != "":
 
 st.sidebar.markdown("---")
 
-# --- SOLUTION: EMBED THE QUICK ADD INTO A CONTROLLED FORM ---
+# --- CONTROLLED FORM HOOK FOR QUICK ADD ---
 st.sidebar.subheader("➕ Quick Add Personnel to Floor")
 with st.sidebar.form(key="add_personnel_form", clear_on_submit=True):
     dest_dept = st.selectbox("Assign to Department:", options=[
@@ -258,10 +267,8 @@ else:
     if st.sidebar.button("⚠️ Remove from Active Floor", use_container_width=True, type="secondary"):
         target_prefix, target_name, _ = selected_removal_target
         
-        # 1. Strip the employee from the primary corporate floor matrix roster
         sidebar_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (target_prefix, target_name))
         
-        # 2. Automatically clear out any running block timer tables so nodes don't look corrupt or stranded
         dept_table_mapping = {"de": "data_entry_slots", "cc": "call_center_slots", "sh": "shipping_slots", "fi": "fill_slots"}
         target_table = dept_table_mapping.get(target_prefix)
         
