@@ -58,19 +58,29 @@ st.components.v1.html(
     width=0,
 )
 
-# --- PERSISTENT STATE CROSS-THREAD BACKUP STORAGE ---
-if "global_roster_state" not in st.session_state:
-    st.session_state["global_roster_state"] = []
-
-if "active_slots_state" not in st.session_state:
-    st.session_state["active_slots_state"] = {}
-
 # --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
     db_location = "shared_facility_matrix.db"
     conn = sqlite3.connect(db_location, check_same_thread=False)
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
+    
+    # MASTER ROSTER TABLE (Prevents deletes on refresh)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS active_roster (
+            dept_prefix TEXT, tech_name TEXT, tech_email TEXT, PRIMARY KEY (dept_prefix, tech_name)
+        )
+    """)
+    
+    # RUNNING TIMERS TRACKER
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS active_slots (
+            state_key TEXT PRIMARY KEY, queue TEXT, goal TEXT, start_time TEXT,
+            input_number INTEGER DEFAULT 0, tech_notified INTEGER DEFAULT 0,
+            supervisor_notified INTEGER DEFAULT 0, submitted INTEGER DEFAULT 0,
+            duration_minutes INTEGER DEFAULT 60
+        )
+    """)
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dynamic_queues (
@@ -189,7 +199,7 @@ elif pwd_input != "":
 
 st.sidebar.markdown("---")
 
-# --- CONTROLLED FORM HOOK FOR QUICK ADD ---
+# --- DATABASE CONTROLLED QUICK ADD ---
 st.sidebar.subheader("➕ Quick Add Personnel to Floor")
 with st.sidebar.form(key="add_personnel_form", clear_on_submit=True):
     dest_dept = st.selectbox("Assign to Department:", options=[
@@ -203,16 +213,12 @@ with st.sidebar.form(key="add_personnel_form", clear_on_submit=True):
     
     if submit_add:
         if new_worker_name and new_worker_email:
-            # Drop matching technician if they already exist in this department to avoid duplicates
-            st.session_state["global_roster_state"] = [
-                p for p in st.session_state["global_roster_state"]
-                if not (p["dept_prefix"] == dest_dept[1] and p["tech_name"] == new_worker_name)
-            ]
-            st.session_state["global_roster_state"].append({
-                "dept_prefix": dest_dept[1],
-                "tech_name": new_worker_name,
-                "tech_email": new_worker_email
-            })
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO active_roster (dept_prefix, tech_name, tech_email) VALUES (?, ?, ?)",
+                (dest_dept[1], new_worker_name, new_worker_email)
+            )
+            conn.commit()
             st.rerun()
         else:
             st.warning("Please input both name and email routing vectors.")
@@ -221,31 +227,33 @@ with st.sidebar.form(key="add_personnel_form", clear_on_submit=True):
 st.sidebar.markdown("---")
 st.sidebar.subheader("🗑️ Remove Personnel from Grid")
 
-if not st.session_state["global_roster_state"]:
+cursor = conn.cursor()
+cursor.execute("SELECT dept_prefix, tech_name, tech_email FROM active_roster")
+current_db_roster = cursor.fetchall()
+
+if not current_db_roster:
     st.sidebar.info("No technicians currently on the active grid floor.")
 else:
     dept_map_labels = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}
     personnel_options = [
-        (idx, f"[{dept_map_labels.get(p['dept_prefix'], 'Unknown')}] {p['tech_name']}") 
-        for idx, p in enumerate(st.session_state["global_roster_state"])
+        (p["tech_name"], p["dept_prefix"], f"[{dept_map_labels.get(p['dept_prefix'], 'Unknown')}] {p['tech_name']}") 
+        for p in current_db_roster
     ]
     
     selected_removal_target = st.sidebar.selectbox(
         "Select Employee to Remove:",
         options=personnel_options,
-        format_func=lambda x: x[1],
+        format_func=lambda x: x[2],
         key="global_removal_selectbox"
     )
     
     if st.sidebar.button("⚠️ Remove from Active Floor", use_container_width=True, type="secondary"):
-        target_idx = selected_removal_target[0]
-        removed_worker = st.session_state["global_roster_state"].pop(target_idx)
+        t_name, t_prefix, _ = selected_removal_target
+        cursor.execute("DELETE FROM active_roster WHERE tech_name=? AND dept_prefix=?", (t_name, t_prefix))
         
-        # Purge their active slot tracking configurations out of memory context
-        keys_to_purge = [k for k in st.session_state["active_slots_state"].keys() if k.startswith(f"{removed_worker['tech_name']}_")]
-        for k in keys_to_purge:
-            st.session_state["active_slots_state"].pop(k, None)
-            
+        # Purge active slot tracking configurations out of database context
+        cursor.execute("DELETE FROM active_slots WHERE state_key LIKE ?", (f"{t_name}_{t_prefix}_%",))
+        conn.commit()
         st.rerun()
 
 # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
@@ -254,7 +262,8 @@ def render_synchronized_matrix(prefix, dept_label):
     local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
     goals_dict = {row["queue_name"]: row["goal_target"] for row in local_cursor.fetchall()}
     
-    active_workers = [p for p in st.session_state["global_roster_state"] if p["dept_prefix"] == prefix]
+    local_cursor.execute("SELECT tech_name, tech_email FROM active_roster WHERE dept_prefix=?", (prefix,))
+    active_workers = local_cursor.fetchall()
 
     if not active_workers:
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
@@ -270,7 +279,9 @@ def render_synchronized_matrix(prefix, dept_label):
         
         for slot_num in range(1, 5):
             state_key = f"{worker}_{prefix}_{slot_num}"
-            slot_row = st.session_state["active_slots_state"].get(state_key)
+            
+            local_cursor.execute("SELECT * FROM active_slots WHERE state_key=?", (state_key,))
+            slot_row = local_cursor.fetchone()
             
             with cols[slot_num - 1]:
                 with st.container(border=True):
@@ -299,16 +310,13 @@ def render_synchronized_matrix(prefix, dept_label):
                             st.caption(f"🎯 Calculated Target: **{calculated_goal_str}** *(Base: {base_goal_str}/hr)*")
                             
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}", use_container_width=True):
-                                st.session_state["active_slots_state"][state_key] = {
-                                    "queue": chosen_q,
-                                    "goal": calculated_goal_str,
-                                    "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    "input_number": 0,
-                                    "tech_notified": 0,
-                                    "supervisor_notified": 0,
-                                    "submitted": 0,
-                                    "duration_minutes": chosen_dur_min
-                                }
+                                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                local_cursor.execute("""
+                                    INSERT OR REPLACE INTO active_slots 
+                                    (state_key, queue, goal, start_time, input_number, tech_notified, supervisor_notified, submitted, duration_minutes)
+                                    VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?)
+                                """, (state_key, chosen_q, calculated_goal_str, now_str, chosen_dur_min))
+                                conn.commit()
                                 st.rerun()
                         else:
                             st.warning("Configure queues in Management panel.")
@@ -334,7 +342,8 @@ def render_synchronized_matrix(prefix, dept_label):
                         
                         if is_manager:
                             if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
-                                st.session_state["active_slots_state"].pop(state_key, None)
+                                local_cursor.execute("DELETE FROM active_slots WHERE state_key=?", (state_key,))
+                                conn.commit()
                                 st.rerun()
                         
                         if current_now < end_time and not db_sub:
@@ -349,7 +358,8 @@ def render_synchronized_matrix(prefix, dept_label):
                             if db_t_not == 0:
                                 dispatch_individual_tech_notification(tech_email, worker, slot_num, dept_label)
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
-                                st.session_state["active_slots_state"][state_key]["tech_notified"] = 1
+                                local_cursor.execute("UPDATE active_slots SET tech_notified=1 WHERE state_key=?", (state_key,))
+                                conn.commit()
                                 st.rerun()
                                 
                             if current_now >= fifteen_min_overdue_time and db_s_not < 2:
@@ -360,7 +370,8 @@ def render_synchronized_matrix(prefix, dept_label):
                                     f"Slot: {slot_num} | Queue: `{db_queue}`\n"
                                     f"Status: **Metrics have NOT been logged** and 15 minutes have passed since the block expired."
                                 )
-                                st.session_state["active_slots_state"][state_key]["supervisor_notified"] = 2
+                                local_cursor.execute("UPDATE active_slots SET supervisor_notified=2 WHERE state_key=?", (state_key,))
+                                conn.commit()
                                 st.rerun()
 
                             if current_now < escalation_time:
@@ -370,7 +381,8 @@ def render_synchronized_matrix(prefix, dept_label):
                             else:
                                 if db_s_not == 0:
                                     dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
-                                    st.session_state["active_slots_state"][state_key]["supervisor_notified"] = 1
+                                    local_cursor.execute("UPDATE active_slots SET supervisor_notified=1 WHERE state_key=?", (state_key,))
+                                    conn.commit()
                                     st.rerun()
                                 if db_s_not == 1:
                                     st.error("🚨 Supervisor alert sent to Google Chat.")
@@ -401,14 +413,14 @@ def render_synchronized_matrix(prefix, dept_label):
                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """, (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
-                                st.session_state["active_slots_state"][state_key]["input_number"] = val
-                                st.session_state["active_slots_state"][state_key]["submitted"] = 1
+                                local_cursor.execute("UPDATE active_slots SET input_number=?, submitted=1 WHERE state_key=?", (val, state_key))
                                 conn.commit()
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
                             if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{w_id}_{slot_num}", use_container_width=True):
-                                st.session_state["active_slots_state"].pop(state_key, None)
+                                local_cursor.execute("DELETE FROM active_slots WHERE state_key=?", (state_key,))
+                                conn.commit()
                                 st.rerun()
 
 # --- 6. CORE APP ROUTING INTERFACE ---
