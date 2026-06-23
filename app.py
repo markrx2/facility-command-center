@@ -58,6 +58,17 @@ st.components.v1.html(
     width=0,
 )
 
+# --- GLOBAL CROSS-SESSION BACKUP MEMORY BRIDGE ---
+# This persists data inside the shared server memory space, completely surviving user-level page refreshes
+@st.cache_resource
+def get_global_application_memory_vault():
+    return {
+        "cached_roster": [],  # Format: {"dept_prefix": x, "tech_name": x, "tech_email": x}
+        "cached_slots": {}    # Format: {state_key: dict_of_values}
+    }
+
+global_vault = get_global_application_memory_vault()
+
 # --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
     db_location = "shared_facility_matrix.db"
@@ -65,14 +76,12 @@ def init_shared_db():
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
-    # MASTER ROSTER TABLE (Prevents deletes on refresh)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS active_roster (
             dept_prefix TEXT, tech_name TEXT, tech_email TEXT, PRIMARY KEY (dept_prefix, tech_name)
         )
     """)
     
-    # RUNNING TIMERS TRACKER
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS active_slots (
             state_key TEXT PRIMARY KEY, queue TEXT, goal TEXT, start_time TEXT,
@@ -144,6 +153,20 @@ def init_shared_db():
 
 conn = init_shared_db()
 CURRENT_DATE = datetime.now().strftime("%Y-%m-%d")
+
+# --- HYBRID DB/VAULT SYNC PROTOCOL ---
+# Re-populate database rows from global memory engine if container resets file system
+cursor = conn.cursor()
+cursor.execute("SELECT COUNT(*) FROM active_roster")
+if cursor.fetchone()[0] == 0 and global_vault["cached_roster"]:
+    for row in global_vault["cached_roster"]:
+        cursor.execute("INSERT OR REPLACE INTO active_roster (dept_prefix, tech_name, tech_email) VALUES (?, ?, ?)", (row["dept_prefix"], row["tech_name"], row["tech_email"]))
+    for skey, sval in global_vault["cached_slots"].items():
+        cursor.execute("""
+            INSERT OR REPLACE INTO active_slots (state_key, queue, goal, start_time, input_number, tech_notified, supervisor_notified, submitted, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (skey, sval["queue"], sval["goal"], sval["start_time"], sval["input_number"], sval["tech_notified"], sval["supervisor_notified"], sval["submitted"], sval["duration_minutes"]))
+    conn.commit()
 
 # --- 3. DUAL-CHANNEL NOTIFICATION ENGINE ---
 def dispatch_real_time_alert(message_body):
@@ -219,6 +242,10 @@ with st.sidebar.form(key="add_personnel_form", clear_on_submit=True):
                 (dest_dept[1], new_worker_name, new_worker_email)
             )
             conn.commit()
+            
+            # Save into the absolute cached memory bridge framework
+            global_vault["cached_roster"] = [r for r in global_vault["cached_roster"] if not (r["dept_prefix"] == dest_dept[1] and r["tech_name"] == new_worker_name)]
+            global_vault["cached_roster"].append({"dept_prefix": dest_dept[1], "tech_name": new_worker_name, "tech_email": new_worker_email})
             st.rerun()
         else:
             st.warning("Please input both name and email routing vectors.")
@@ -250,10 +277,15 @@ else:
     if st.sidebar.button("⚠️ Remove from Active Floor", use_container_width=True, type="secondary"):
         t_name, t_prefix, _ = selected_removal_target
         cursor.execute("DELETE FROM active_roster WHERE tech_name=? AND dept_prefix=?", (t_name, t_prefix))
-        
-        # Purge active slot tracking configurations out of database context
         cursor.execute("DELETE FROM active_slots WHERE state_key LIKE ?", (f"{t_name}_{t_prefix}_%",))
         conn.commit()
+        
+        # Purge out of system cache vault
+        global_vault["cached_roster"] = [r for r in global_vault["cached_roster"] if not (r["tech_name"] == t_name and r["dept_prefix"] == t_prefix)]
+        keys_to_purge = [k for k in global_vault["cached_slots"].keys() if k.startswith(f"{t_name}_{t_prefix}_")]
+        for k in keys_to_purge:
+            global_vault["cached_slots"].pop(k, None)
+            
         st.rerun()
 
 # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
@@ -317,6 +349,12 @@ def render_synchronized_matrix(prefix, dept_label):
                                     VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?)
                                 """, (state_key, chosen_q, calculated_goal_str, now_str, chosen_dur_min))
                                 conn.commit()
+                                
+                                # Update Global Application Memory Bridge Matrix
+                                global_vault["cached_slots"][state_key] = {
+                                    "queue": chosen_q, "goal": calculated_goal_str, "start_time": now_str,
+                                    "input_number": 0, "tech_notified": 0, "supervisor_notified": 0, "submitted": 0, "duration_minutes": chosen_dur_min
+                                }
                                 st.rerun()
                         else:
                             st.warning("Configure queues in Management panel.")
@@ -344,6 +382,7 @@ def render_synchronized_matrix(prefix, dept_label):
                             if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                                 local_cursor.execute("DELETE FROM active_slots WHERE state_key=?", (state_key,))
                                 conn.commit()
+                                global_vault["cached_slots"].pop(state_key, None)
                                 st.rerun()
                         
                         if current_now < end_time and not db_sub:
@@ -360,6 +399,7 @@ def render_synchronized_matrix(prefix, dept_label):
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
                                 local_cursor.execute("UPDATE active_slots SET tech_notified=1 WHERE state_key=?", (state_key,))
                                 conn.commit()
+                                if state_key in global_vault["cached_slots"]: global_vault["cached_slots"][state_key]["tech_notified"] = 1
                                 st.rerun()
                                 
                             if current_now >= fifteen_min_overdue_time and db_s_not < 2:
@@ -372,6 +412,7 @@ def render_synchronized_matrix(prefix, dept_label):
                                 )
                                 local_cursor.execute("UPDATE active_slots SET supervisor_notified=2 WHERE state_key=?", (state_key,))
                                 conn.commit()
+                                if state_key in global_vault["cached_slots"]: global_vault["cached_slots"][state_key]["supervisor_notified"] = 2
                                 st.rerun()
 
                             if current_now < escalation_time:
@@ -383,6 +424,7 @@ def render_synchronized_matrix(prefix, dept_label):
                                     dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
                                     local_cursor.execute("UPDATE active_slots SET supervisor_notified=1 WHERE state_key=?", (state_key,))
                                     conn.commit()
+                                    if state_key in global_vault["cached_slots"]: global_vault["cached_slots"][state_key]["supervisor_notified"] = 1
                                     st.rerun()
                                 if db_s_not == 1:
                                     st.error("🚨 Supervisor alert sent to Google Chat.")
@@ -415,12 +457,17 @@ def render_synchronized_matrix(prefix, dept_label):
 
                                 local_cursor.execute("UPDATE active_slots SET input_number=?, submitted=1 WHERE state_key=?", (val, state_key))
                                 conn.commit()
+                                
+                                if state_key in global_vault["cached_slots"]:
+                                    global_vault["cached_slots"][state_key]["input_number"] = val
+                                    global_vault["cached_slots"][state_key]["submitted"] = 1
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
                             if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 local_cursor.execute("DELETE FROM active_slots WHERE state_key=?", (state_key,))
                                 conn.commit()
+                                global_vault["cached_slots"].pop(state_key, None)
                                 st.rerun()
 
 # --- 6. CORE APP ROUTING INTERFACE ---
