@@ -63,7 +63,6 @@ def init_shared_db():
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
-    # SYSTEM UPGRADE: Included tech_email column in core master grid
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS global_roster (
             dept_prefix TEXT, 
@@ -73,7 +72,6 @@ def init_shared_db():
         )
     """)
     
-    # Migration safety logic: Add tech_email if table existed historically without it
     try:
         cursor.execute("SELECT tech_email FROM global_roster LIMIT 1")
     except sqlite3.OperationalError:
@@ -153,7 +151,6 @@ CURRENT_DATE = datetime.now().strftime("%Y-%m-%d")
 
 # --- 3. DUAL-CHANNEL NOTIFICATION ENGINE ---
 def dispatch_real_time_alert(message_body):
-    """Fires to the global supervisor/overview tracker room channel."""
     try:
         if "google_chat" in st.secrets:
             url = st.secrets["google_chat"]["webhook_url"]
@@ -165,7 +162,6 @@ def dispatch_real_time_alert(message_body):
     return False
 
 def dispatch_individual_tech_notification(recipient_email, worker_name, slot, department):
-    """Sends targeted tracking reminder email out directly using the corporate SMTP layout configuration."""
     if not recipient_email or "@" not in recipient_email:
         print(f"Skipping individual alert: {worker_name} does not have a valid email vector routing configuration.")
         return False
@@ -232,6 +228,47 @@ if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type
     else:
         st.sidebar.warning("Please input both name and email routing vectors.")
 
+# --- NEW FEATURE: PERSONNEL OFFBOARDING & DELETION DECK ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("🗑️ Remove Personnel from Grid")
+
+sidebar_cursor = conn.cursor()
+sidebar_cursor.execute("SELECT dept_prefix, tech_name FROM global_roster ORDER BY dept_prefix ASC, tech_name ASC")
+all_active_personnel = sidebar_cursor.fetchall()
+
+if not all_active_personnel:
+    st.sidebar.info("No technicians currently on the active grid floor.")
+else:
+    dept_map_labels = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}
+    personnel_options = [
+        (row["dept_prefix"], row["tech_name"], f"[{dept_map_labels.get(row['dept_prefix'], 'Unknown')}] {row['tech_name']}") 
+        for row in all_active_personnel
+    ]
+    
+    selected_removal_target = st.sidebar.selectbox(
+        "Select Employee to Remove:",
+        options=personnel_options,
+        format_func=lambda x: x[2],
+        key="global_removal_selectbox"
+    )
+    
+    if st.sidebar.button("⚠️ Purge from Active Floor", use_container_width=True, type="secondary"):
+        target_prefix, target_name, _ = selected_removal_target
+        
+        # 1. Strip the employee from the primary corporate floor matrix roster
+        sidebar_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (target_prefix, target_name))
+        
+        # 2. Automatically clear out any running block timer tables so the dashboard nodes don't look orphan or corrupt
+        dept_table_mapping = {"de": "data_entry_slots", "cc": "call_center_slots", "sh": "shipping_slots", "fi": "fill_slots"}
+        target_table = dept_table_mapping.get(target_prefix)
+        
+        if target_table:
+            sidebar_cursor.execute(f"DELETE FROM {target_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, target_name))
+            
+        conn.commit()
+        st.sidebar.success(f"Successfully removed {target_name} from active track lists!")
+        st.rerun()
+
 # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
 def render_synchronized_matrix(db_table, prefix, dept_label):
     local_cursor = conn.cursor()
@@ -239,7 +276,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
     local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
     goals_dict = {row["queue_name"]: row["goal_target"] for row in local_cursor.fetchall()}
     
-    # Fetch personnel alongside email profiles
     local_cursor.execute("SELECT tech_name, tech_email FROM global_roster WHERE dept_prefix=?", (prefix,))
     roster_rows = local_cursor.fetchall()
     active_roster = {row["tech_name"]: row["tech_email"] for row in roster_rows}
@@ -328,11 +364,8 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         elif not db_sub:
                             st.error("🛑 Timer Expired!")
                             
-                            # ACTIVE ROUTER ALERTS EXECUTION BLOCK
                             if db_t_not == 0:
-                                # 1. Dispatch individual routing parameter notice
                                 dispatch_individual_tech_notification(tech_email, worker, slot_num, dept_label)
-                                # 2. Drop overview alert string inside general management chat space
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
                                 
                                 local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
