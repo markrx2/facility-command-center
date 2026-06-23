@@ -58,27 +58,19 @@ st.components.v1.html(
     width=0,
 )
 
-# --- 2. DATABASE SETUP & MIGRATION ENGINE (STREAMLIT CLOUD PERSISTENT VECTOR) ---
+# --- PERSISTENT STATE CROSS-THREAD BACKUP STORAGE ---
+if "global_roster_state" not in st.session_state:
+    st.session_state["global_roster_state"] = []
+
+if "active_slots_state" not in st.session_state:
+    st.session_state["active_slots_state"] = {}
+
+# --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
-    # Write to /tmp folder so Streamlit Cloud background threads share the same persistent file space
-    db_location = "/tmp/shared_facility_matrix.db"
+    db_location = "shared_facility_matrix.db"
     conn = sqlite3.connect(db_location, check_same_thread=False)
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS global_roster (
-            dept_prefix TEXT, 
-            tech_name TEXT, 
-            tech_email TEXT DEFAULT '', 
-            PRIMARY KEY (dept_prefix, tech_name)
-        )
-    """)
-    
-    try:
-        cursor.execute("SELECT tech_email FROM global_roster LIMIT 1")
-    except sqlite3.OperationalError:
-        cursor.execute("ALTER TABLE global_roster ADD COLUMN tech_email TEXT DEFAULT ''")
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dynamic_queues (
@@ -93,20 +85,6 @@ def init_shared_db():
         )
     """)
     
-    for dept in ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]:
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS {dept} (
-                log_date TEXT, tech_name TEXT, slot_id INTEGER, queue TEXT, goal TEXT,
-                start_time TEXT, input_number INTEGER, tech_notified INTEGER DEFAULT 0,
-                supervisor_notified INTEGER DEFAULT 0, submitted INTEGER DEFAULT 0, duration_minutes INTEGER DEFAULT 120,
-                PRIMARY KEY (log_date, tech_name, slot_id)
-            )
-        """)
-        try:
-            cursor.execute(f"SELECT duration_minutes FROM {dept} LIMIT 1")
-        except sqlite3.OperationalError:
-            cursor.execute(f"ALTER TABLE {dept} ADD COLUMN duration_minutes INTEGER DEFAULT 120")
-        
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_checklist (
             log_date TEXT PRIMARY KEY, rejection_queue TEXT DEFAULT 'Pending', pa_queue TEXT DEFAULT 'Pending', 
@@ -136,7 +114,6 @@ def init_shared_db():
         except sqlite3.OperationalError:
             cursor.execute(f"ALTER TABLE daily_checklist ADD COLUMN {col_name} {col_type}")
         
-    # --- SECURE CLOUD QUEUE FALLBACK RESILIENCY BLOCK ---
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
         if "dynamic_queues" in st.secrets:
@@ -172,7 +149,6 @@ def dispatch_real_time_alert(message_body):
 
 def dispatch_individual_tech_notification(recipient_email, worker_name, slot, department):
     if not recipient_email or "@" not in recipient_email:
-        print(f"Skipping individual alert: {worker_name} does not have a valid email vector routing configuration.")
         return False
         
     try:
@@ -196,9 +172,6 @@ def dispatch_individual_tech_notification(recipient_email, worker_name, slot, de
             with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
                 server.login(system_sender, system_password)
                 server.sendmail(system_sender, [recipient_email], msg.as_string())
-            return True
-        else:
-            print(f"[Fallback Log] No cloud secrets found. Direct notification triggered for {worker_name} ({recipient_email}).")
             return True
     except Exception as e:
         print(f"Individual Tech Notification Refusal: {str(e)}")
@@ -230,12 +203,16 @@ with st.sidebar.form(key="add_personnel_form", clear_on_submit=True):
     
     if submit_add:
         if new_worker_name and new_worker_email:
-            sidebar_cursor = conn.cursor()
-            sidebar_cursor.execute("""
-                INSERT OR REPLACE INTO global_roster (dept_prefix, tech_name, tech_email) 
-                VALUES (?, ?, ?)
-            """, (dest_dept[1], new_worker_name, new_worker_email))
-            conn.commit()
+            # Drop matching technician if they already exist in this department to avoid duplicates
+            st.session_state["global_roster_state"] = [
+                p for p in st.session_state["global_roster_state"]
+                if not (p["dept_prefix"] == dest_dept[1] and p["tech_name"] == new_worker_name)
+            ]
+            st.session_state["global_roster_state"].append({
+                "dept_prefix": dest_dept[1],
+                "tech_name": new_worker_name,
+                "tech_email": new_worker_email
+            })
             st.rerun()
         else:
             st.warning("Please input both name and email routing vectors.")
@@ -244,67 +221,60 @@ with st.sidebar.form(key="add_personnel_form", clear_on_submit=True):
 st.sidebar.markdown("---")
 st.sidebar.subheader("🗑️ Remove Personnel from Grid")
 
-sidebar_cursor = conn.cursor()
-sidebar_cursor.execute("SELECT dept_prefix, tech_name FROM global_roster ORDER BY dept_prefix ASC, tech_name ASC")
-all_active_personnel = sidebar_cursor.fetchall()
-
-if not all_active_personnel:
+if not st.session_state["global_roster_state"]:
     st.sidebar.info("No technicians currently on the active grid floor.")
 else:
     dept_map_labels = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}
     personnel_options = [
-        (row["dept_prefix"], row["tech_name"], f"[{dept_map_labels.get(row['dept_prefix'], 'Unknown')}] {row['tech_name']}") 
-        for row in all_active_personnel
+        (idx, f"[{dept_map_labels.get(p['dept_prefix'], 'Unknown')}] {p['tech_name']}") 
+        for idx, p in enumerate(st.session_state["global_roster_state"])
     ]
     
     selected_removal_target = st.sidebar.selectbox(
         "Select Employee to Remove:",
         options=personnel_options,
-        format_func=lambda x: x[2],
+        format_func=lambda x: x[1],
         key="global_removal_selectbox"
     )
     
     if st.sidebar.button("⚠️ Remove from Active Floor", use_container_width=True, type="secondary"):
-        target_prefix, target_name, _ = selected_removal_target
+        target_idx = selected_removal_target[0]
+        removed_worker = st.session_state["global_roster_state"].pop(target_idx)
         
-        sidebar_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (target_prefix, target_name))
-        
-        dept_table_mapping = {"de": "data_entry_slots", "cc": "call_center_slots", "sh": "shipping_slots", "fi": "fill_slots"}
-        target_table = dept_table_mapping.get(target_prefix)
-        
-        if target_table:
-            sidebar_cursor.execute(f"DELETE FROM {target_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, target_name))
+        # Purge their active slot tracking configurations out of memory context
+        keys_to_purge = [k for k in st.session_state["active_slots_state"].keys() if k.startswith(f"{removed_worker['tech_name']}_")]
+        for k in keys_to_purge:
+            st.session_state["active_slots_state"].pop(k, None)
             
-        conn.commit()
         st.rerun()
 
 # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
-def render_synchronized_matrix(db_table, prefix, dept_label):
+def render_synchronized_matrix(prefix, dept_label):
     local_cursor = conn.cursor()
-    
     local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
     goals_dict = {row["queue_name"]: row["goal_target"] for row in local_cursor.fetchall()}
     
-    local_cursor.execute("SELECT tech_name, tech_email FROM global_roster WHERE dept_prefix=?", (prefix,))
-    roster_rows = local_cursor.fetchall()
-    active_roster = {row["tech_name"]: row["tech_email"] for row in roster_rows}
+    active_workers = [p for p in st.session_state["global_roster_state"] if p["dept_prefix"] == prefix]
 
-    if not active_roster:
+    if not active_workers:
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
-    for worker, tech_email in active_roster.items():
+    for p_data in active_workers:
+        worker = p_data["tech_name"]
+        tech_email = p_data["tech_email"]
         w_id = hashlib.md5(worker.encode('utf-8')).hexdigest()[:8]
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Profile Set'})`")
         cols = st.columns(4)
         
         for slot_num in range(1, 5):
+            state_key = f"{worker}_{prefix}_{slot_num}"
+            slot_row = st.session_state["active_slots_state"].get(state_key)
+            
             with cols[slot_num - 1]:
                 with st.container(border=True):
                     st.markdown(f"**🕒 Slot {slot_num}**")
-                    local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                    slot_row = local_cursor.fetchone()
                     
                     if not slot_row:
                         if goals_dict:
@@ -329,12 +299,16 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             st.caption(f"🎯 Calculated Target: **{calculated_goal_str}** *(Base: {base_goal_str}/hr)*")
                             
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}", use_container_width=True):
-                                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                local_cursor.execute(f"""
-                                    INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) 
-                                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                                """, (CURRENT_DATE, worker, slot_num, chosen_q, calculated_goal_str, now_str, chosen_dur_min))
-                                conn.commit()
+                                st.session_state["active_slots_state"][state_key] = {
+                                    "queue": chosen_q,
+                                    "goal": calculated_goal_str,
+                                    "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "input_number": 0,
+                                    "tech_notified": 0,
+                                    "supervisor_notified": 0,
+                                    "submitted": 0,
+                                    "duration_minutes": chosen_dur_min
+                                }
                                 st.rerun()
                         else:
                             st.warning("Configure queues in Management panel.")
@@ -360,8 +334,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         
                         if is_manager:
                             if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
-                                local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                conn.commit()
+                                st.session_state["active_slots_state"].pop(state_key, None)
                                 st.rerun()
                         
                         if current_now < end_time and not db_sub:
@@ -376,9 +349,8 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             if db_t_not == 0:
                                 dispatch_individual_tech_notification(tech_email, worker, slot_num, dept_label)
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
-                                
-                                local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                conn.commit()
+                                st.session_state["active_slots_state"][state_key]["tech_notified"] = 1
+                                st.rerun()
                                 
                             if current_now >= fifteen_min_overdue_time and db_s_not < 2:
                                 dispatch_real_time_alert(
@@ -388,8 +360,8 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     f"Slot: {slot_num} | Queue: `{db_queue}`\n"
                                     f"Status: **Metrics have NOT been logged** and 15 minutes have passed since the block expired."
                                 )
-                                local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=2 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                conn.commit()
+                                st.session_state["active_slots_state"][state_key]["supervisor_notified"] = 2
+                                st.rerun()
 
                             if current_now < escalation_time:
                                 grace = escalation_time - current_now
@@ -398,8 +370,8 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             else:
                                 if db_s_not == 0:
                                     dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
-                                    local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                    conn.commit()
+                                    st.session_state["active_slots_state"][state_key]["supervisor_notified"] = 1
+                                    st.rerun()
                                 if db_s_not == 1:
                                     st.error("🚨 Supervisor alert sent to Google Chat.")
                                 elif db_s_not == 2:
@@ -429,14 +401,14 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """, (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
-                                local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
+                                st.session_state["active_slots_state"][state_key]["input_number"] = val
+                                st.session_state["active_slots_state"][state_key]["submitted"] = 1
                                 conn.commit()
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
                             if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{w_id}_{slot_num}", use_container_width=True):
-                                local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                conn.commit()
+                                st.session_state["active_slots_state"].pop(state_key, None)
                                 st.rerun()
 
 # --- 6. CORE APP ROUTING INTERFACE ---
@@ -444,10 +416,10 @@ tab_de, tab_cc, tab_sh, tab_fi, tab_analytics, tab_mgmt = st.tabs([
     "💻 Data Entry Line", "📞 Call Center Desk", "📦 Shipping Floor", "🧪 Fill Department", "📊 Cumulative Analytics", "⚙️ Queue Management"
 ])
 
-with tab_de: render_synchronized_matrix("data_entry_slots", "de", "Data Entry")
-with tab_cc: render_synchronized_matrix("call_center_slots", "cc", "Call Center")
-with tab_sh: render_synchronized_matrix("shipping_slots", "sh", "Shipping")
-with tab_fi: render_synchronized_matrix("fill_slots", "fi", "Fill")
+with tab_de: render_synchronized_matrix("de", "Data Entry")
+with tab_cc: render_synchronized_matrix("cc", "Call Center")
+with tab_sh: render_synchronized_matrix("sh", "Shipping")
+with tab_fi: render_synchronized_matrix("fi", "Fill")
 
 # --- 7. DYNAMIC QUEUE MANAGEMENT CONFIGURATION TAB ---
 with tab_mgmt:
