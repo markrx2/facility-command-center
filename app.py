@@ -212,8 +212,12 @@ dest_dept = st.sidebar.selectbox("Assign to Department:", options=[
     ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
 ], format_func=lambda x: x[0], key="global_target_dept_sel")
 
-new_worker_name = st.sidebar.text_input("Employee Full Name:", placeholder="John Doe", key="global_name_field").strip()
-new_worker_email = st.sidebar.text_input("Employee Workspace Email:", placeholder="johndoe@company.com", key="global_email_field").strip()
+# Initialize addition helper keys inside state safely to avoid widget synchronization lockouts
+if "add_name_val" not in st.session_state: st.session_state["add_name_val"] = ""
+if "add_email_val" not in st.session_state: st.session_state["add_email_val"] = ""
+
+new_worker_name = st.sidebar.text_input("Employee Full Name:", placeholder="John Doe", value=st.session_state["add_name_val"]).strip()
+new_worker_email = st.sidebar.text_input("Employee Workspace Email:", placeholder="johndoe@company.com", value=st.session_state["add_email_val"]).strip()
 
 if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type="primary"):
     if new_worker_name and new_worker_email:
@@ -224,16 +228,16 @@ if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type
         """, (dest_dept[1], new_worker_name, new_worker_email))
         conn.commit()
         
-        # FIX: Explicitly clear registration session inputs to prevent re-adding ghosts on refresh
-        st.session_state["global_name_field"] = ""
-        st.session_state["global_email_field"] = ""
+        # Clear out text state targets safely using neutral non-attached references
+        st.session_state["add_name_val"] = ""
+        st.session_state["add_email_val"] = ""
         
-        st.sidebar.success(f"Deployed {new_worker_name} ({new_worker_email}) to {dest_dept[0]}!")
+        st.sidebar.success(f"Deployed {new_worker_name} to {dest_dept[0]}!")
         st.rerun()
     else:
         st.sidebar.warning("Please input both name and email routing vectors.")
 
-# --- PERSISTENT FIX: COMPACT PERSONNEL REMOVAL LAYOUT ---
+# --- COMPACT PERSONNEL REMOVAL LAYOUT ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("🗑️ Remove Personnel from Grid")
 
@@ -272,9 +276,9 @@ else:
             
         conn.commit()
         
-        # FIX: Ensure form inputs don't inadvertently pick up state data when the row indices shift down
-        st.session_state["global_name_field"] = ""
-        st.session_state["global_email_field"] = ""
+        # Clean text helper keys safely to completely ensure ghost adding is impossible 
+        st.session_state["add_name_val"] = ""
+        st.session_state["add_email_val"] = ""
         
         st.sidebar.success(f"Successfully removed {target_name} from active track lists!")
         st.rerun()
