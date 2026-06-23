@@ -3,6 +3,8 @@ import sqlite3
 import requests
 import hashlib
 import re
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 
 # --- 1. PAGE SETUP & COMPONENT STYLING ---
@@ -22,16 +24,15 @@ st.markdown("""
     div[data-testid="stDateInput"] input { padding: 4px 6px !important; font-size: 12px !important; }
     div[data-testid="stTextInput"] input { padding: 4px 6px !important; font-size: 12px !important; }
     div.stMarkdown h5 { font-size: 13px !important; margin-bottom: 2px !important; margin-top: 4px !important; }
-    div.stMarkdown caption { font-size: 10px !important; }
     hr { margin: 6px 0px !important; }
 
     /* Column Width Allocation Layout Grid */
-    [data-testid="column"]:nth-of-type(1) { max-width: 150px !important; } /* Status */
-    [data-testid="column"]:nth-of-type(2) { max-width: 120px !important; } /* Oldest */
-    [data-testid="column"]:nth-of-type(3) { max-width: 120px !important; } /* Target */
-    [data-testid="column"]:nth-of-type(4) { max-width: 75px !important;  } /* Sign */
-    [data-testid="column"]:nth-of-type(5) { max-width: 110px !important; } /* Backlog Widget */
-    [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; } /* Notes Component */
+    [data-testid="column"]:nth-of-type(1) { max-width: 150px !important; } 
+    [data-testid="column"]:nth-of-type(2) { max-width: 120px !important; } 
+    [data-testid="column"]:nth-of-type(3) { max-width: 120px !important; } 
+    [data-testid="column"]:nth-of-type(4) { max-width: 75px !important;  } 
+    [data-testid="column"]:nth-of-type(5) { max-width: 110px !important; } 
+    [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; } 
     </style>
 """, unsafe_allow_html=True)
 
@@ -49,7 +50,7 @@ st.components.v1.html(
                 window.parent.postMessage({type: 'streamlit:rerun'}, '*');
             });
             window.parent.postMessage({type: 'streamlit:render'}, '*');
-        }, 15000); // 15 Seconds Heartbeat Ticker
+        }, 15000); 
     </script>
     """,
     height=0,
@@ -62,11 +63,21 @@ def init_shared_db():
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
+    # SYSTEM UPGRADE: Included tech_email column in core master grid
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS global_roster (
-            dept_prefix TEXT, tech_name TEXT, PRIMARY KEY (dept_prefix, tech_name)
+            dept_prefix TEXT, 
+            tech_name TEXT, 
+            tech_email TEXT DEFAULT '', 
+            PRIMARY KEY (dept_prefix, tech_name)
         )
     """)
+    
+    # Migration safety logic: Add tech_email if table existed historically without it
+    try:
+        cursor.execute("SELECT tech_email FROM global_roster LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE global_roster ADD COLUMN tech_email TEXT DEFAULT ''")
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dynamic_queues (
@@ -74,19 +85,10 @@ def init_shared_db():
         )
     """)
 
-    # PERMANENT HISTORICAL ARCHIVE LAYER
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS metrics_history (
-            archive_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            log_date TEXT,
-            department TEXT,
-            tech_name TEXT,
-            slot_id INTEGER,
-            queue TEXT,
-            goal TEXT,
-            input_number INTEGER,
-            escalated INTEGER DEFAULT 0,
-            timestamp TEXT
+            archive_id INTEGER PRIMARY KEY AUTOINCREMENT, log_date TEXT, department TEXT, tech_name TEXT, 
+            slot_id INTEGER, queue TEXT, goal TEXT, input_number INTEGER, escalated INTEGER DEFAULT 0, timestamp TEXT
         )
     """)
     
@@ -95,8 +97,7 @@ def init_shared_db():
             CREATE TABLE IF NOT EXISTS {dept} (
                 log_date TEXT, tech_name TEXT, slot_id INTEGER, queue TEXT, goal TEXT,
                 start_time TEXT, input_number INTEGER, tech_notified INTEGER DEFAULT 0,
-                supervisor_notified INTEGER DEFAULT 0, submitted INTEGER DEFAULT 0,
-                duration_minutes INTEGER DEFAULT 120,
+                supervisor_notified INTEGER DEFAULT 0, submitted INTEGER DEFAULT 0, duration_minutes INTEGER DEFAULT 120,
                 PRIMARY KEY (log_date, tech_name, slot_id)
             )
         """)
@@ -107,20 +108,11 @@ def init_shared_db():
         
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_checklist (
-            log_date TEXT PRIMARY KEY, 
-            rejection_queue TEXT DEFAULT 'Pending',
-            pa_queue TEXT DEFAULT 'Pending', 
-            untransmitted_claims TEXT DEFAULT 'Pending',
-            future_bill TEXT DEFAULT 'Pending', 
-            data_re_entry TEXT DEFAULT 'Pending',
-            ai_tech_check TEXT DEFAULT 'Pending',
-            billing TEXT DEFAULT 'Pending',
-            ordering TEXT DEFAULT 'Pending',
-            dispense TEXT DEFAULT 'Pending',
-            return_fourteen_queue TEXT DEFAULT 'Pending',
-            reminder_time TEXT DEFAULT '16:00', 
-            reminder_sent INTEGER DEFAULT 0,
-            supervisor_escaped INTEGER DEFAULT 0
+            log_date TEXT PRIMARY KEY, rejection_queue TEXT DEFAULT 'Pending', pa_queue TEXT DEFAULT 'Pending', 
+            untransmitted_claims TEXT DEFAULT 'Pending', future_bill TEXT DEFAULT 'Pending', data_re_entry TEXT DEFAULT 'Pending',
+            ai_tech_check TEXT DEFAULT 'Pending', billing TEXT DEFAULT 'Pending', ordering TEXT DEFAULT 'Pending',
+            dispense TEXT DEFAULT 'Pending', return_fourteen_queue TEXT DEFAULT 'Pending', reminder_time TEXT DEFAULT '16:00', 
+            reminder_sent INTEGER DEFAULT 0, supervisor_escaped INTEGER DEFAULT 0
         )
     """)
     
@@ -159,8 +151,9 @@ def init_shared_db():
 conn = init_shared_db()
 CURRENT_DATE = datetime.now().strftime("%Y-%m-%d")
 
-# --- 3. GOOGLE CHAT WEBHOOK DISPATCHER ENGINE ---
+# --- 3. DUAL-CHANNEL NOTIFICATION ENGINE ---
 def dispatch_real_time_alert(message_body):
+    """Fires to the global supervisor/overview tracker room channel."""
     try:
         if "google_chat" in st.secrets:
             url = st.secrets["google_chat"]["webhook_url"]
@@ -170,6 +163,41 @@ def dispatch_real_time_alert(message_body):
     except Exception as e:
         st.sidebar.error(f"Google Chat Node Warning: {str(e)}")
     return False
+
+def dispatch_individual_tech_notification(recipient_email, worker_name, slot, department):
+    """Sends targeted tracking reminder email out directly using the corporate SMTP layout configuration."""
+    if not recipient_email or "@" not in recipient_email:
+        print(f"Skipping individual alert: {worker_name} does not have a valid email vector routing configuration.")
+        return False
+        
+    try:
+        if "email" in st.secrets:
+            system_sender = st.secrets["email"]["sender"]
+            system_password = st.secrets["email"]["password"]
+            smtp_server = st.secrets["email"].get("smtp_server", "smtp.gmail.com")
+            smtp_port = int(st.secrets["email"].get("port", 465))
+            
+            msg_text = (
+                f"Hello {worker_name},\n\n"
+                f"Your tracking block block timer has ended for {department} (Slot {slot}).\n\n"
+                f"Please navigate back to the Facility Command Hub dashboard immediately to log your production counts.\n\n"
+                f"Thank you!"
+            )
+            msg = MIMEText(msg_text)
+            msg['Subject'] = f"⏱️ Action Required: Timer Ended - Slot {slot} ({department})"
+            msg['From'] = f"Facility Command Hub <{system_sender}>"
+            msg['To'] = recipient_email
+            
+            with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
+                server.login(system_sender, system_password)
+                server.sendmail(system_sender, [recipient_email], msg.as_string())
+            return True
+        else:
+            print(f"[Fallback Log] No cloud secrets found. Direct notification triggered for {worker_name} ({recipient_email}).")
+            return True
+    except Exception as e:
+        print(f"Individual Tech Notification Refusal: {str(e)}")
+        return False
 
 # --- 4. GLOBAL SIDEBAR MANAGEMENT CONTROL HUB ---
 st.sidebar.header("🔐 Global System Control Deck")
@@ -189,16 +217,20 @@ dest_dept = st.sidebar.selectbox("Assign to Department:", options=[
 ], format_func=lambda x: x[0], key="global_target_dept_sel")
 
 new_worker_name = st.sidebar.text_input("Employee Full Name:", placeholder="John Doe", key="global_name_field").strip()
+new_worker_email = st.sidebar.text_input("Employee Workspace Email:", placeholder="johndoe@company.com", key="global_email_field").strip()
 
 if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type="primary"):
-    if new_worker_name:
+    if new_worker_name and new_worker_email:
         sidebar_cursor = conn.cursor()
-        sidebar_cursor.execute("INSERT OR IGNORE INTO global_roster (dept_prefix, tech_name) VALUES (?, ?)", (dest_dept[1], new_worker_name))
+        sidebar_cursor.execute("""
+            INSERT OR REPLACE INTO global_roster (dept_prefix, tech_name, tech_email) 
+            VALUES (?, ?, ?)
+        """, (dest_dept[1], new_worker_name, new_worker_email))
         conn.commit()
-        st.sidebar.success(f"Deployed {new_worker_name} to {dest_dept[0]}!")
+        st.sidebar.success(f"Deployed {new_worker_name} ({new_worker_email}) to {dest_dept[0]}!")
         st.rerun()
     else:
-        st.sidebar.warning("Please type a valid employee name first.")
+        st.sidebar.warning("Please input both name and email routing vectors.")
 
 # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
 def render_synchronized_matrix(db_table, prefix, dept_label):
@@ -207,17 +239,19 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
     local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
     goals_dict = {row["queue_name"]: row["goal_target"] for row in local_cursor.fetchall()}
     
-    local_cursor.execute("SELECT tech_name FROM global_roster WHERE dept_prefix=?", (prefix,))
-    active_roster = [row["tech_name"] for row in local_cursor.fetchall()]
+    # Fetch personnel alongside email profiles
+    local_cursor.execute("SELECT tech_name, tech_email FROM global_roster WHERE dept_prefix=?", (prefix,))
+    roster_rows = local_cursor.fetchall()
+    active_roster = {row["tech_name"]: row["tech_email"] for row in roster_rows}
 
     if not active_roster:
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
-    for worker in active_roster:
+    for worker, tech_email in active_roster.items():
         w_id = hashlib.md5(worker.encode('utf-8')).hexdigest()[:8]
         
-        st.markdown(f"### 👤 TECHNICIAN: {worker.upper()}")
+        st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Profile Set'})`")
         cols = st.columns(4)
         
         for slot_num in range(1, 5):
@@ -238,13 +272,10 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), index=1, key=f"dur_{prefix}_{w_id}_{slot_num}")
                             chosen_dur_min = durations[chosen_dur_label]
                             
-                            # DYNAMIC MATRIX CALCULATION ENGINE (Calculates targets dynamically based on hour block selected)
                             numeric_match = re.search(r'\d+', str(base_goal_str))
                             if numeric_match:
                                 base_num = int(numeric_match.group())
                                 text_suffix = base_goal_str.replace(str(base_num), "").strip()
-                                
-                                # Scale value proportional to time block allocation
                                 scaled_num = int(base_num * (chosen_dur_min / 60.0))
                                 calculated_goal_str = f"{scaled_num} {text_suffix}".strip()
                             else:
@@ -296,8 +327,14 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             st.progress(1.0 - (rem.total_seconds() / (db_dur_min * 60.0)))
                         elif not db_sub:
                             st.error("🛑 Timer Expired!")
+                            
+                            # ACTIVE ROUTER ALERTS EXECUTION BLOCK
                             if db_t_not == 0:
+                                # 1. Dispatch individual routing parameter notice
+                                dispatch_individual_tech_notification(tech_email, worker, slot_num, dept_label)
+                                # 2. Drop overview alert string inside general management chat space
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
+                                
                                 local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 
@@ -345,7 +382,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                         f"Logged Metrics Value: **{val}** (Deficit of {target_numeric_value - val} units)"
                                     )
                                 
-                                # WRITE TO PERMANENT HISTORICAL ARCHIVE LAYER
                                 local_cursor.execute("""
                                     INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp)
                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -386,8 +422,6 @@ with tab_mgmt:
             st.subheader("➕ Create Custom Queue Trackers")
             target_dept = st.selectbox("Select Department Destination:", [("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")], key="mgmt_dept_selector")
             new_q_name = st.text_input("New Queue Name:", placeholder="e.g., Priority Tier 3 Verification", key="mgmt_q_name_input").strip()
-            
-            # CLEAR STRUCTURAL EXPECTATION IN INPUT FIELD HINT
             new_q_goal = st.text_input("Production Unit Goal Target (PER 1 HOUR):", placeholder="e.g., 50 claims", key="mgmt_goal_input").strip()
             
             if st.button("Save New Queue Component", type="primary", use_container_width=True, key="mgmt_save_btn"):
@@ -534,9 +568,7 @@ with st.container(border=True):
             target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=tdt_key, format="MM/DD/YYYY", label_visibility="collapsed")
             sign_by = cols[3].text_input("Sign", value=stored_by, key=by_key, placeholder="Initials", label_visibility="collapsed")
             
-            # Real-time mathematical difference evaluation
             days_gap = (target_dt - oldest_dt).days
-            
             limit_trigger = 14 if is_fourteen_day_threshold else 7
             
             if days_gap >= limit_trigger:
@@ -650,7 +682,6 @@ with st.container(border=True):
             is_reminder_sent = int(chk["reminder_sent"]) if "reminder_sent" in chk_keys else 0
             is_sup_escaped = int(chk["supervisor_escaped"]) if "supervisor_escaped" in chk_keys else 0
             
-            # 1. Standard Summary Notification (4:00 PM EST)
             if alert_target_datetime <= sys_now < escalation_target_datetime:
                 if is_reminder_sent == 0:
                     dispatch_real_time_alert(
@@ -662,7 +693,6 @@ with st.container(border=True):
                     conn.commit()
                     st.rerun()
                     
-            # 2. Critical Escalation Notification (5:00 PM EST)
             elif sys_now >= escalation_target_datetime:
                 if is_sup_escaped == 0:
                     dispatch_real_time_alert(
