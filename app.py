@@ -5,6 +5,7 @@ import hashlib
 import re
 import smtplib
 import os
+import json
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 
@@ -58,16 +59,29 @@ st.components.v1.html(
     width=0,
 )
 
-# --- GLOBAL CROSS-SESSION BACKUP MEMORY BRIDGE ---
-# This persists data inside the shared server memory space, completely surviving user-level page refreshes
-@st.cache_resource
-def get_global_application_memory_vault():
-    return {
-        "cached_roster": [],  # Format: {"dept_prefix": x, "tech_name": x, "tech_email": x}
-        "cached_slots": {}    # Format: {state_key: dict_of_values}
-    }
+# --- HARDENED IMMUTABLE MEMORY ENGINE ---
+# If Streamlit completely deletes the DB, we fall back onto an auto-written JSON state file
+PERSISTENT_ROSTER_FILE = "emergency_roster_backup.json"
 
-global_vault = get_global_application_memory_vault()
+def load_emergency_roster():
+    if os.path.exists(PERSISTENT_ROSTER_FILE):
+        try:
+            with open(PERSISTENT_ROSTER_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_emergency_roster(roster_data):
+    try:
+        with open(PERSISTENT_ROSTER_FILE, "w") as f:
+            json.dump(roster_data, f)
+    except Exception as e:
+        pass
+
+# Seed session state instantly before anything executes to prevent UI flicker
+if "fallback_roster" not in st.session_state:
+    st.session_state["fallback_roster"] = load_emergency_roster()
 
 # --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
@@ -154,18 +168,16 @@ def init_shared_db():
 conn = init_shared_db()
 CURRENT_DATE = datetime.now().strftime("%Y-%m-%d")
 
-# --- HYBRID DB/VAULT SYNC PROTOCOL ---
-# Re-populate database rows from global memory engine if container resets file system
+# --- MUTATION REPAIR VECTOR ---
+# If SQLite wiped, explicitly rebuild database roster rows from our hardened emergency session backup
 cursor = conn.cursor()
 cursor.execute("SELECT COUNT(*) FROM active_roster")
-if cursor.fetchone()[0] == 0 and global_vault["cached_roster"]:
-    for row in global_vault["cached_roster"]:
-        cursor.execute("INSERT OR REPLACE INTO active_roster (dept_prefix, tech_name, tech_email) VALUES (?, ?, ?)", (row["dept_prefix"], row["tech_name"], row["tech_email"]))
-    for skey, sval in global_vault["cached_slots"].items():
-        cursor.execute("""
-            INSERT OR REPLACE INTO active_slots (state_key, queue, goal, start_time, input_number, tech_notified, supervisor_notified, submitted, duration_minutes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (skey, sval["queue"], sval["goal"], sval["start_time"], sval["input_number"], sval["tech_notified"], sval["supervisor_notified"], sval["submitted"], sval["duration_minutes"]))
+if cursor.fetchone()[0] == 0 and st.session_state["fallback_roster"]:
+    for technician in st.session_state["fallback_roster"]:
+        cursor.execute(
+            "INSERT OR REPLACE INTO active_roster (dept_prefix, tech_name, tech_email) VALUES (?, ?, ?)",
+            (technician["dept_prefix"], technician["tech_name"], technician["tech_email"])
+        )
     conn.commit()
 
 # --- 3. DUAL-CHANNEL NOTIFICATION ENGINE ---
@@ -243,9 +255,12 @@ with st.sidebar.form(key="add_personnel_form", clear_on_submit=True):
             )
             conn.commit()
             
-            # Save into the absolute cached memory bridge framework
-            global_vault["cached_roster"] = [r for r in global_vault["cached_roster"] if not (r["dept_prefix"] == dest_dept[1] and r["tech_name"] == new_worker_name)]
-            global_vault["cached_roster"].append({"dept_prefix": dest_dept[1], "tech_name": new_worker_name, "tech_email": new_worker_email})
+            # Commit to dual-layer memory layers to completely bypass refresh clearance vectors
+            if not any(r["tech_name"] == new_worker_name and r["dept_prefix"] == dest_dept[1] for r in st.session_state["fallback_roster"]):
+                st.session_state["fallback_roster"].append({
+                    "dept_prefix": dest_dept[1], "tech_name": new_worker_name, "tech_email": new_worker_email
+                })
+                save_emergency_roster(st.session_state["fallback_roster"])
             st.rerun()
         else:
             st.warning("Please input both name and email routing vectors.")
@@ -258,14 +273,19 @@ cursor = conn.cursor()
 cursor.execute("SELECT dept_prefix, tech_name, tech_email FROM active_roster")
 current_db_roster = cursor.fetchall()
 
+# Fallback sync if DB read is empty but state layer contains records
+if not current_db_roster and st.session_state["fallback_roster"]:
+    current_db_roster = st.session_state["fallback_roster"]
+
 if not current_db_roster:
     st.sidebar.info("No technicians currently on the active grid floor.")
 else:
     dept_map_labels = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}
-    personnel_options = [
-        (p["tech_name"], p["dept_prefix"], f"[{dept_map_labels.get(p['dept_prefix'], 'Unknown')}] {p['tech_name']}") 
-        for p in current_db_roster
-    ]
+    personnel_options = []
+    for p in current_db_roster:
+        name = p["tech_name"] if hasattr(p, "keys") else p.get("tech_name")
+        prefix = p["dept_prefix"] if hasattr(p, "keys") else p.get("dept_prefix")
+        personnel_options.append((name, prefix, f"[{dept_map_labels.get(prefix, 'Unknown')}] {name}"))
     
     selected_removal_target = st.sidebar.selectbox(
         "Select Employee to Remove:",
@@ -280,12 +300,9 @@ else:
         cursor.execute("DELETE FROM active_slots WHERE state_key LIKE ?", (f"{t_name}_{t_prefix}_%",))
         conn.commit()
         
-        # Purge out of system cache vault
-        global_vault["cached_roster"] = [r for r in global_vault["cached_roster"] if not (r["tech_name"] == t_name and r["dept_prefix"] == t_prefix)]
-        keys_to_purge = [k for k in global_vault["cached_slots"].keys() if k.startswith(f"{t_name}_{t_prefix}_")]
-        for k in keys_to_purge:
-            global_vault["cached_slots"].pop(k, None)
-            
+        # Purge completely out of local persistent data buffers
+        st.session_state["fallback_roster"] = [r for r in st.session_state["fallback_roster"] if not (r["tech_name"] == t_name and r["dept_prefix"] == t_prefix)]
+        save_emergency_roster(st.session_state["fallback_roster"])
         st.rerun()
 
 # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
@@ -297,13 +314,17 @@ def render_synchronized_matrix(prefix, dept_label):
     local_cursor.execute("SELECT tech_name, tech_email FROM active_roster WHERE dept_prefix=?", (prefix,))
     active_workers = local_cursor.fetchall()
 
+    # Secondary lookup bridge to maintain row creation fluidity if SQLite experiences a thread disconnect
+    if not active_workers and st.session_state["fallback_roster"]:
+        active_workers = [r for r in st.session_state["fallback_roster"] if r["dept_prefix"] == prefix]
+
     if not active_workers:
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
     for p_data in active_workers:
-        worker = p_data["tech_name"]
-        tech_email = p_data["tech_email"]
+        worker = p_data["tech_name"] if hasattr(p_data, "keys") else p_data.get("tech_name")
+        tech_email = p_data["tech_email"] if hasattr(p_data, "keys") else p_data.get("tech_email")
         w_id = hashlib.md5(worker.encode('utf-8')).hexdigest()[:8]
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Profile Set'})`")
@@ -349,12 +370,6 @@ def render_synchronized_matrix(prefix, dept_label):
                                     VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?)
                                 """, (state_key, chosen_q, calculated_goal_str, now_str, chosen_dur_min))
                                 conn.commit()
-                                
-                                # Update Global Application Memory Bridge Matrix
-                                global_vault["cached_slots"][state_key] = {
-                                    "queue": chosen_q, "goal": calculated_goal_str, "start_time": now_str,
-                                    "input_number": 0, "tech_notified": 0, "supervisor_notified": 0, "submitted": 0, "duration_minutes": chosen_dur_min
-                                }
                                 st.rerun()
                         else:
                             st.warning("Configure queues in Management panel.")
@@ -382,7 +397,6 @@ def render_synchronized_matrix(prefix, dept_label):
                             if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                                 local_cursor.execute("DELETE FROM active_slots WHERE state_key=?", (state_key,))
                                 conn.commit()
-                                global_vault["cached_slots"].pop(state_key, None)
                                 st.rerun()
                         
                         if current_now < end_time and not db_sub:
@@ -399,7 +413,6 @@ def render_synchronized_matrix(prefix, dept_label):
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
                                 local_cursor.execute("UPDATE active_slots SET tech_notified=1 WHERE state_key=?", (state_key,))
                                 conn.commit()
-                                if state_key in global_vault["cached_slots"]: global_vault["cached_slots"][state_key]["tech_notified"] = 1
                                 st.rerun()
                                 
                             if current_now >= fifteen_min_overdue_time and db_s_not < 2:
@@ -412,7 +425,6 @@ def render_synchronized_matrix(prefix, dept_label):
                                 )
                                 local_cursor.execute("UPDATE active_slots SET supervisor_notified=2 WHERE state_key=?", (state_key,))
                                 conn.commit()
-                                if state_key in global_vault["cached_slots"]: global_vault["cached_slots"][state_key]["supervisor_notified"] = 2
                                 st.rerun()
 
                             if current_now < escalation_time:
@@ -424,7 +436,6 @@ def render_synchronized_matrix(prefix, dept_label):
                                     dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
                                     local_cursor.execute("UPDATE active_slots SET supervisor_notified=1 WHERE state_key=?", (state_key,))
                                     conn.commit()
-                                    if state_key in global_vault["cached_slots"]: global_vault["cached_slots"][state_key]["supervisor_notified"] = 1
                                     st.rerun()
                                 if db_s_not == 1:
                                     st.error("🚨 Supervisor alert sent to Google Chat.")
@@ -457,17 +468,12 @@ def render_synchronized_matrix(prefix, dept_label):
 
                                 local_cursor.execute("UPDATE active_slots SET input_number=?, submitted=1 WHERE state_key=?", (val, state_key))
                                 conn.commit()
-                                
-                                if state_key in global_vault["cached_slots"]:
-                                    global_vault["cached_slots"][state_key]["input_number"] = val
-                                    global_vault["cached_slots"][state_key]["submitted"] = 1
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
                             if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 local_cursor.execute("DELETE FROM active_slots WHERE state_key=?", (state_key,))
                                 conn.commit()
-                                global_vault["cached_slots"].pop(state_key, None)
                                 st.rerun()
 
 # --- 6. CORE APP ROUTING INTERFACE ---
