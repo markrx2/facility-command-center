@@ -122,7 +122,19 @@ def init_shared_db():
         )
     """)
     
+    # CRITICAL SECURITY FIX: Fully maps primary row trackers alongside meta updates
     schema_extensions = [
+        ("rejection_queue", "TEXT DEFAULT 'Pending'"),
+        ("pa_queue", "TEXT DEFAULT 'Pending'"),
+        ("untransmitted_claims", "TEXT DEFAULT 'Pending'"),
+        ("future_bill", "TEXT DEFAULT 'Pending'"),
+        ("data_re_entry", "TEXT DEFAULT 'Pending'"),
+        ("ai_tech_check", "TEXT DEFAULT 'Pending'"),
+        ("billing", "TEXT DEFAULT 'Pending'"),
+        ("ordering", "TEXT DEFAULT 'Pending'"),
+        ("dispense", "TEXT DEFAULT 'Pending'"),
+        ("return_fourteen_queue", "TEXT DEFAULT 'Pending'"),
+        
         ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"), ("rejection_queue_date", "TEXT DEFAULT ''"), ("rejection_queue_target", "TEXT DEFAULT ''"),
         ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"), ("pa_queue_date", "TEXT DEFAULT ''"), ("pa_queue_target", "TEXT DEFAULT ''"),
         ("untransmitted_claims_by", "TEXT DEFAULT ''"), ("untransmitted_claims_notes", "TEXT DEFAULT ''"), ("untransmitted_claims_date", "TEXT DEFAULT ''"), ("untransmitted_claims_target", "TEXT DEFAULT ''"),
@@ -171,7 +183,7 @@ def dispatch_real_time_alert(message_body):
     return False
 
 def dispatch_individual_chat_alert(tech_webhook_url, message_body):
-    """Fires a push notification text payload straight to a single tech's private room room webhook."""
+    """Fires a push notification text payload straight to a single tech's private room webhook."""
     if not tech_webhook_url or "chat.googleapis.com" not in tech_webhook_url:
         return False
     try:
@@ -234,9 +246,31 @@ dest_dept = st.sidebar.selectbox("Assign to Department:", options=[
     ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
 ], format_func=lambda x: x[0], key="global_target_dept_sel")
 
-new_worker_name = st.sidebar.text_input("Employee Full Name:", placeholder="John Doe", key="global_name_field").strip()
-new_worker_email = st.sidebar.text_input("Employee Workspace Email:", placeholder="johndoe@company.com", key="global_email_field").strip()
-new_worker_webhook = st.sidebar.text_input("Employee Personal Google Chat Webhook:", placeholder="https://chat.googleapis.com/v1/spaces/...", key="global_webhook_field").strip()
+# --- PROFILE DROPDOWN AUTO-POPULATION ENGINE ---
+sidebar_db_cursor = conn.cursor()
+sidebar_db_cursor.execute("SELECT tech_name, tech_email, tech_webhook FROM global_roster ORDER BY tech_name ASC")
+saved_profiles = sidebar_db_cursor.fetchall()
+
+profile_options = ["-- Create New Profile --"] + [p["tech_name"] for p in saved_profiles]
+selected_profile = st.sidebar.selectbox("Select Existing Profile (Optional):", options=profile_options, key="profile_selector_widget")
+
+# Default values if creating a new profile
+default_name = ""
+default_email = ""
+default_webhook = ""
+
+# If an existing profile is picked, pull its saved data
+if selected_profile != "-- Create New Profile --":
+    matched_profile = next((p for p in saved_profiles if p["tech_name"] == selected_profile), None)
+    if matched_profile:
+        default_name = matched_profile["tech_name"]
+        default_email = matched_profile["tech_email"]
+        default_webhook = matched_profile["tech_webhook"]
+
+# Input fields bound to the selected profile data
+new_worker_name = st.sidebar.text_input("Employee Full Name:", value=default_name, placeholder="John Doe", key="global_name_field").strip()
+new_worker_email = st.sidebar.text_input("Employee Workspace Email:", value=default_email, placeholder="johndoe@company.com", key="global_email_field").strip()
+new_worker_webhook = st.sidebar.text_input("Employee Personal Google Chat Webhook:", value=default_webhook, placeholder="https://chat.googleapis.com/v1/spaces/...", key="global_webhook_field").strip()
 
 if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type="primary"):
     if new_worker_name and new_worker_email:
@@ -597,7 +631,18 @@ with st.container(border=True):
             curr_status = cols[0].selectbox("Status", options=opt, index=status_idx, key=status_key)
             curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=odt_key)
             curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=tdt_key)
-            curr_by = cols[3].text_input("Verified By", value=stored_by, key=by_key)
+            
+            # --- RESTORED DATE CALCULATION ENGINE ---
+            try:
+                date_delta = (curr_tdt - curr_odt).days
+                if date_delta > 0:
+                    cols[3].markdown(f"<div style='text-align:center; padding-top:24px;'><span style='background-color:#ffeec2; color:#b76e00; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:12px;'>⚠️ {date_delta} Days</span></div>", unsafe_allow_html=True)
+                else:
+                    cols[3].markdown(f"<div style='text-align:center; padding-top:24px;'><span style='background-color:#d1e7dd; color:#0f5132; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:12px;'>✅ Current</span></div>", unsafe_allow_html=True)
+            except:
+                cols[3].text_input("Days", value="-", disabled=True, key=f"delta_err_{prefix_key}")
+                
+            curr_by = cols[4].text_input("Verified By", value=stored_by, key=by_key)
             curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=notes_key)
             
             if (curr_status != stored_status or str(curr_odt) != str(stored_odt) or 
