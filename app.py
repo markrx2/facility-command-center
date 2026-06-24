@@ -63,21 +63,27 @@ def init_shared_db():
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
-    # SYSTEM UPGRADE: Included tech_email column in core master grid
+    # SYSTEM UPGRADE: Added tech_email and tech_webhook column profiles
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS global_roster (
             dept_prefix TEXT, 
             tech_name TEXT, 
             tech_email TEXT DEFAULT '', 
+            tech_webhook TEXT DEFAULT '',
             PRIMARY KEY (dept_prefix, tech_name)
         )
     """)
     
-    # Migration safety logic: Add tech_email if table existed historically without it
+    # Migration safety checks: Dynamically add missing schema paths silently
     try:
         cursor.execute("SELECT tech_email FROM global_roster LIMIT 1")
     except sqlite3.OperationalError:
         cursor.execute("ALTER TABLE global_roster ADD COLUMN tech_email TEXT DEFAULT ''")
+        
+    try:
+        cursor.execute("SELECT tech_webhook FROM global_roster LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE global_roster ADD COLUMN tech_webhook TEXT DEFAULT ''")
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dynamic_queues (
@@ -161,7 +167,19 @@ def dispatch_real_time_alert(message_body):
             response = requests.post(url, json=payload, headers={"Content-Type": "application/json"})
             return response.status_code == 200
     except Exception as e:
-        st.sidebar.error(f"Google Chat Node Warning: {str(e)}")
+        st.sidebar.error(f"Global Google Chat Warning: {str(e)}")
+    return False
+
+def dispatch_individual_chat_alert(tech_webhook_url, message_body):
+    """Fires a push notification text payload straight to a single tech's private room room webhook."""
+    if not tech_webhook_url or "chat.googleapis.com" not in tech_webhook_url:
+        return False
+    try:
+        payload = {"text": message_body}
+        response = requests.post(tech_webhook_url, json=payload, headers={"Content-Type": "application/json"})
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Direct Tech Chat Node Alert Refusal: {str(e)}")
     return False
 
 def dispatch_individual_tech_notification(recipient_email, worker_name, slot, department):
@@ -193,7 +211,7 @@ def dispatch_individual_tech_notification(recipient_email, worker_name, slot, de
                 server.sendmail(system_sender, [recipient_email], msg.as_string())
             return True
         else:
-            print(f"[Fallback Log] No cloud secrets found. Direct notification triggered for {worker_name} ({recipient_email}).")
+            print(f"[Fallback Log] No cloud secrets found. Direct email triggered for {worker_name} ({recipient_email}).")
             return True
     except Exception as e:
         print(f"Individual Tech Notification Refusal: {str(e)}")
@@ -218,40 +236,45 @@ dest_dept = st.sidebar.selectbox("Assign to Department:", options=[
 
 new_worker_name = st.sidebar.text_input("Employee Full Name:", placeholder="John Doe", key="global_name_field").strip()
 new_worker_email = st.sidebar.text_input("Employee Workspace Email:", placeholder="johndoe@company.com", key="global_email_field").strip()
+new_worker_webhook = st.sidebar.text_input("Employee Personal Google Chat Webhook:", placeholder="https://chat.googleapis.com/v1/spaces/...", key="global_webhook_field").strip()
 
 if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type="primary"):
     if new_worker_name and new_worker_email:
         sidebar_cursor = conn.cursor()
         sidebar_cursor.execute("""
-            INSERT OR REPLACE INTO global_roster (dept_prefix, tech_name, tech_email) 
-            VALUES (?, ?, ?)
-        """, (dest_dept[1], new_worker_name, new_worker_email))
+            INSERT OR REPLACE INTO global_roster (dept_prefix, tech_name, tech_email, tech_webhook) 
+            VALUES (?, ?, ?, ?)
+        """, (dest_dept[1], new_worker_name, new_worker_email, new_worker_webhook))
         conn.commit()
-        st.sidebar.success(f"Deployed {new_worker_name} ({new_worker_email}) to {dest_dept[0]}!")
+        st.sidebar.success(f"Deployed {new_worker_name} to {dest_dept[0]} Layout!")
         st.rerun()
     else:
         st.sidebar.warning("Please input both name and email routing vectors.")
-
-# --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
+        # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
 def render_synchronized_matrix(db_table, prefix, dept_label):
     local_cursor = conn.cursor()
     
     local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
     goals_dict = {row["queue_name"]: row["goal_target"] for row in local_cursor.fetchall()}
     
-    # Fetch personnel alongside email profiles
-    local_cursor.execute("SELECT tech_name, tech_email FROM global_roster WHERE dept_prefix=?", (prefix,))
+    # Fetch personnel roster alongside email and personal webhooks
+    local_cursor.execute("SELECT tech_name, tech_email, tech_webhook FROM global_roster WHERE dept_prefix=?", (prefix,))
     roster_rows = local_cursor.fetchall()
-    active_roster = {row["tech_name"]: row["tech_email"] for row in roster_rows}
+    active_roster = {
+        row["tech_name"]: {"email": row["tech_email"], "webhook": row["tech_webhook"]} 
+        for row in roster_rows
+    }
 
     if not active_roster:
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
-    for worker, tech_email in active_roster.items():
+    for worker, tech_profiles in active_roster.items():
         w_id = hashlib.md5(worker.encode('utf-8')).hexdigest()[:8]
+        tech_email = tech_profiles["email"]
+        tech_webhook = tech_profiles["webhook"]
         
-        st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Profile Set'})`")
+        st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         cols = st.columns(4)
         
         for slot_num in range(1, 5):
@@ -328,11 +351,19 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         elif not db_sub:
                             st.error("🛑 Timer Expired!")
                             
-                            # ACTIVE ROUTER ALERTS EXECUTION BLOCK
+                            # ACTIVE ROUTER ALERTS EXECUTION BLOCK WITH DIRECT TECH CHAT WEBHOOK
                             if db_t_not == 0:
-                                # 1. Dispatch individual routing parameter notice
+                                # 1. Dispatch individual email routing parameters notice
                                 dispatch_individual_tech_notification(tech_email, worker, slot_num, dept_label)
-                                # 2. Drop overview alert string inside general management chat space
+                                
+                                # 2. Dispatch straight into tech's isolated personal Google Chat room channel
+                                if tech_webhook:
+                                    dispatch_individual_chat_alert(
+                                        tech_webhook,
+                                        f"⏱️ **Timer Expired!**\nYour tracking block block timer has ended for *{dept_label}* (Slot {slot_num}).\n\nPlease navigate back to the Facility Command Hub dashboard immediately to log your production counts."
+                                    )
+                                
+                                # 3. Drop overview alert string inside general management overview space
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
                                 
                                 local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
@@ -560,146 +591,35 @@ with st.container(border=True):
             odt_key = f"odt_{prefix_key}_{CURRENT_DATE}"
             tdt_key = f"tdt_{prefix_key}_{CURRENT_DATE}"
             by_key = f"by_{prefix_key}_{CURRENT_DATE}"
-            nt_key = f"nt_{prefix_key}_{CURRENT_DATE}"
+            notes_key = f"notes_{prefix_key}_{CURRENT_DATE}"
+            
+            status_idx = opt.index(stored_status) if stored_status in opt else 0
+            curr_status = cols[0].selectbox("Status", options=opt, index=status_idx, key=status_key)
+            curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=odt_key)
+            curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=tdt_key)
+            curr_by = cols[3].text_input("Verified By", value=stored_by, key=by_key)
+            curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=notes_key)
+            
+            if (curr_status != stored_status or str(curr_odt) != str(stored_odt) or 
+                str(curr_tdt) != str(stored_tdt) or curr_by != stored_by or curr_notes != stored_notes):
+                
+                up_cursor = conn.cursor()
+                up_cursor.execute(f"""
+                    UPDATE daily_checklist 
+                    SET {db_prefix}=?, {db_prefix}_date=?, {db_prefix}_target=?, {db_prefix}_by=?, {db_prefix}_notes=?
+                    WHERE log_date=?
+                """, (curr_status, str(curr_odt), str(curr_tdt), curr_by, curr_notes, CURRENT_DATE))
+                conn.commit()
+                st.rerun()
 
-            status_val = cols[0].radio(f"Status for {prefix_key}", opt, index=opt.index(stored_status if stored_status in opt else "Pending"), horizontal=True, key=status_key, label_visibility="collapsed")
-            
-            oldest_dt = cols[1].date_input("Oldest", value=parse_stored_date(stored_odt), key=odt_key, format="MM/DD/YYYY", label_visibility="collapsed")
-            target_dt = cols[2].date_input("Target", value=parse_stored_date(stored_tdt), key=tdt_key, format="MM/DD/YYYY", label_visibility="collapsed")
-            sign_by = cols[3].text_input("Sign", value=stored_by, key=by_key, placeholder="Initials", label_visibility="collapsed")
-            
-            days_gap = (target_dt - oldest_dt).days
-            limit_trigger = 14 if is_fourteen_day_threshold else 7
-            
-            if days_gap >= limit_trigger:
-                cols[4].markdown(f"<div style='background-color:#fee2e2; border:1px solid #ef4444; color:#b91c1c; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
-            else:
-                cols[4].markdown(f"<div style='background-color:#dcfce7; border:1px solid #22c55e; color:#15803d; font-weight:bold; border-radius:4px; text-align:center; padding:3px 2px; font-size:11px; margin-top:2px;'>{days_gap} Days</div>", unsafe_allow_html=True)
-            
-            notes_val = cols[5].text_input("Notes", value=stored_notes, key=nt_key, placeholder="Operational notes...", label_visibility="collapsed")
-            form_container.markdown("---")
-            
-            return status_val, oldest_dt.strftime("%Y-%m-%d"), target_dt.strftime("%Y-%m-%d"), sign_by, notes_val
-
-        this_form = st.container()
-        
-        h_cols = this_form.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
-        h_cols[0].caption("Status")
-        h_cols[1].caption("Oldest Date")
-        h_cols[2].caption("Target Date")
-        h_cols[3].caption("Sign")
-        h_cols[4].caption("Backlog")
-        h_cols[5].caption("Queue Line Comments")
-        this_form.markdown("---")
-        
-        r1, r1_oldest, r1_target, r1_by, r1_nt = render_checklist_row(this_form, "1. Reject Queue Current", "rejection_queue", "r1")
-        r2, r2_oldest, r2_target, r2_by, r2_nt = render_checklist_row(this_form, "2. PA Queue Addressed", "pa_queue", "r2")
-        r3, r3_oldest, r3_target, r3_by, r3_nt = render_checklist_row(this_form, "3. Untransmitted Claims Completed", "untransmitted_claims", "r3")
-        r4, r4_oldest, r4_target, r4_by, r4_nt = render_checklist_row(this_form, "4. Future Bill Queue Current", "future_bill", "r4")
-        r5, r5_oldest, r5_target, r5_by, r5_nt = render_checklist_row(this_form, "5. Data Re-Entry Queue Cleared", "data_re_entry", "r5")
-        r6, r6_oldest, r6_target, r6_by, r6_nt = render_checklist_row(this_form, "6. AI/Tech Check Status", "ai_tech_check", "r6")
-        r7, r7_oldest, r7_target, r7_by, r7_nt = render_checklist_row(this_form, "7. Billing Queue Current", "billing", "r7")
-        r8, r8_oldest, r8_target, r8_by, r8_nt = render_checklist_row(this_form, "8. Order Queue Current", "ordering", "r8")
-        r9, r9_oldest, r9_target, r9_by, r9_nt = render_checklist_row(this_form, "9. Dispense Queue Current", "dispense", "r9")
-        r10, r10_oldest, r10_target, r10_by, r10_nt = render_checklist_row(this_form, "10. 14 Day Return Current", "return_fourteen_queue", "r10", is_fourteen_day_threshold=True)
-        
-        if st.button("Save Global Checklist Progress", type="primary", use_container_width=True, key="save_global_checklist_direct_btn"):
-            local_cursor.execute("""
-                UPDATE daily_checklist 
-                SET rejection_queue=?, pa_queue=?, untransmitted_claims=?, future_bill=?, data_re_entry=?, ai_tech_check=?, billing=?, ordering=?, dispense=?, return_fourteen_queue=?,
-                    rejection_queue_by=?, rejection_queue_notes=?, rejection_queue_date=?, rejection_queue_target=?,
-                    pa_queue_by=?, pa_queue_notes=?, pa_queue_date=?, pa_queue_target=?,
-                    untransmitted_claims_by=?, untransmitted_claims_notes=?, untransmitted_claims_date=?, untransmitted_claims_target=?,
-                    future_bill_by=?, future_bill_notes=?, future_bill_date=?, future_bill_target=?,
-                    data_re_entry_by=?, data_re_entry_notes=?, data_re_entry_date=?, data_re_entry_target=?,
-                    ai_tech_check_by=?, ai_tech_check_notes=?, ai_tech_check_date=?, ai_tech_check_target=?,
-                    billing_by=?, billing_notes=?, billing_date=?, billing_target=?,
-                    ordering_by=?, ordering_notes=?, ordering_date=?, ordering_target=?,
-                    dispense_by=?, dispense_notes=?, dispense_date=?, dispense_target=?,
-                    return_fourteen_queue_by=?, return_fourteen_queue_notes=?, return_fourteen_queue_date=?, return_fourteen_queue_target=?
-                WHERE log_date=?
-            """, (
-                r1, r2, r3, r4, r5, r6, r7, r8, r9, r10,
-                r1_by, r1_nt, r1_oldest, r1_target,
-                r2_by, r2_nt, r2_oldest, r2_target,
-                r3_by, r3_nt, r3_oldest, r3_target,
-                r4_by, r4_nt, r4_oldest, r4_target,
-                r5_by, r5_nt, r5_oldest, r5_target,
-                r6_by, r6_nt, r6_oldest, r6_target,
-                r7_by, r7_nt, r7_oldest, r7_target,
-                r8_by, r8_nt, r8_oldest, r8_target,
-                r9_by, r9_nt, r9_oldest, r9_target,
-                r10_by, r10_nt, r10_oldest, r10_target,
-                CURRENT_DATE
-            ))
-            conn.commit()
-            st.success("🎉 All checklist parameters saved permanently to the database matrix!")
-            st.rerun()
-
-    # --- TIMEZONE AND WEEKEND HANDLING ENGINE ---
-    try:
-        import zoneinfo
-        est_tz = zoneinfo.ZoneInfo("America/New_York")
-    except ImportError:
-        from datetime import timezone
-        est_tz = timezone(timedelta(hours=-5))
-        
-    sys_now = datetime.now(est_tz)
-    is_weekend = sys_now.weekday() in [5, 6]
-
-    if not is_weekend:
-        alert_target_datetime = datetime.combine(sys_now.date(), t_obj, tzinfo=est_tz)
-        escalation_target_datetime = alert_target_datetime + timedelta(hours=1)
-        
-        queue_map = [
-            {"name": "Reject Queue Current", "status": r1, "user": r1_by, "note": r1_nt, "oldest": r1_oldest, "target": r1_target},
-            {"name": "PA Queue Addressed", "status": r2, "user": r2_by, "note": r2_nt, "oldest": r2_oldest, "target": r2_target},
-            {"name": "Untransmitted Claims Completed", "status": r3, "user": r3_by, "note": r3_nt, "oldest": r3_oldest, "target": r3_target},
-            {"name": "Future Bill Queue Current", "status": r4, "user": r4_by, "note": r4_nt, "oldest": r4_oldest, "target": r4_target},
-            {"name": "Data Re-Entry Queue Cleared", "status": r5, "user": r5_by, "note": r5_nt, "oldest": r5_oldest, "target": r5_target},
-            {"name": "AI/Tech Check Status", "status": r6, "user": r6_by, "note": r6_nt, "oldest": r6_oldest, "target": r6_target},
-            {"name": "Billing Queue Current", "status": r7, "user": r7_by, "note": r7_nt, "oldest": r7_oldest, "target": r7_target},
-            {"name": "Order Queue Current", "status": r8, "user": r8_by, "note": r8_nt, "oldest": r8_oldest, "target": r8_target},
-            {"name": "Dispense Queue Current", "status": r9, "user": r9_by, "note": r9_nt, "oldest": r9_oldest, "target": r9_target},
-            {"name": "14 Day Return Current", "status": r10, "user": r10_by, "note": r10_nt, "oldest": r10_oldest, "target": r10_target},
-        ]
-        
-        exception_lines = []
-        for q in queue_map:
-            user_string = f" [By: {q['user'].strip()}]" if q['user'].strip() else ""
-            note_string = f" - Note: \"{q['note'].strip()}\"" if q['note'].strip() else ""
-            dates_string = f" (Oldest: {q['oldest']} | Target: {q['target']})"
-            
-            if q["status"] == "Pending":
-                exception_lines.append(f"❌ {q['name']}: PENDING")
-            elif q["status"] == "No":
-                exception_lines.append(f"⚠️ {q['name']}: MARKED NO{dates_string}{user_string}{note_string}")
-        
-        if exception_lines:
-            status_ledger_string = "\n".join(exception_lines)
-            
-            chk_keys = chk.keys() if hasattr(chk, "keys") else []
-            is_reminder_sent = int(chk["reminder_sent"]) if "reminder_sent" in chk_keys else 0
-            is_sup_escaped = int(chk["supervisor_escaped"]) if "supervisor_escaped" in chk_keys else 0
-            
-            if alert_target_datetime <= sys_now < escalation_target_datetime:
-                if is_reminder_sent == 0:
-                    dispatch_real_time_alert(
-                        f"⚠️ **FACILITY DAILY SUMMARY: ITEMS OUTSTANDING** ⚠️\n"
-                        f"The following exceptions require immediate operational adjustment before the grace window closes:\n\n"
-                        f"{status_ledger_string}"
-                    )
-                    local_cursor.execute("UPDATE daily_checklist SET reminder_sent=1 WHERE log_date=?", (CURRENT_DATE,))
-                    conn.commit()
-                    st.rerun()
-                    
-            elif sys_now >= escalation_target_datetime:
-                if is_sup_escaped == 0:
-                    dispatch_real_time_alert(
-                        f"🚨 **CRITICAL COMPLIANCE ESCALATION: PAST GRACE WINDOW** 🚨\n"
-                        f"The following facility lines remain incomplete past the 1-hour grace parameters:\n\n"
-                        f"{status_ledger_string}"
-                    )
-                    local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
-                    conn.commit()
-                    st.rerun()
+        # Render daily operational tracking checks
+        render_checklist_row(c_col, "Rejection Queue", "rejection_queue", "rej")
+        render_checklist_row(c_col, "Prior Authorization Queue", "pa_queue", "pa")
+        render_checklist_row(c_col, "Untransmitted Claims Ledger", "untransmitted_claims", "untrans")
+        render_checklist_row(c_col, "Future Bill Queue", "future_bill", "fut")
+        render_checklist_row(c_col, "Data Re-Entry Desk", "data_re_entry", "re_ent")
+        render_checklist_row(c_col, "AI Tech Verification Check", "ai_tech_check", "ai_tch")
+        render_checklist_row(c_col, "Corporate Billing Module", "billing", "bill")
+        render_checklist_row(c_col, "Ordering Queue Logistics", "ordering", "ord")
+        render_checklist_row(c_col, "Dispense Station Matrix", "dispense", "disp")
+        render_checklist_row(c_col, "14-Day Return Threshold Queue", "return_fourteen_queue", "ret_14", is_fourteen_day_threshold=True)
