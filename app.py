@@ -59,7 +59,6 @@ st.components.v1.html(
 
 # --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
-    # Using v3 guarantees a brand-new file system slot to bypass any hidden server cache blocks
     conn = sqlite3.connect("facility_matrix_v3.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
@@ -120,7 +119,6 @@ def init_shared_db():
         except sqlite3.OperationalError:
             cursor.execute(f"ALTER TABLE {dept} ADD COLUMN duration_minutes INTEGER DEFAULT 120")
         
-    # Full Explicit Checklist Schema mapping ensures zero operational column mismatches
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_checklist (
             log_date TEXT PRIMARY KEY, 
@@ -372,7 +370,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         escalation_time = end_time + timedelta(minutes=10)
                         current_now = datetime.now()
                         
-                        # --- SECURED INSTANT PASS-THROUGH FOR MANAGER RESET PRIVILEGES ---
                         is_mgr_active = st.session_state.get("mgr_pwd_input_field") == "admin123"
                         if is_mgr_active:
                             if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
@@ -582,7 +579,8 @@ with st.container(border=True):
             form_container.markdown(f"##### {label}")
             cols = form_container.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
             
-            row_keys = chk.keys() if hasattr(chk, "keys") else []
+            # Extracts row keys dynamically using the valid sqlite3.Row schema list conversion methodology
+            row_keys = list(chk.keys()) if chk else []
             stored_status = chk[db_prefix] if (db_prefix in row_keys and chk[db_prefix]) else "Pending"
             stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in row_keys else ""
             stored_tdt = chk[f"{db_prefix}_target"] if f"{db_prefix}_target" in row_keys else ""
