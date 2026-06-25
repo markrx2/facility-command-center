@@ -59,7 +59,7 @@ st.components.v1.html(
 
 # --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
-    conn = sqlite3.connect("shared_facility_matrix.db", check_same_thread=False)
+    conn = sqlite3.connect("shared_facility_matrix_V2.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
