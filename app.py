@@ -256,6 +256,13 @@ if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type
             VALUES (?, ?, ?, ?)
         """, (dest_dept[1], new_worker_name, new_worker_email, new_worker_webhook))
         conn.commit()
+        
+        # Reset sidebar layout elements completely upon deployment to prevent submission loops
+        st.session_state["global_name_field"] = ""
+        st.session_state["global_email_field"] = ""
+        st.session_state["global_webhook_field"] = ""
+        st.session_state["profile_selector_widget"] = "-- Create New Profile --"
+        
         st.sidebar.success(f"Deployed {new_worker_name} to {dest_dept[0]} Layout!")
         st.rerun()
     else:
@@ -324,14 +331,20 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         
-        # Persistent layout eviction button for logged-in managers with State Purging
+        # Wipe Profile & Timers button with layout input state clearing
         if is_mgr_active:
             if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
                 local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
                 conn.commit()
                 
-                # MEMORY PURGE: Locate and delete any lingering state memory for this worker's rows to prevent loopbacks
+                # Force reset sidebar input fields to completely dead strings so it stops loop-injecting
+                st.session_state["global_name_field"] = ""
+                st.session_state["global_email_field"] = ""
+                st.session_state["global_webhook_field"] = ""
+                st.session_state["profile_selector_widget"] = "-- Create New Profile --"
+                
+                # Delete worker's individual widget keys out of active browser cache memory
                 state_keys_to_purge = [k for k in st.session_state.keys() if f"_{prefix}_{w_id}_" in k or k.endswith(f"_{prefix}_{w_id}")]
                 for key in state_keys_to_purge:
                     del st.session_state[key]
@@ -347,13 +360,11 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
                     
-                    # Persistent Admin Reset Overrides visible regardless of conditional timer initialization state
                     if is_mgr_active and slot_row:
                         if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                             conn.commit()
                             
-                            # Clean slot variables out of session state explicitly
                             for suffix in ["q", "dur", "num", "sub"]:
                                 target_key = f"{suffix}_{prefix}_{w_id}_{slot_num}"
                                 if target_key in st.session_state:
