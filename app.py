@@ -96,7 +96,6 @@ def init_shared_db():
         )
     """)
     
-    # SYSTEM UPGRADE: Real-time Snapshot Backlog Matrix tracking metrics table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS floor_backlogs (
             log_date TEXT PRIMARY KEY,
@@ -302,7 +301,6 @@ def render_global_backlog_ribbon():
 
 # --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
 def render_synchronized_matrix(db_table, prefix, dept_label):
-    render_global_backlog_ribbon()
     local_cursor = conn.cursor()
     
     local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
@@ -433,6 +431,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.rerun()
 
 # --- 7. CORE APP ROUTING INTERFACE ---
+# Renders backlog exactly once right between tabs and personnel rows
+render_global_backlog_ribbon()
+
 tab_de, tab_cc, tab_sh, tab_fi, tab_analytics, tab_mgmt = st.tabs([
     "💻 Data Entry Line", "📞 Call Center Desk", "📦 Shipping Floor", "🧪 Fill Department", "📊 Cumulative Analytics", "⚙️ Queue Management"
 ])
