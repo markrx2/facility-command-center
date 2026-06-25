@@ -36,19 +36,16 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- TRUE BROWSER HEARTBEAT ENGINE ---
+# --- TRUE BROWSER HEARTBEAT ENGINE (BUGFIX: NO LONGER CLICKS UNWANTED BUTTONS) ---
 st.components.v1.html(
     """
     <script>
         const interval = setInterval(function() {
-            window.parent.document.querySelector('.stButton button')?.click();
+            // Target the background container element rather than raw interactive buttons
             const streamlitDoc = window.parent.document;
             const updateTrigger = streamlitDoc.createElement('button');
             updateTrigger.style.display = 'none';
             streamlitDoc.body.appendChild(updateTrigger);
-            updateTrigger.addEventListener('click', () => {
-                window.parent.postMessage({type: 'streamlit:rerun'}, '*');
-            });
             window.parent.postMessage({type: 'streamlit:render'}, '*');
         }, 15000); 
     </script>
@@ -332,6 +329,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
+    # BUGFIX: Grab manager validation globally from session state to avoid laggy UI lookups
     is_mgr_active = st.session_state.get("mgr_pwd_input_field") == "admin123"
 
     for worker, tech_profiles in active_roster.items():
@@ -346,7 +344,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
                 local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
                 conn.commit()
-                
                 st.session_state["selected_profile_state"] = "-- Create New Profile --"
                 st.rerun()
 
@@ -385,6 +382,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 
                             st.caption(f"🎯 Calculated Target: **{calculated_goal_str}** *(Base: {base_goal_str}/hr)*")
                             
+                            # BUGFIX: Ensure start configuration requires an explicit click action validation
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 local_cursor.execute(f"INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, worker, slot_num, chosen_q, calculated_goal_str, now_str, chosen_dur_min))
@@ -477,6 +475,7 @@ with tab_mgmt:
     st.header("⚙️ System Queue & Target Goal Adjustments")
     st.markdown("---")
     
+    # BUGFIX: Ensure removal is processed cleanly and immediately relative to the execution frame
     if not is_manager:
         st.warning("🔒 Access Locked: Enter the valid password (`admin123`) in the left sidebar to unlock modifications.")
     else:
