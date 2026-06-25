@@ -63,7 +63,6 @@ def init_shared_db():
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
-    # SYSTEM UPGRADE: Added tech_email and tech_webhook column profiles
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS global_roster (
             dept_prefix TEXT, 
@@ -74,7 +73,6 @@ def init_shared_db():
         )
     """)
     
-    # Migration safety checks: Dynamically add missing schema paths silently
     try:
         cursor.execute("SELECT tech_email FROM global_roster LIMIT 1")
     except sqlite3.OperationalError:
@@ -95,6 +93,16 @@ def init_shared_db():
         CREATE TABLE IF NOT EXISTS metrics_history (
             archive_id INTEGER PRIMARY KEY AUTOINCREMENT, log_date TEXT, department TEXT, tech_name TEXT, 
             slot_id INTEGER, queue TEXT, goal TEXT, input_number INTEGER, escalated INTEGER DEFAULT 0, timestamp TEXT
+        )
+    """)
+    
+    # SYSTEM UPGRADE: Real-time Snapshot Backlog Matrix tracking metrics table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS floor_backlogs (
+            log_date TEXT PRIMARY KEY,
+            erx INT DEFAULT 0, central_fill INT DEFAULT 0, rejected INT DEFAULT 0,
+            on_hold INT DEFAULT 0, pa INT DEFAULT 0, dispense INT DEFAULT 0,
+            ai_tech INT DEFAULT 0, ordering INT DEFAULT 0, billing INT DEFAULT 0
         )
     """)
     
@@ -122,19 +130,8 @@ def init_shared_db():
         )
     """)
     
-    # CRITICAL SECURITY FIX: Fully maps primary row trackers alongside meta updates
     schema_extensions = [
-        ("rejection_queue", "TEXT DEFAULT 'Pending'"),
-        ("pa_queue", "TEXT DEFAULT 'Pending'"),
-        ("untransmitted_claims", "TEXT DEFAULT 'Pending'"),
-        ("future_bill", "TEXT DEFAULT 'Pending'"),
-        ("data_re_entry", "TEXT DEFAULT 'Pending'"),
-        ("ai_tech_check", "TEXT DEFAULT 'Pending'"),
-        ("billing", "TEXT DEFAULT 'Pending'"),
-        ("ordering", "TEXT DEFAULT 'Pending'"),
-        ("dispense", "TEXT DEFAULT 'Pending'"),
-        ("return_fourteen_queue", "TEXT DEFAULT 'Pending'"),
-        
+        ("rejection_queue", "TEXT DEFAULT 'Pending'"), ("pa_queue", "TEXT DEFAULT 'Pending'"), ("untransmitted_claims", "TEXT DEFAULT 'Pending'"), ("future_bill", "TEXT DEFAULT 'Pending'"), ("data_re_entry", "TEXT DEFAULT 'Pending'"), ("ai_tech_check", "TEXT DEFAULT 'Pending'"), ("billing", "TEXT DEFAULT 'Pending'"), ("ordering", "TEXT DEFAULT 'Pending'"), ("dispense", "TEXT DEFAULT 'Pending'"), ("return_fourteen_queue", "TEXT DEFAULT 'Pending'"),
         ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"), ("rejection_queue_date", "TEXT DEFAULT ''"), ("rejection_queue_target", "TEXT DEFAULT ''"),
         ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"), ("pa_queue_date", "TEXT DEFAULT ''"), ("pa_queue_target", "TEXT DEFAULT ''"),
         ("untransmitted_claims_by", "TEXT DEFAULT ''"), ("untransmitted_claims_notes", "TEXT DEFAULT ''"), ("untransmitted_claims_date", "TEXT DEFAULT ''"), ("untransmitted_claims_target", "TEXT DEFAULT ''"),
@@ -171,7 +168,6 @@ CURRENT_DATE = datetime.now().strftime("%Y-%m-%d")
 
 # --- 3. DUAL-CHANNEL NOTIFICATION ENGINE ---
 def dispatch_real_time_alert(message_body):
-    """Fires to the global supervisor/overview tracker room channel."""
     try:
         if "google_chat" in st.secrets:
             url = st.secrets["google_chat"]["webhook_url"]
@@ -183,7 +179,6 @@ def dispatch_real_time_alert(message_body):
     return False
 
 def dispatch_individual_chat_alert(tech_webhook_url, message_body):
-    """Fires a push notification text payload straight to a single tech's private room webhook."""
     if not tech_webhook_url or "chat.googleapis.com" not in tech_webhook_url:
         return False
     try:
@@ -195,11 +190,8 @@ def dispatch_individual_chat_alert(tech_webhook_url, message_body):
     return False
 
 def dispatch_individual_tech_notification(recipient_email, worker_name, slot, department):
-    """Sends targeted tracking reminder email out directly using the corporate SMTP layout configuration."""
     if not recipient_email or "@" not in recipient_email:
-        print(f"Skipping individual alert: {worker_name} does not have a valid email vector routing configuration.")
         return False
-        
     try:
         if "email" in st.secrets:
             system_sender = st.secrets["email"]["sender"]
@@ -207,12 +199,7 @@ def dispatch_individual_tech_notification(recipient_email, worker_name, slot, de
             smtp_server = st.secrets["email"].get("smtp_server", "smtp.gmail.com")
             smtp_port = int(st.secrets["email"].get("port", 465))
             
-            msg_text = (
-                f"Hello {worker_name},\n\n"
-                f"Your tracking block block timer has ended for {department} (Slot {slot}).\n\n"
-                f"Please navigate back to the Facility Command Hub dashboard immediately to log your production counts.\n\n"
-                f"Thank you!"
-            )
+            msg_text = (f"Hello {worker_name},\n\nYour tracking block timer has ended for {department} (Slot {slot}).\n\nPlease navigate back to the Facility Command Hub dashboard immediately to log your production counts.\n\nThank you!")
             msg = MIMEText(msg_text)
             msg['Subject'] = f"⏱️ Action Required: Timer Ended - Slot {slot} ({department})"
             msg['From'] = f"Facility Command Hub <{system_sender}>"
@@ -222,9 +209,7 @@ def dispatch_individual_tech_notification(recipient_email, worker_name, slot, de
                 server.login(system_sender, system_password)
                 server.sendmail(system_sender, [recipient_email], msg.as_string())
             return True
-        else:
-            print(f"[Fallback Log] No cloud secrets found. Direct email triggered for {worker_name} ({recipient_email}).")
-            return True
+        return True
     except Exception as e:
         print(f"Individual Tech Notification Refusal: {str(e)}")
         return False
@@ -246,7 +231,6 @@ dest_dept = st.sidebar.selectbox("Assign to Department:", options=[
     ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
 ], format_func=lambda x: x[0], key="global_target_dept_sel")
 
-# --- PROFILE DROPDOWN AUTO-POPULATION ENGINE ---
 sidebar_db_cursor = conn.cursor()
 sidebar_db_cursor.execute("SELECT tech_name, tech_email, tech_webhook FROM global_roster ORDER BY tech_name ASC")
 saved_profiles = sidebar_db_cursor.fetchall()
@@ -254,12 +238,7 @@ saved_profiles = sidebar_db_cursor.fetchall()
 profile_options = ["-- Create New Profile --"] + [p["tech_name"] for p in saved_profiles]
 selected_profile = st.sidebar.selectbox("Select Existing Profile (Optional):", options=profile_options, key="profile_selector_widget")
 
-# Default values if creating a new profile
-default_name = ""
-default_email = ""
-default_webhook = ""
-
-# If an existing profile is picked, pull its saved data
+default_name, default_email, default_webhook = "", "", ""
 if selected_profile != "-- Create New Profile --":
     matched_profile = next((p for p in saved_profiles if p["tech_name"] == selected_profile), None)
     if matched_profile:
@@ -267,7 +246,6 @@ if selected_profile != "-- Create New Profile --":
         default_email = matched_profile["tech_email"]
         default_webhook = matched_profile["tech_webhook"]
 
-# Input fields bound to the selected profile data
 new_worker_name = st.sidebar.text_input("Employee Full Name:", value=default_name, placeholder="John Doe", key="global_name_field").strip()
 new_worker_email = st.sidebar.text_input("Employee Workspace Email:", value=default_email, placeholder="johndoe@company.com", key="global_email_field").strip()
 new_worker_webhook = st.sidebar.text_input("Employee Personal Google Chat Webhook:", value=default_webhook, placeholder="https://chat.googleapis.com/v1/spaces/...", key="global_webhook_field").strip()
@@ -284,20 +262,55 @@ if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type
         st.rerun()
     else:
         st.sidebar.warning("Please input both name and email routing vectors.")
-        # --- 5. RENDERING ENGINE FOR WORKER GRID ROWS ---
+        # --- 5. TOP-LEVEL BACKLOG MATRIX INPUT INJECTOR ---
+def render_global_backlog_ribbon():
+    backlog_cursor = conn.cursor()
+    backlog_cursor.execute("SELECT * FROM floor_backlogs WHERE log_date=?", (CURRENT_DATE,))
+    row = backlog_cursor.fetchone()
+    
+    if not row:
+        backlog_cursor.execute("INSERT OR IGNORE INTO floor_backlogs (log_date) VALUES (?)", (CURRENT_DATE,))
+        conn.commit()
+        backlog_cursor.execute("SELECT * FROM floor_backlogs WHERE log_date=?", (CURRENT_DATE,))
+        row = backlog_cursor.fetchone()
+
+    st.markdown("<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Global Real-Time Operational Queue Volume Snapshots</h4>", unsafe_allow_html=True)
+    b_cols = st.columns(9)
+    
+    fields = [
+        ("ERx", "erx"), ("Central Fill", "central_fill"), ("Rejected Queue", "rejected"),
+        ("On Hold Queue", "on_hold"), ("PA Queue", "pa"), ("Dispense Queue", "dispense"),
+        ("AI/Tech Check", "ai_tech"), ("Ordering Queue", "ordering"), ("Billing Queue", "billing")
+    ]
+    
+    updates = {}
+    for i, (label, db_field) in enumerate(fields):
+        with b_cols[i]:
+            current_value = row[db_field] if row else 0
+            new_val = st.number_input(label, min_value=0, step=1, value=int(current_value), key=f"top_bl_{db_field}")
+            if new_val != current_value:
+                updates[db_field] = new_val
+
+    if updates:
+        set_clause = ", ".join([f"{k}=?" for k in updates.keys()])
+        params = list(updates.values()) + [CURRENT_DATE]
+        backlog_cursor.execute(f"UPDATE floor_backlogs SET {set_clause} WHERE log_date=?", params)
+        conn.commit()
+        st.rerun()
+    st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
+
+
+# --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
 def render_synchronized_matrix(db_table, prefix, dept_label):
+    render_global_backlog_ribbon()
     local_cursor = conn.cursor()
     
     local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
     goals_dict = {row["queue_name"]: row["goal_target"] for row in local_cursor.fetchall()}
     
-    # Fetch personnel roster alongside email and personal webhooks
     local_cursor.execute("SELECT tech_name, tech_email, tech_webhook FROM global_roster WHERE dept_prefix=?", (prefix,))
     roster_rows = local_cursor.fetchall()
-    active_roster = {
-        row["tech_name"]: {"email": row["tech_email"], "webhook": row["tech_webhook"]} 
-        for row in roster_rows
-    }
+    active_roster = {row["tech_name"]: {"email": row["tech_email"], "webhook": row["tech_webhook"]} for row in roster_rows}
 
     if not active_roster:
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
@@ -323,9 +336,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{w_id}_{slot_num}")
                             base_goal_str = goals_dict[chosen_q]
                             
-                            durations = {
-                                "30 Minutes": 30, "1 Hour": 60, "2 Hours": 120, "4 Hours": 240, "8 Hours": 480
-                            }
+                            durations = {"30 Minutes": 30, "1 Hour": 60, "2 Hours": 120, "4 Hours": 240, "8 Hours": 480}
                             chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), index=1, key=f"dur_{prefix}_{w_id}_{slot_num}")
                             chosen_dur_min = durations[chosen_dur_label]
                             
@@ -342,30 +353,20 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                local_cursor.execute(f"""
-                                    INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) 
-                                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                                """, (CURRENT_DATE, worker, slot_num, chosen_q, calculated_goal_str, now_str, chosen_dur_min))
+                                local_cursor.execute(f"INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, worker, slot_num, chosen_q, calculated_goal_str, now_str, chosen_dur_min))
                                 conn.commit()
                                 st.rerun()
                         else:
                             st.warning("Configure queues in Management panel.")
                     else:
-                        db_queue = slot_row["queue"]
-                        db_goal = slot_row["goal"]
-                        db_start = slot_row["start_time"]
-                        db_input = slot_row["input_number"]
-                        db_t_not = slot_row["tech_notified"]
-                        db_s_not = slot_row["supervisor_notified"]
-                        db_sub = slot_row["submitted"]
-                        db_dur_min = slot_row["duration_minutes"]
+                        db_queue, db_goal, db_start, db_input = slot_row["queue"], slot_row["goal"], slot_row["start_time"], slot_row["input_number"]
+                        db_t_not, db_s_not, db_sub, db_dur_min = slot_row["tech_notified"], slot_row["supervisor_notified"], slot_row["submitted"], slot_row["duration_minutes"]
                         
                         st.markdown(f"Queue: `{db_queue}`")
                         st.caption(f"Target Goal: **{db_goal}** ({db_dur_min} min block)")
                         
                         start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
                         end_time = start_time + timedelta(minutes=db_dur_min)
-                        
                         fifteen_min_overdue_time = end_time + timedelta(minutes=15)
                         escalation_time = end_time + timedelta(minutes=10)
                         current_now = datetime.now()
@@ -384,33 +385,16 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             st.progress(1.0 - (rem.total_seconds() / (db_dur_min * 60.0)))
                         elif not db_sub:
                             st.error("🛑 Timer Expired!")
-                            
-                            # ACTIVE ROUTER ALERTS EXECUTION BLOCK WITH DIRECT TECH CHAT WEBHOOK
                             if db_t_not == 0:
-                                # 1. Dispatch individual email routing parameters notice
                                 dispatch_individual_tech_notification(tech_email, worker, slot_num, dept_label)
-                                
-                                # 2. Dispatch straight into tech's isolated personal Google Chat room channel
                                 if tech_webhook:
-                                    dispatch_individual_chat_alert(
-                                        tech_webhook,
-                                        f"⏱️ **Timer Expired!**\nYour tracking block block timer has ended for *{dept_label}* (Slot {slot_num}).\n\nPlease navigate back to the Facility Command Hub dashboard immediately to log your production counts."
-                                    )
-                                
-                                # 3. Drop overview alert string inside general management overview space
+                                    dispatch_individual_chat_alert(tech_webhook, f"⏱️ **Timer Expired!**\nYour tracking block timer has ended for *{dept_label}* (Slot {slot_num}).\n\nPlease log counts.")
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
-                                
                                 local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 
                             if current_now >= fifteen_min_overdue_time and db_s_not < 2:
-                                dispatch_real_time_alert(
-                                    f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\n"
-                                    f"Technician: {worker.upper()}\n"
-                                    f"Department: {dept_label}\n"
-                                    f"Slot: {slot_num} | Queue: `{db_queue}`\n"
-                                    f"Status: **Metrics have NOT been logged** and 15 minutes have passed since the block expired."
-                                )
+                                dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
                                 local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=2 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
 
@@ -423,35 +407,21 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
                                     local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                     conn.commit()
-                                if db_s_not == 1:
-                                    st.error("🚨 Supervisor alert sent to Google Chat.")
-                                elif db_s_not == 2:
-                                    st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
+                                if db_s_not == 1: st.error("🚨 Supervisor alert sent to Google Chat.")
+                                elif db_s_not == 2: st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
                         
                         if not db_sub:
                             val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{w_id}_{slot_num}")
                             if st.button("Submit Metrics", key=f"sub_{prefix}_{w_id}_{slot_num}", type="primary", use_container_width=True) and val is not None:
                                 target_numeric_value = 0
                                 match_digits = re.search(r'\d+', str(db_goal))
-                                if match_digits:
-                                    target_numeric_value = int(match_digits.group())
+                                if match_digits: target_numeric_value = int(match_digits.group())
                                 
                                 is_escalated = 1 if val < target_numeric_value else 0
                                 if is_escalated:
-                                    dispatch_real_time_alert(
-                                        f"📉 **PRODUCTION ALERT: GOAL NOT MET** 📉\n"
-                                        f"Technician: {worker.upper()}\n"
-                                        f"Department: {dept_label}\n"
-                                        f"Queue Segment: {db_queue}\n"
-                                        f"Assigned Goal Vector: {db_goal}\n"
-                                        f"Logged Metrics Value: **{val}** (Deficit of {target_numeric_value - val} units)"
-                                    )
+                                    dispatch_real_time_alert(f"📉 **PRODUCTION ALERT: GOAL NOT MET** 📉\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nGoal: {db_goal} | Logged: **{val}**")
                                 
-                                local_cursor.execute("""
-                                    INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """, (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-
+                                local_cursor.execute("INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 st.rerun()
@@ -462,7 +432,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 conn.commit()
                                 st.rerun()
 
-# --- 6. CORE APP ROUTING INTERFACE ---
+# --- 7. CORE APP ROUTING INTERFACE ---
 tab_de, tab_cc, tab_sh, tab_fi, tab_analytics, tab_mgmt = st.tabs([
     "💻 Data Entry Line", "📞 Call Center Desk", "📦 Shipping Floor", "🧪 Fill Department", "📊 Cumulative Analytics", "⚙️ Queue Management"
 ])
@@ -472,7 +442,7 @@ with tab_cc: render_synchronized_matrix("call_center_slots", "cc", "Call Center"
 with tab_sh: render_synchronized_matrix("shipping_slots", "sh", "Shipping")
 with tab_fi: render_synchronized_matrix("fill_slots", "fi", "Fill")
 
-# --- 7. DYNAMIC QUEUE MANAGEMENT CONFIGURATION TAB ---
+# --- 8. DYNAMIC QUEUE & ROSTER MANAGEMENT CONFIGURATION TAB ---
 with tab_mgmt:
     st.header("⚙️ System Queue & Target Goal Adjustments")
     st.markdown("---")
@@ -495,6 +465,26 @@ with tab_mgmt:
                     conn.commit()
                     st.success(f"Added baseline operational tracking line: {new_q_name} at {new_q_goal}/hr")
                     st.rerun()
+            
+            st.markdown("<br><br>", unsafe_allow_html=True)
+            st.subheader("🗑 ... Decommission Employee Profiles")
+            local_cursor.execute("SELECT dept_prefix, tech_name FROM global_roster ORDER BY tech_name ASC")
+            all_staff = local_cursor.fetchall()
+            
+            if not all_staff:
+                st.info("No saved technician profiles found.")
+            else:
+                for staff in all_staff:
+                    s_prefix, s_name = staff["dept_prefix"], staff["tech_name"]
+                    d_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[s_prefix]
+                    s_col1, s_col2 = st.columns([2.5, 1])
+                    s_col1.markdown(f"👤 **{s_name}** `({d_lbl})`")
+                    if s_col2.button("Remove Profile", key=f"del_staff_{s_prefix}_{hash(s_name)}", type="secondary", use_container_width=True):
+                        local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (s_prefix, s_name))
+                        conn.commit()
+                        st.success(f"Decommissioned {s_name} from system.")
+                        st.rerun()
+                    st.markdown("<hr style='margin:2px 0px !important;'>", unsafe_allow_html=True)
                     
         with m_col2:
             st.subheader("📋 Current Active Queue Database Matrix")
@@ -505,36 +495,25 @@ with tab_mgmt:
                 st.info("No customized tracking queues available.")
             else:
                 for q_row in all_qs:
-                    q_prefix = q_row["dept_prefix"]
-                    q_name = q_row["queue_name"]
-                    q_goal = q_row["goal_target"]
-                    
+                    q_prefix, q_name, q_goal = q_row["dept_prefix"], q_row["queue_name"], q_row["goal_target"]
                     dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
                     with st.container(border=True):
                         st.markdown(f"**[{dept_lbl}]** `{q_name}`")
                         st.caption(f"Base Hourly Vector: {q_goal} per hour")
-                        
                         if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{hash(q_name)}", use_container_width=True):
                             local_cursor.execute("DELETE FROM dynamic_queues WHERE dept_prefix=? AND queue_name=?", (q_prefix, q_name))
                             conn.commit()
                             st.rerun()
 
-# --- 8. REAL-TIME HISTORICAL GRAPHICAL ANALYTICS ---
+# --- 9. REAL-TIME HISTORICAL GRAPHICAL ANALYTICS ---
 with tab_analytics:
-    st.header("📊 Cumulative Corporate Analytics Ledger (Permanent History)")
+    st.header("📊 Cumulative Corporate Analytics Ledger")
     local_cursor = conn.cursor()
-    
-    st.subheader("🔍 Historical Data Range Filters")
     date_cols = st.columns(2)
     start_filt = date_cols[0].date_input("Start History Date", value=datetime.now() - timedelta(days=30))
     end_filt = date_cols[1].date_input("End History Date", value=datetime.now())
     
-    local_cursor.execute("""
-        SELECT log_date, department, tech_name, input_number, escalated 
-        FROM metrics_history 
-        WHERE log_date >= ? AND log_date <= ?
-    """, (start_filt.strftime("%Y-%m-%d"), end_filt.strftime("%Y-%m-%d")))
-    
+    local_cursor.execute("SELECT log_date, department, tech_name, input_number, escalated FROM metrics_history WHERE log_date >= ? AND log_date <= ?", (start_filt.strftime("%Y-%m-%d"), end_filt.strftime("%Y-%m-%d")))
     historical_records = local_cursor.fetchall()
     
     totals = {"Blocks": 0, "Units": 0, "Alerts": 0}
@@ -544,9 +523,7 @@ with tab_analytics:
     for row in historical_records:
         totals["Blocks"] += 1
         totals["Units"] += int(row["input_number"])
-        if int(row["escalated"]) > 0: 
-            totals["Alerts"] += 1
-        
+        if int(row["escalated"]) > 0: totals["Alerts"] += 1
         dept_chart_series[row["department"]] = dept_chart_series.get(row["department"], 0) + int(row["input_number"])
         tech_chart_series[row["tech_name"]] = tech_chart_series.get(row["tech_name"], 0) + int(row["input_number"])
 
@@ -559,21 +536,12 @@ with tab_analytics:
     if tech_chart_series:
         st.markdown("### Historical Production Metrics per Technician")
         st.bar_chart(tech_chart_series)
-    st.markdown("### Historical Production Load Volume by Department")
-    st.line_chart(dept_chart_series)
 
-# --- 9. BUSINESS-WIDE VERIFICATION CHECKLIST ---
+# --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST ---
 st.markdown("<br>", unsafe_allow_html=True)
 with st.container(border=True):
     st.header("📋 Global Facility Daily Queue Verification Log")
     local_cursor = conn.cursor()
-    
-    try:
-        local_cursor.execute("SELECT reminder_sent, supervisor_escaped FROM daily_checklist LIMIT 1")
-    except sqlite3.OperationalError:
-        try:
-            local_cursor.execute("ALTER TABLE daily_checklist ADD COLUMN reminder_sent INTEGER DEFAULT 0")
-        except: pass
     
     local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
     chk = local_cursor.fetchone()
@@ -598,17 +566,12 @@ with st.container(border=True):
         opt = ["Pending", "Yes", "No"]
         
         def parse_stored_date(val):
-            if not val or str(val).strip() == "":
-                return datetime.now().date()
-            if isinstance(val, type(datetime.now().date())):
-                return val
+            if not val or str(val).strip() == "": return datetime.now().date()
+            if isinstance(val, type(datetime.now().date())): return val
             try:
                 val_str = str(val).strip()
-                if "-" in val_str:
-                    return datetime.strptime(val_str, "%Y-%m-%d").date()
-                return datetime.strptime(val_str, "%m/%d/%Y").date()
-            except:
-                return datetime.now().date()
+                return datetime.strptime(val_str, "%Y-%m-%d").date() if "-" in val_str else datetime.strptime(val_str, "%m/%d/%Y").date()
+            except: return datetime.now().date()
 
         def render_checklist_row(form_container, label, db_prefix, prefix_key, is_fourteen_day_threshold=False):
             form_container.markdown(f"##### {label}")
@@ -621,18 +584,10 @@ with st.container(border=True):
             stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in row_keys else ""
             stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
 
-            status_key = f"status_{prefix_key}_{CURRENT_DATE}"
-            odt_key = f"odt_{prefix_key}_{CURRENT_DATE}"
-            tdt_key = f"tdt_{prefix_key}_{CURRENT_DATE}"
-            by_key = f"by_{prefix_key}_{CURRENT_DATE}"
-            notes_key = f"notes_{prefix_key}_{CURRENT_DATE}"
+            curr_status = cols[0].selectbox("Status", options=opt, index=opt.index(stored_status) if stored_status in opt else 0, key=f"status_{prefix_key}_{CURRENT_DATE}")
+            curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}_{CURRENT_DATE}")
+            curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}")
             
-            status_idx = opt.index(stored_status) if stored_status in opt else 0
-            curr_status = cols[0].selectbox("Status", options=opt, index=status_idx, key=status_key)
-            curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=odt_key)
-            curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=tdt_key)
-            
-            # --- RESTORED DATE CALCULATION ENGINE ---
             try:
                 date_delta = (curr_tdt - curr_odt).days
                 if date_delta > 0:
@@ -642,22 +597,15 @@ with st.container(border=True):
             except:
                 cols[3].text_input("Days", value="-", disabled=True, key=f"delta_err_{prefix_key}")
                 
-            curr_by = cols[4].text_input("Verified By", value=stored_by, key=by_key)
-            curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=notes_key)
+            curr_by = cols[4].text_input("Verified By", value=stored_by, key=f"by_{prefix_key}_{CURRENT_DATE}")
+            curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=f"notes_{prefix_key}_{CURRENT_DATE}")
             
-            if (curr_status != stored_status or str(curr_odt) != str(stored_odt) or 
-                str(curr_tdt) != str(stored_tdt) or curr_by != stored_by or curr_notes != stored_notes):
-                
+            if (curr_status != stored_status or str(curr_odt) != str(stored_odt) or str(curr_tdt) != str(stored_tdt) or curr_by != stored_by or curr_notes != stored_notes):
                 up_cursor = conn.cursor()
-                up_cursor.execute(f"""
-                    UPDATE daily_checklist 
-                    SET {db_prefix}=?, {db_prefix}_date=?, {db_prefix}_target=?, {db_prefix}_by=?, {db_prefix}_notes=?
-                    WHERE log_date=?
-                """, (curr_status, str(curr_odt), str(curr_tdt), curr_by, curr_notes, CURRENT_DATE))
+                up_cursor.execute(f"UPDATE daily_checklist SET {db_prefix}=?, {db_prefix}_date=?, {db_prefix}_target=?, {db_prefix}_by=?, {db_prefix}_notes=? WHERE log_date=?", (curr_status, str(curr_odt), str(curr_tdt), curr_by, curr_notes, CURRENT_DATE))
                 conn.commit()
                 st.rerun()
 
-        # Render daily operational tracking checks
         render_checklist_row(c_col, "Rejection Queue", "rejection_queue", "rej")
         render_checklist_row(c_col, "Prior Authorization Queue", "pa_queue", "pa")
         render_checklist_row(c_col, "Untransmitted Claims Ledger", "untransmitted_claims", "untrans")
