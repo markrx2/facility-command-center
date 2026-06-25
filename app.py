@@ -121,10 +121,7 @@ def init_shared_db():
         
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_checklist (
-            log_date TEXT PRIMARY KEY, rejection_queue TEXT DEFAULT 'Pending', pa_queue TEXT DEFAULT 'Pending', 
-            untransmitted_claims TEXT DEFAULT 'Pending', future_bill TEXT DEFAULT 'Pending', data_re_entry TEXT DEFAULT 'Pending',
-            ai_tech_check TEXT DEFAULT 'Pending', billing TEXT DEFAULT 'Pending', ordering TEXT DEFAULT 'Pending',
-            dispense TEXT DEFAULT 'Pending', return_fourteen_queue TEXT DEFAULT 'Pending', reminder_time TEXT DEFAULT '16:00', 
+            log_date TEXT PRIMARY KEY, reminder_time TEXT DEFAULT '16:00', 
             reminder_sent INTEGER DEFAULT 0, supervisor_escaped INTEGER DEFAULT 0
         )
     """)
@@ -591,6 +588,7 @@ with st.container(border=True):
             stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in row_keys else ""
             stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
 
+            # Explicitly dynamic keys generated per loop iteration prevents collision completely
             curr_status = cols[0].selectbox("Status", options=opt, index=opt.index(stored_status) if stored_status in opt else 0, key=f"status_{prefix_key}_{CURRENT_DATE}")
             curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}_{CURRENT_DATE}")
             curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}")
