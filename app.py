@@ -324,12 +324,18 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         
-        # Persistent layout eviction button for logged-in managers
+        # Persistent layout eviction button for logged-in managers with State Purging
         if is_mgr_active:
             if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
                 local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
                 conn.commit()
+                
+                # MEMORY PURGE: Locate and delete any lingering state memory for this worker's rows to prevent loopbacks
+                state_keys_to_purge = [k for k in st.session_state.keys() if f"_{prefix}_{w_id}_" in k or k.endswith(f"_{prefix}_{w_id}")]
+                for key in state_keys_to_purge:
+                    del st.session_state[key]
+                    
                 st.rerun()
 
         cols = st.columns(4)
@@ -346,6 +352,13 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                             conn.commit()
+                            
+                            # Clean slot variables out of session state explicitly
+                            for suffix in ["q", "dur", "num", "sub"]:
+                                target_key = f"{suffix}_{prefix}_{w_id}_{slot_num}"
+                                if target_key in st.session_state:
+                                    del st.session_state[target_key]
+                                    
                             st.rerun()
                     
                     if not slot_row:
