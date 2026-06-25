@@ -130,6 +130,8 @@ def init_shared_db():
     """)
     
     schema_extensions = [
+        ("reminder_sent", "INTEGER DEFAULT 0"),
+        ("supervisor_escaped", "INTEGER DEFAULT 0"),
         ("rejection_queue", "TEXT DEFAULT 'Pending'"), ("pa_queue", "TEXT DEFAULT 'Pending'"), ("untransmitted_claims", "TEXT DEFAULT 'Pending'"), ("future_bill", "TEXT DEFAULT 'Pending'"), ("data_re_entry", "TEXT DEFAULT 'Pending'"), ("ai_tech_check", "TEXT DEFAULT 'Pending'"), ("billing", "TEXT DEFAULT 'Pending'"), ("ordering", "TEXT DEFAULT 'Pending'"), ("dispense", "TEXT DEFAULT 'Pending'"), ("return_fourteen_queue", "TEXT DEFAULT 'Pending'"),
         ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"), ("rejection_queue_date", "TEXT DEFAULT ''"), ("rejection_queue_target", "TEXT DEFAULT ''"),
         ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"), ("pa_queue_date", "TEXT DEFAULT ''"), ("pa_queue_target", "TEXT DEFAULT ''"),
@@ -261,7 +263,9 @@ if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type
         st.rerun()
     else:
         st.sidebar.warning("Please input both name and email routing vectors.")
-        # --- 5. TOP-LEVEL BACKLOG MATRIX INPUT INJECTOR ---
+
+
+# --- 5. TOP-LEVEL BACKLOG MATRIX INPUT INJECTOR ---
 def render_global_backlog_ribbon():
     backlog_cursor = conn.cursor()
     backlog_cursor.execute("SELECT * FROM floor_backlogs WHERE log_date=?", (CURRENT_DATE,))
@@ -369,7 +373,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         escalation_time = end_time + timedelta(minutes=10)
                         current_now = datetime.now()
                         
-                        if is_manager:
+                        # --- SECURED INSTANT PASS-THROUGH FOR MANAGER RESET PRIVILEGES ---
+                        is_mgr_active = st.session_state.get("mgr_pwd_input_field") == "admin123"
+                        if is_mgr_active:
                             if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
