@@ -32,7 +32,7 @@ st.markdown("""
     [data-testid="column"]:nth-of-type(3) { max-width: 120px !important; } 
     [data-testid="column"]:nth-of-type(4) { max-width: 75px !important;  } 
     [data-testid="column"]:nth-of-type(5) { max-width: 110px !important; } 
-    [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; } 
+    [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -315,12 +315,23 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
+    is_mgr_active = st.session_state.get("mgr_pwd_input_field") == "admin123"
+
     for worker, tech_profiles in active_roster.items():
         w_id = hashlib.md5(worker.encode('utf-8')).hexdigest()[:8]
         tech_email = tech_profiles["email"]
         tech_webhook = tech_profiles["webhook"]
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
+        
+        # Persistent layout eviction button for logged-in managers
+        if is_mgr_active:
+            if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
+                local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
+                local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
+                conn.commit()
+                st.rerun()
+
         cols = st.columns(4)
         
         for slot_num in range(1, 5):
@@ -329,6 +340,13 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     st.markdown(f"**🕒 Slot {slot_num}**")
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
+                    
+                    # Persistent Admin Reset Overrides visible regardless of conditional timer initialization state
+                    if is_mgr_active and slot_row:
+                        if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
+                            local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                            conn.commit()
+                            st.rerun()
                     
                     if not slot_row:
                         if goals_dict:
@@ -369,13 +387,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         fifteen_min_overdue_time = end_time + timedelta(minutes=15)
                         escalation_time = end_time + timedelta(minutes=10)
                         current_now = datetime.now()
-                        
-                        is_mgr_active = st.session_state.get("mgr_pwd_input_field") == "admin123"
-                        if is_mgr_active:
-                            if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
-                                local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                conn.commit()
-                                st.rerun()
                         
                         if current_now < end_time and not db_sub:
                             rem = end_time - current_now
@@ -579,7 +590,6 @@ with st.container(border=True):
             form_container.markdown(f"##### {label}")
             cols = form_container.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
             
-            # Extracts row keys dynamically using the valid sqlite3.Row schema list conversion methodology
             row_keys = list(chk.keys()) if chk else []
             stored_status = chk[db_prefix] if (db_prefix in row_keys and chk[db_prefix]) else "Pending"
             stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in row_keys else ""
