@@ -234,12 +234,10 @@ profile_options = ["-- Create New Profile --"] + [p["tech_name"] for p in saved_
 if "selected_profile_state" not in st.session_state:
     st.session_state["selected_profile_state"] = "-- Create New Profile --"
 
-# Identify the correct index without forcing a rigid state key
 current_index = 0
 if st.session_state["selected_profile_state"] in profile_options:
     current_index = profile_options.index(st.session_state["selected_profile_state"])
 
-# Key parameter REMOVED to bypass StreamlitAPIException limits
 selected_profile = st.sidebar.selectbox(
     "Select Existing Profile (Optional):", 
     options=profile_options, 
@@ -255,13 +253,11 @@ if selected_profile != "-- Create New Profile --":
         default_email = matched_profile["tech_email"]
         default_webhook = matched_profile["tech_webhook"]
 
-# Using clear_on_submit handles the text inputs safely upon DB insert
 with st.sidebar.form(key="sidebar_personnel_deployment_form", clear_on_submit=True):
     dest_dept = st.selectbox("Assign to Department:", options=[
         ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
     ], format_func=lambda x: x[0])
 
-    # Key parameters REMOVED. Values are handled organically by Streamlit form caching
     new_worker_name = st.text_input("Employee Full Name:", value=default_name, placeholder="John Doe").strip()
     new_worker_email = st.text_input("Employee Workspace Email:", value=default_email, placeholder="johndoe@company.com").strip()
     new_worker_webhook = st.text_input("Employee Personal Google Chat Webhook:", value=default_webhook, placeholder="https://chat.googleapis.com/v1/spaces/...").strip()
@@ -277,7 +273,6 @@ if submit_deployment:
         """, (dest_dept[1], new_worker_name, new_worker_email, new_worker_webhook))
         conn.commit()
         
-        # Cleanly signal the UI to return to default without illegally wiping keys
         st.session_state["selected_profile_state"] = "-- Create New Profile --"
         st.rerun()
     else:
@@ -352,10 +347,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                 local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
                 conn.commit()
                 
-                state_keys_to_purge = [k for k in st.session_state.keys() if f"_{prefix}_{w_id}_" in k or k.endswith(f"_{prefix}_{w_id}")]
-                for key in state_keys_to_purge:
-                    del st.session_state[key]
-                    
                 st.session_state["selected_profile_state"] = "-- Create New Profile --"
                 st.rerun()
 
@@ -372,12 +363,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                             conn.commit()
-                            
-                            for suffix in ["q", "dur", "num", "sub"]:
-                                target_key = f"{suffix}_{prefix}_{w_id}_{slot_num}"
-                                if target_key in st.session_state:
-                                    del st.session_state[target_key]
-                                    
                             st.rerun()
                     
                     if not slot_row:
