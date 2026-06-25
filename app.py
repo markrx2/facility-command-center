@@ -59,7 +59,8 @@ st.components.v1.html(
 
 # --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
-    conn = sqlite3.connect("shared_facility_matrix_V2.db", check_same_thread=False)
+    # Using v3 guarantees a brand-new file system slot to bypass any hidden server cache blocks
+    conn = sqlite3.connect("facility_matrix_v3.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
@@ -119,35 +120,36 @@ def init_shared_db():
         except sqlite3.OperationalError:
             cursor.execute(f"ALTER TABLE {dept} ADD COLUMN duration_minutes INTEGER DEFAULT 120")
         
+    # Full Explicit Checklist Schema mapping ensures zero operational column mismatches
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_checklist (
-            log_date TEXT PRIMARY KEY, reminder_time TEXT DEFAULT '16:00', 
-            reminder_sent INTEGER DEFAULT 0, supervisor_escaped INTEGER DEFAULT 0
+            log_date TEXT PRIMARY KEY, 
+            reminder_time TEXT DEFAULT '16:00', 
+            reminder_sent INTEGER DEFAULT 0, 
+            supervisor_escaped INTEGER DEFAULT 0,
+            rejection_queue TEXT DEFAULT 'Pending', 
+            pa_queue TEXT DEFAULT 'Pending', 
+            untransmitted_claims TEXT DEFAULT 'Pending', 
+            future_bill TEXT DEFAULT 'Pending', 
+            data_re_entry TEXT DEFAULT 'Pending',
+            ai_tech_check TEXT DEFAULT 'Pending', 
+            billing TEXT DEFAULT 'Pending', 
+            ordering TEXT DEFAULT 'Pending',
+            dispense TEXT DEFAULT 'Pending', 
+            return_fourteen_queue TEXT DEFAULT 'Pending',
+            rejection_queue_by TEXT DEFAULT '', rejection_queue_notes TEXT DEFAULT '', rejection_queue_date TEXT DEFAULT '', rejection_queue_target TEXT DEFAULT '',
+            pa_queue_by TEXT DEFAULT '', pa_queue_notes TEXT DEFAULT '', pa_queue_date TEXT DEFAULT '', pa_queue_target TEXT DEFAULT '',
+            untransmitted_claims_by TEXT DEFAULT '', untransmitted_claims_notes TEXT DEFAULT '', untransmitted_claims_date TEXT DEFAULT '', untransmitted_claims_target TEXT DEFAULT '',
+            future_bill_by TEXT DEFAULT '', future_bill_notes TEXT DEFAULT '', future_bill_date TEXT DEFAULT '', future_bill_target TEXT DEFAULT '',
+            data_re_entry_by TEXT DEFAULT '', data_re_entry_notes TEXT DEFAULT '', data_re_entry_date TEXT DEFAULT '', data_re_entry_target TEXT DEFAULT '',
+            ai_tech_check_by TEXT DEFAULT '', ai_tech_check_notes TEXT DEFAULT '', ai_tech_check_date TEXT DEFAULT '', ai_tech_check_target TEXT DEFAULT '',
+            billing_by TEXT DEFAULT '', billing_notes TEXT DEFAULT '', billing_date TEXT DEFAULT '', billing_target TEXT DEFAULT '',
+            ordering_by TEXT DEFAULT '', ordering_notes TEXT DEFAULT '', ordering_date TEXT DEFAULT '', ordering_target TEXT DEFAULT '',
+            dispense_by TEXT DEFAULT '', dispense_notes TEXT DEFAULT '', dispense_date TEXT DEFAULT '', dispense_target TEXT DEFAULT '',
+            return_fourteen_queue_by TEXT DEFAULT '', return_fourteen_queue_notes TEXT DEFAULT '', return_fourteen_queue_date TEXT DEFAULT '', return_fourteen_queue_target TEXT DEFAULT ''
         )
     """)
     
-    schema_extensions = [
-        ("reminder_sent", "INTEGER DEFAULT 0"),
-        ("supervisor_escaped", "INTEGER DEFAULT 0"),
-        ("rejection_queue", "TEXT DEFAULT 'Pending'"), ("pa_queue", "TEXT DEFAULT 'Pending'"), ("untransmitted_claims", "TEXT DEFAULT 'Pending'"), ("future_bill", "TEXT DEFAULT 'Pending'"), ("data_re_entry", "TEXT DEFAULT 'Pending'"), ("ai_tech_check", "TEXT DEFAULT 'Pending'"), ("billing", "TEXT DEFAULT 'Pending'"), ("ordering", "TEXT DEFAULT 'Pending'"), ("dispense", "TEXT DEFAULT 'Pending'"), ("return_fourteen_queue", "TEXT DEFAULT 'Pending'"),
-        ("rejection_queue_by", "TEXT DEFAULT ''"), ("rejection_queue_notes", "TEXT DEFAULT ''"), ("rejection_queue_date", "TEXT DEFAULT ''"), ("rejection_queue_target", "TEXT DEFAULT ''"),
-        ("pa_queue_by", "TEXT DEFAULT ''"), ("pa_queue_notes", "TEXT DEFAULT ''"), ("pa_queue_date", "TEXT DEFAULT ''"), ("pa_queue_target", "TEXT DEFAULT ''"),
-        ("untransmitted_claims_by", "TEXT DEFAULT ''"), ("untransmitted_claims_notes", "TEXT DEFAULT ''"), ("untransmitted_claims_date", "TEXT DEFAULT ''"), ("untransmitted_claims_target", "TEXT DEFAULT ''"),
-        ("future_bill_by", "TEXT DEFAULT ''"), ("future_bill_notes", "TEXT DEFAULT ''"), ("future_bill_date", "TEXT DEFAULT ''"), ("future_bill_target", "TEXT DEFAULT ''"),
-        ("data_re_entry_by", "TEXT DEFAULT ''"), ("data_re_entry_notes", "TEXT DEFAULT ''"), ("data_re_entry_date", "TEXT DEFAULT ''"), ("data_re_entry_target", "TEXT DEFAULT ''"),
-        ("ai_tech_check_by", "TEXT DEFAULT ''"), ("ai_tech_check_notes", "TEXT DEFAULT ''"), ("ai_tech_check_date", "TEXT DEFAULT ''"), ("ai_tech_check_target", "TEXT DEFAULT ''"),
-        ("billing_by", "TEXT DEFAULT ''"), ("billing_notes", "TEXT DEFAULT ''"), ("billing_date", "TEXT DEFAULT ''"), ("billing_target", "TEXT DEFAULT ''"),
-        ("ordering_by", "TEXT DEFAULT ''"), ("ordering_notes", "TEXT DEFAULT ''"), ("ordering_date", "TEXT DEFAULT ''"), ("ordering_target", "TEXT DEFAULT ''"),
-        ("dispense_by", "TEXT DEFAULT ''"), ("dispense_notes", "TEXT DEFAULT ''"), ("dispense_date", "TEXT DEFAULT ''"), ("dispense_target", "TEXT DEFAULT ''"),
-        ("return_fourteen_queue_by", "TEXT DEFAULT ''"), ("return_fourteen_queue_notes", "TEXT DEFAULT ''"), ("return_fourteen_queue_date", "TEXT DEFAULT ''"), ("return_fourteen_queue_target", "TEXT DEFAULT ''")
-    ]
-    
-    for col_name, col_type in schema_extensions:
-        try:
-            cursor.execute(f"SELECT {col_name} FROM daily_checklist LIMIT 1")
-        except sqlite3.OperationalError:
-            cursor.execute(f"ALTER TABLE daily_checklist ADD COLUMN {col_name} {col_type}")
-        
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
         defaults = [
@@ -434,7 +436,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.rerun()
 
 # --- 7. CORE APP ROUTING INTERFACE ---
-# Renders backlog exactly once right between tabs and personnel rows
 render_global_backlog_ribbon()
 
 tab_de, tab_cc, tab_sh, tab_fi, tab_analytics, tab_mgmt = st.tabs([
@@ -588,7 +589,6 @@ with st.container(border=True):
             stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in row_keys else ""
             stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
 
-            # Explicitly dynamic keys generated per loop iteration prevents collision completely
             curr_status = cols[0].selectbox("Status", options=opt, index=opt.index(stored_status) if stored_status in opt else 0, key=f"status_{prefix_key}_{CURRENT_DATE}")
             curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}_{CURRENT_DATE}")
             curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}")
