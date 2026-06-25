@@ -231,19 +231,19 @@ saved_profiles = sidebar_db_cursor.fetchall()
 
 profile_options = ["-- Create New Profile --"] + [p["tech_name"] for p in saved_profiles]
 
-# Safe dropdown state lookup pattern
 if "selected_profile_state" not in st.session_state:
     st.session_state["selected_profile_state"] = "-- Create New Profile --"
 
-# Ensure dropdown defaults to what is tracked inside clean app state
-if st.session_state["selected_profile_state"] not in profile_options:
-    st.session_state["selected_profile_state"] = "-- Create New Profile --"
+# Identify the correct index without forcing a rigid state key
+current_index = 0
+if st.session_state["selected_profile_state"] in profile_options:
+    current_index = profile_options.index(st.session_state["selected_profile_state"])
 
+# Key parameter REMOVED to bypass StreamlitAPIException limits
 selected_profile = st.sidebar.selectbox(
     "Select Existing Profile (Optional):", 
     options=profile_options, 
-    index=profile_options.index(st.session_state["selected_profile_state"]),
-    key="profile_selector_widget"
+    index=current_index
 )
 st.session_state["selected_profile_state"] = selected_profile
 
@@ -255,15 +255,16 @@ if selected_profile != "-- Create New Profile --":
         default_email = matched_profile["tech_email"]
         default_webhook = matched_profile["tech_webhook"]
 
-# Form layout with explicit key control hooks to drop cached data on write loops
-with st.sidebar.form(key="sidebar_personnel_deployment_form"):
+# Using clear_on_submit handles the text inputs safely upon DB insert
+with st.sidebar.form(key="sidebar_personnel_deployment_form", clear_on_submit=True):
     dest_dept = st.selectbox("Assign to Department:", options=[
         ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
     ], format_func=lambda x: x[0])
 
-    new_worker_name = st.text_input("Employee Full Name:", value=default_name, placeholder="John Doe", key="form_input_name").strip()
-    new_worker_email = st.text_input("Employee Workspace Email:", value=default_email, placeholder="johndoe@company.com", key="form_input_email").strip()
-    new_worker_webhook = st.text_input("Employee Personal Google Chat Webhook:", value=default_webhook, placeholder="https://chat.googleapis.com/v1/spaces/...", key="form_input_webhook").strip()
+    # Key parameters REMOVED. Values are handled organically by Streamlit form caching
+    new_worker_name = st.text_input("Employee Full Name:", value=default_name, placeholder="John Doe").strip()
+    new_worker_email = st.text_input("Employee Workspace Email:", value=default_email, placeholder="johndoe@company.com").strip()
+    new_worker_webhook = st.text_input("Employee Personal Google Chat Webhook:", value=default_webhook, placeholder="https://chat.googleapis.com/v1/spaces/...").strip()
     
     submit_deployment = st.form_submit_button("Deploy to Department Grid", type="primary", use_container_width=True)
 
@@ -276,16 +277,8 @@ if submit_deployment:
         """, (dest_dept[1], new_worker_name, new_worker_email, new_worker_webhook))
         conn.commit()
         
-        # SQUASH STICKY STATE: Wipe widget tracking cache completely before executing the page reload loop
+        # Cleanly signal the UI to return to default without illegally wiping keys
         st.session_state["selected_profile_state"] = "-- Create New Profile --"
-        if "profile_selector_widget" in st.session_state:
-            st.session_state["profile_selector_widget"] = "-- Create New Profile --"
-            
-        # Flush the form values out of memory manually
-        for k in ["form_input_name", "form_input_email", "form_input_webhook"]:
-            if k in st.session_state:
-                st.session_state[k] = ""
-                
         st.rerun()
     else:
         st.sidebar.warning("Please input both name and email routing vectors.")
