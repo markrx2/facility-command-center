@@ -36,6 +36,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# Initialize Session Version Token to invalidate sticky browser inputs
+if "state_session_version" not in st.session_state:
+    st.session_state["state_session_version"] = 0
+
 # --- TRUE BROWSER HEARTBEAT ENGINE ---
 st.components.v1.html(
     """
@@ -225,16 +229,16 @@ elif pwd_input != "":
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Quick Add Personnel to Floor")
 
-dest_dept = st.sidebar.selectbox("Assign to Department:", options=[
-    ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
-], format_func=lambda x: x[0], key="global_target_dept_sel")
-
 sidebar_db_cursor = conn.cursor()
 sidebar_db_cursor.execute("SELECT tech_name, tech_email, tech_webhook FROM global_roster ORDER BY tech_name ASC")
 saved_profiles = sidebar_db_cursor.fetchall()
 
 profile_options = ["-- Create New Profile --"] + [p["tech_name"] for p in saved_profiles]
-selected_profile = st.sidebar.selectbox("Select Existing Profile (Optional):", options=profile_options, key="profile_selector_widget")
+
+# Session version variable token bound to the key structures below
+v_tok = st.session_state["state_session_version"]
+
+selected_profile = st.sidebar.selectbox("Select Existing Profile (Optional):", options=profile_options, key=f"profile_selector_widget_v{v_tok}")
 
 default_name, default_email, default_webhook = "", "", ""
 if selected_profile != "-- Create New Profile --":
@@ -244,11 +248,19 @@ if selected_profile != "-- Create New Profile --":
         default_email = matched_profile["tech_email"]
         default_webhook = matched_profile["tech_webhook"]
 
-new_worker_name = st.sidebar.text_input("Employee Full Name:", value=default_name, placeholder="John Doe", key="global_name_field").strip()
-new_worker_email = st.sidebar.text_input("Employee Workspace Email:", value=default_email, placeholder="johndoe@company.com", key="global_email_field").strip()
-new_worker_webhook = st.sidebar.text_input("Employee Personal Google Chat Webhook:", value=default_webhook, placeholder="https://chat.googleapis.com/v1/spaces/...", key="global_webhook_field").strip()
+# ENCAPSULATION CRITICAL SAFETY: Isolates field bindings away from runtime heartbeats
+with st.sidebar.form(key=f"sidebar_personnel_deployment_form_v{v_tok}", clear_on_submit=True):
+    dest_dept = st.selectbox("Assign to Department:", options=[
+        ("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")
+    ], format_func=lambda x: x[0])
 
-if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type="primary"):
+    new_worker_name = st.text_input("Employee Full Name:", value=default_name, placeholder="John Doe").strip()
+    new_worker_email = st.text_input("Employee Workspace Email:", value=default_email, placeholder="johndoe@company.com").strip()
+    new_worker_webhook = st.text_input("Employee Personal Google Chat Webhook:", value=default_webhook, placeholder="https://chat.googleapis.com/v1/spaces/...").strip()
+    
+    submit_deployment = st.form_submit_button("Deploy to Department Grid", type="primary", use_container_width=True)
+
+if submit_deployment:
     if new_worker_name and new_worker_email:
         sidebar_cursor = conn.cursor()
         sidebar_cursor.execute("""
@@ -257,13 +269,7 @@ if st.sidebar.button("Deploy to Department Grid", use_container_width=True, type
         """, (dest_dept[1], new_worker_name, new_worker_email, new_worker_webhook))
         conn.commit()
         
-        # Reset sidebar layout elements completely upon deployment to prevent submission loops
-        st.session_state["global_name_field"] = ""
-        st.session_state["global_email_field"] = ""
-        st.session_state["global_webhook_field"] = ""
-        st.session_state["profile_selector_widget"] = "-- Create New Profile --"
-        
-        st.sidebar.success(f"Deployed {new_worker_name} to {dest_dept[0]} Layout!")
+        st.session_state["state_session_version"] += 1
         st.rerun()
     else:
         st.sidebar.warning("Please input both name and email routing vectors.")
@@ -331,20 +337,17 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         
-        # Wipe Profile & Timers button with layout input state clearing
+        # Core structural eviction button
         if is_mgr_active:
             if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
                 local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
                 conn.commit()
                 
-                # Force reset sidebar input fields to completely dead strings so it stops loop-injecting
-                st.session_state["global_name_field"] = ""
-                st.session_state["global_email_field"] = ""
-                st.session_state["global_webhook_field"] = ""
-                st.session_state["profile_selector_widget"] = "-- Create New Profile --"
+                # Invalidate sidebar selection and input layout frames entirely
+                st.session_state["state_session_version"] += 1
                 
-                # Delete worker's individual widget keys out of active browser cache memory
+                # Drop cached widget instances
                 state_keys_to_purge = [k for k in st.session_state.keys() if f"_{prefix}_{w_id}_" in k or k.endswith(f"_{prefix}_{w_id}")]
                 for key in state_keys_to_purge:
                     del st.session_state[key]
@@ -519,6 +522,7 @@ with tab_mgmt:
                     if s_col2.button("Remove Profile", key=f"del_staff_{s_prefix}_{hash(s_name)}", type="secondary", use_container_width=True):
                         local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (s_prefix, s_name))
                         conn.commit()
+                        st.session_state["state_session_version"] += 1
                         st.success(f"Decommissioned {s_name} from system.")
                         st.rerun()
                     st.markdown("<hr style='margin:2px 0px !important;'>", unsafe_allow_html=True)
