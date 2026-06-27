@@ -355,6 +355,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
+    # FORCE CHECK: Read the widget's session state keys directly to prevent scoping drops
     is_mgr_active = st.session_state.get("mgr_pwd_input_field") == "admin123"
 
     for worker, tech_profiles in active_roster.items():
@@ -382,8 +383,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
                     
-                    # --- GLOBAL MASTER RESET DECK (DEPENDENCY FREE) ---
-                    if is_mgr_active and slot_row:
+                    # --- GLOBAL MASTER RESET DECK (TOTAL DEPENDENCY FREE) ---
+                    # Explicitly checking if a row simply exists in the database table
+                    if is_mgr_active and slot_row is not None:
                         if st.button("🔴 Admin Master Reset", key=f"global_master_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                             conn.commit()
@@ -503,7 +505,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
-
 # --- 7. CORE APP ROUTING INTERFACE ---
 render_global_backlog_ribbon()
 
