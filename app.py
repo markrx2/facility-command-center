@@ -159,6 +159,24 @@ def init_shared_db():
         cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_notes TEXT DEFAULT ''")
         cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_date TEXT DEFAULT ''")
         cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_target TEXT DEFAULT ''")
+
+    try:
+        cursor.execute("SELECT central_fill_queue FROM daily_checklist LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN central_fill_queue TEXT DEFAULT 'Pending'")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN central_fill_queue_by TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN central_fill_queue_notes TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN central_fill_queue_date TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN central_fill_queue_target TEXT DEFAULT ''")
+
+    try:
+        cursor.execute("SELECT on_hold_queue FROM daily_checklist LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue TEXT DEFAULT 'Pending'")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_by TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_notes TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_date TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_target TEXT DEFAULT ''")
     
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
@@ -365,6 +383,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
                     
+                    # --- ADMIN ONLY RESET BUTTON FOR RUNNING TIMERS ---
                     if is_mgr_active and slot_row:
                         if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
@@ -703,19 +722,32 @@ with st.container(border=True):
             curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}")
             
             try:
-                if db_prefix == "erx_queue":
+                if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"]:
                     date_delta = (datetime.now().date() - curr_odt).days
                 else:
                     date_delta = (curr_tdt - curr_odt).days
                 
                 header_html = "<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div>"
                 
+                is_red = False
                 if date_delta > 0:
+                    if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims"]:
+                        is_red = True
+                    elif db_prefix in ["ai_tech_check", "rejection_queue"] and date_delta > 4:
+                        is_red = True
+                    elif db_prefix == "return_fourteen_queue" and date_delta >= 14:
+                        is_red = True
+                    elif db_prefix not in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims", "ai_tech_check", "rejection_queue", "return_fourteen_queue"] and date_delta >= 7:
+                        is_red = True
+
+                if is_red:
                     badge_html = f"<div style='text-align:center;'><span style='background-color:#f8d7da; color:#842029; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>🚨 {date_delta} Days</span></div>"
-                    cols[3].markdown(f"{header_html}{badge_html}", unsafe_allow_html=True)
+                elif date_delta > 0:
+                    badge_html = f"<div style='text-align:center;'><span style='background-color:#fff3cd; color:#664d03; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>⚠️ {date_delta} Days</span></div>"
                 else:
                     badge_html = f"<div style='text-align:center;'><span style='background-color:#d1e7dd; color:#0f5132; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>✅ Current</span></div>"
-                    cols[3].markdown(f"{header_html}{badge_html}", unsafe_allow_html=True)
+                
+                cols[3].markdown(f"{header_html}{badge_html}", unsafe_allow_html=True)
             except:
                 cols[3].text_input("Aging", value="-", disabled=True, key=f"delta_err_{prefix_key}")
                 
@@ -729,14 +761,16 @@ with st.container(border=True):
                 st.query_params.update({"sync_tick": str(time.time())})
                 st.rerun()
 
-        # ALPHABETIZED CHECKLIST MATRIX
+        # ALPHABETIZED CHECKLIST MATRIX WITH UNIQUE ROUTING AGING CONDITIONS
         render_checklist_row(c_col, "14 Day Return Queue Checked", "return_fourteen_queue", "ret_14", is_fourteen_day_threshold=True)
         render_checklist_row(c_col, "AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
         render_checklist_row(c_col, "Billing Queue Checked", "billing", "bill")
+        render_checklist_row(c_col, "Central Fill Queue Checked", "central_fill_queue", "c_fill")
         render_checklist_row(c_col, "Data Re-Entry Checked", "data_re_entry", "re_ent")
         render_checklist_row(c_col, "Dispense Queue Checked", "dispense", "disp")
         render_checklist_row(c_col, "ERx Queue Checked-Any Rx from previous day?", "erx_queue", "erx_chk")
         render_checklist_row(c_col, "Future Bill Queue Checked", "future_bill", "fut")
+        render_checklist_row(c_col, "On Hold Queue Checked", "on_hold_queue", "on_hld")
         render_checklist_row(c_col, "Ordering Queue Checked", "ordering", "ord")
         render_checklist_row(c_col, "Prior Authorization Queue", "pa_queue", "pa")
         render_checklist_row(c_col, "Rejection Queue Checked", "rejection_queue", "rej")
