@@ -355,7 +355,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
-    # FORCE CHECK: Read the widget's session state keys directly to prevent scoping drops
+    # Direct extraction of validation token status
     is_mgr_active = st.session_state.get("mgr_pwd_input_field") == "admin123"
 
     for worker, tech_profiles in active_roster.items():
@@ -365,6 +365,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         
+        # BUTTON 1: WIPE PROFILE AND TIMERS (ROW LEVEL)
         if is_mgr_active:
             if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
@@ -383,11 +384,21 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
                     
-                    # --- GLOBAL MASTER RESET DECK (TOTAL DEPENDENCY FREE) ---
-                    # Explicitly checking if a row simply exists in the database table
+                    # --- ADMIN CONTROLS INSIDE CONTAINER CARD ---
                     if is_mgr_active and slot_row is not None:
-                        if st.button("🔴 Admin Master Reset", key=f"global_master_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
+                        admin_btn_col1, admin_btn_col2 = st.columns(2)
+                        
+                        # BUTTON 2: RESET SLOT (Wipes slot completely to start over)
+                        if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                            conn.commit()
+                            st.query_params.update({"sync_tick": str(time.time())})
+                            st.rerun()
+                            
+                        # BUTTON 3: FORCE CLOCK RESET (Alters/Restarts countdown time constraint markers)
+                        if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
+                            now_reset_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            local_cursor.execute(f"UPDATE {db_table} SET start_time=?, tech_notified=0, supervisor_notified=0, submitted=0 WHERE log_date=? AND tech_name=? AND slot_id=?", (now_reset_str, CURRENT_DATE, worker, slot_num))
                             conn.commit()
                             st.query_params.update({"sync_tick": str(time.time())})
                             st.rerun()
@@ -505,6 +516,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
+
 # --- 7. CORE APP ROUTING INTERFACE ---
 render_global_backlog_ribbon()
 
