@@ -39,7 +39,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- TRUE BROWSER HEARTBEAT ENGINE ---
-# Set to run a rapid 5-second matrix state evaluation check across all active nodes
+# Runs a rapid 5-second matrix state evaluation check across all active nodes to keep browsers sync'd
 st.components.v1.html(
     """
     <script>
@@ -475,16 +475,18 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 
-                                # CHANGE: Explicitly update query string targets to instantly force-refresh UI states globally
                                 st.query_params.update({"sync_tick": str(time.time())})
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
-                            if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{w_id}_{slot_num}", use_container_width=True):
-                                local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                conn.commit()
-                                st.query_params.update({"sync_tick": str(time.time())})
-                                st.rerun()
+                            
+                            # SECURED GUARD: Reset Slot has been moved inside the manager-privilege bubble
+                            if is_mgr_active:
+                                if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{w_id}_{slot_num}", use_container_width=True):
+                                    local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                                    conn.commit()
+                                    st.query_params.update({"sync_tick": str(time.time())})
+                                    st.rerun()
 
 # --- 7. CORE APP ROUTING INTERFACE ---
 render_global_backlog_ribbon()
