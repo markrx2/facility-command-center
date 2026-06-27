@@ -391,7 +391,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             if numeric_match:
                                 base_num = int(numeric_match.group())
                                 text_suffix = base_goal_str.replace(str(base_num), "").strip()
-                                scaled_num = int(base_num * (chosen_dur_min / 60.0))
+                                scaled_num = int(base_num * (float(chosen_dur_min) / 60.0))
                                 calculated_goal_str = f"{scaled_num} {text_suffix}".strip()
                             else:
                                 calculated_goal_str = base_goal_str
@@ -400,7 +400,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                # Save the raw hourly base target directly to 'goal' instead of pre-computed values
                                 local_cursor.execute(f"INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, worker, slot_num, chosen_q, base_goal_str, now_str, chosen_dur_min))
                                 conn.commit()
                                 st.rerun()
@@ -415,7 +414,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         if numeric_match:
                             b_num = int(numeric_match.group())
                             sfx = db_goal.replace(str(b_num), "").strip()
-                            display_target = f"{int(b_num * (db_dur_min / 60.0))} {sfx}".strip()
+                            display_target = f"{int(b_num * (float(db_dur_min) / 60.0))} {sfx}".strip()
                         else:
                             display_target = db_goal
 
@@ -430,10 +429,12 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         
                         if current_now < end_time and not db_sub:
                             rem = end_time - current_now
-                            h, r = divmod(rem.seconds, 3600)
+                            # Fixed with total_seconds() tracking logic
+                            total_rem_seconds = int(rem.total_seconds())
+                            h, r = divmod(total_rem_seconds, 3600)
                             m, s = divmod(r, 60)
                             st.metric(label="⏳ Time Remaining", value=f"{int(h):02d}:{int(m):02d}:{int(s):02d}")
-                            st.progress(1.0 - (rem.total_seconds() / (db_dur_min * 60.0)))
+                            st.progress(1.0 - (float(total_rem_seconds) / (float(db_dur_min) * 60.0)))
                         elif not db_sub:
                             st.error("🛑 Timer Expired!")
                             if db_t_not == 0:
@@ -451,7 +452,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
 
                             if current_now < escalation_time:
                                 grace = escalation_time - current_now
-                                gm, gs = divmod(grace.seconds, 60)
+                                gm, gs = divmod(int(grace.total_seconds()), 60)
                                 st.warning(f"⚠️ Escalation in: {int(gm):02d}:{int(gs):02d}")
                             else:
                                 if db_s_not == 0:
@@ -466,21 +467,23 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             if st.button("Submit Metrics", key=f"sub_{prefix}_{w_id}_{slot_num}", type="primary", use_container_width=True) and val is not None:
                                 time_logged_now = datetime.now()
                                 elapsed_delta = time_logged_now - start_time
+                                
+                                # CRITICAL FIX: Use total_seconds() instead of .seconds to ensure day boundaries do not break calculations
                                 actual_minutes_used = max(1, int(elapsed_delta.total_seconds() / 60.0))
                                 
-                                # Pure dynamic pro-rata calculation based on elapsed fractional hours
                                 base_hourly_rate = 0
                                 match_digits = re.search(r'\d+', str(db_goal))
                                 if match_digits: 
                                     base_hourly_rate = int(match_digits.group())
                                 
-                                dynamic_target_threshold = max(1, int(base_hourly_rate * (actual_minutes_used / 60.0)))
+                                # Enforce float math precision calculations
+                                dynamic_target_threshold = max(1, int(float(base_hourly_rate) * (float(actual_minutes_used) / 60.0)))
                                 is_escalated = 1 if val < dynamic_target_threshold else 0
                                 
                                 if is_escalated:
                                     dispatch_real_time_alert(f"📉 **PRODUCTION ALERT: GOAL NOT MET** 📉\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nCalculated Target for {actual_minutes_used} min: {dynamic_target_threshold} | Logged: **{val}**")
                                 
-                                # Push raw hourly targets down to metrics history archive ledger
+                                # Push variables safely to metrics history archive ledger
                                 local_cursor.execute("INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), actual_minutes_used))
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
@@ -608,8 +611,8 @@ with tab_analytics:
                 base_hourly_target = int(match.group())
                 actual_min = max(1, int(row["duration_minutes"]))
                 
-                # Target items = Base hourly goal * (Actual Minutes / 60)
-                pro_rated_calculated_goal = max(1, int(base_hourly_target * (actual_min / 60.0)))
+                # Target items = Base hourly goal * (Actual Minutes / 60) -> Handled using explicit float math rules
+                pro_rated_calculated_goal = max(1, int(float(base_hourly_target) * (float(actual_min) / 60.0)))
                 
                 status_label = "✅ Met Goal" if int(row["input_number"]) >= pro_rated_calculated_goal else "❌ Missed Goal"
                 return pd.Series([pro_rated_calculated_goal, status_label])
