@@ -176,7 +176,6 @@ def init_shared_db():
         cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_by TEXT DEFAULT ''")
         cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_notes TEXT DEFAULT ''")
         cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_date TEXT DEFAULT ''")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_target TEXT DEFAULT ''")
     
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
@@ -383,9 +382,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
                     
-                    # --- ADMIN ONLY RESET BUTTON FOR RUNNING TIMERS ---
+                    # --- GLOBAL MASTER RESET DECK (DEPENDENCY FREE) ---
                     if is_mgr_active and slot_row:
-                        if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
+                        if st.button("🔴 Admin Master Reset", key=f"global_master_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                             conn.commit()
                             st.query_params.update({"sync_tick": str(time.time())})
@@ -504,12 +503,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
-                            if is_mgr_active:
-                                if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{w_id}_{slot_num}", use_container_width=True):
-                                    local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                    conn.commit()
-                                    st.query_params.update({"sync_tick": str(time.time())})
-                                    st.rerun()
 
 # --- 7. CORE APP ROUTING INTERFACE ---
 render_global_backlog_ribbon()
