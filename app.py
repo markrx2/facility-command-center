@@ -385,13 +385,14 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     slot_row = local_cursor.fetchone()
                     
                     # --- UNCONDITIONAL SUPERVISOR CONTROL HEADER BAR ---
-                    if is_mgr_active:
+                                   if is_mgr_active:
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
                         
-                        # BUTTON 2: RESET SLOT (Wipes entry out of daily tracker completely)
+                        # FIXED: BUTTON 2: RESET SLOT (Wipes entry out of daily tracker completely and forces clean layout redraw)
                         if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                             conn.commit()
+                            # Force Streamlit to forget any button state and immediately rebuild the UI layout
                             st.query_params.update({"sync_tick": str(time.time())})
                             st.rerun()
                             
