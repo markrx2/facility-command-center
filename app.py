@@ -7,6 +7,7 @@ import smtplib
 import pandas as pd
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
+import time
 
 # --- 1. PAGE SETUP & COMPONENT STYLING ---
 st.set_page_config(page_title="Facility Command Hub", page_icon="⏱️", layout="wide")
@@ -38,6 +39,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- TRUE BROWSER HEARTBEAT ENGINE ---
+# Set to run a rapid 5-second matrix state evaluation check across all active nodes
 st.components.v1.html(
     """
     <script>
@@ -47,7 +49,7 @@ st.components.v1.html(
             updateTrigger.style.display = 'none';
             streamlitDoc.body.appendChild(updateTrigger);
             window.parent.postMessage({type: 'streamlit:render'}, '*');
-        }, 15000); 
+        }, 5000); 
     </script>
     """,
     height=0,
@@ -153,22 +155,10 @@ def init_shared_db():
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
         defaults = [
-            ("de", "ERx Regular", "50 rxs"),
-            ("de", "ERx Facility", "60 rxs"),
-            ("de", "Autofill Regular", "50 rxs"),
-            ("de", "Autofill Facility", "75 rxs"),
-            ("de", "Ekit Non-Controlled", "50 rxs"),
-            ("de", "Ekit Controlled", "10 rxs"),
-            ("de", "On Hold", "40 rxs"),
-            ("de", "AI/Tech", "30 tags"),
-            ("de", "Reject", "40 rxs"),
-            ("de", "PA", "15 rxs"),
-            ("cc", "Inbound Support Line", "20 calls"), 
-            ("cc", "Outbound Follow-ups", "15 checks"),
-            ("sh", "Standard Ground Sorting", "40 orders"), 
-            ("sh", "Priority/Overnight Air", "20 shipments"),
-            ("fi", "Automated Dispensing", "10 cells"), 
-            ("fi", "Manual Counter Line", "50 fills")
+            ("de", "ERx Regular", "50 rxs"), ("de", "ERx Facility", "60 rxs"), ("de", "Autofill Regular", "50 rxs"), ("de", "Autofill Facility", "75 rxs"),
+            ("de", "Ekit Non-Controlled", "50 rxs"), ("de", "Ekit Controlled", "10 rxs"), ("de", "On Hold", "40 rxs"), ("de", "AI/Tech", "30 tags"),
+            ("de", "Reject", "40 rxs"), ("de", "PA", "15 rxs"), ("cc", "Inbound Support Line", "20 calls"), ("cc", "Outbound Follow-ups", "15 checks"),
+            ("sh", "Standard Ground Sorting", "40 orders"), ("sh", "Priority/Overnight Air", "20 shipments"), ("fi", "Automated Dispensing", "10 cells"), ("fi", "Manual Counter Line", "50 fills")
         ]
         cursor.executemany("INSERT OR IGNORE INTO dynamic_queues VALUES (?, ?, ?)", defaults)
         
@@ -252,11 +242,7 @@ current_index = 0
 if st.session_state["selected_profile_state"] in profile_options:
     current_index = profile_options.index(st.session_state["selected_profile_state"])
 
-selected_profile = st.sidebar.selectbox(
-    "Select Existing Profile (Optional):", 
-    options=profile_options, 
-    index=current_index
-)
+selected_profile = st.sidebar.selectbox("Select Existing Profile (Optional):", options=profile_options, index=current_index)
 st.session_state["selected_profile_state"] = selected_profile
 
 default_name, default_email, default_webhook = "", "", ""
@@ -286,7 +272,6 @@ if submit_deployment:
             VALUES (?, ?, ?, ?)
         """, (dest_dept[1], new_worker_name, new_worker_email, new_worker_webhook))
         conn.commit()
-        
         st.session_state["selected_profile_state"] = "-- Create New Profile --"
         st.rerun()
     else:
@@ -327,6 +312,7 @@ def render_global_backlog_ribbon():
         params = list(updates.values()) + [CURRENT_DATE]
         backlog_cursor.execute(f"UPDATE floor_backlogs SET {set_clause} WHERE log_date=?", params)
         conn.commit()
+        st.query_params.update({"sync_tick": str(time.time())}) # Global app-state synchronization event
         st.rerun()
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
 
@@ -361,6 +347,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                 local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
                 conn.commit()
                 st.session_state["selected_profile_state"] = "-- Create New Profile --"
+                st.query_params.update({"sync_tick": str(time.time())})
                 st.rerun()
 
         cols = st.columns(4)
@@ -376,6 +363,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         if st.button("♻️ Force Reset Clock", key=f"mgr_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                             conn.commit()
+                            st.query_params.update({"sync_tick": str(time.time())})
                             st.rerun()
                     
                     if not slot_row:
@@ -402,6 +390,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 local_cursor.execute(f"INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, worker, slot_num, chosen_q, base_goal_str, now_str, chosen_dur_min))
                                 conn.commit()
+                                st.query_params.update({"sync_tick": str(time.time())})
                                 st.rerun()
                         else:
                             st.warning("Configure queues in Management panel.")
@@ -409,7 +398,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         db_queue, db_goal, db_start, db_input = slot_row["queue"], slot_row["goal"], slot_row["start_time"], slot_row["input_number"]
                         db_t_not, db_s_not, db_sub, db_dur_min = slot_row["tech_notified"], slot_row["supervisor_notified"], slot_row["submitted"], slot_row["duration_minutes"]
                         
-                        # Dynamically derive display target strings for the floor UI
                         numeric_match = re.search(r'\d+', str(db_goal))
                         if numeric_match:
                             b_num = int(numeric_match.group())
@@ -429,7 +417,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         
                         if current_now < end_time and not db_sub:
                             rem = end_time - current_now
-                            # Fixed with total_seconds() tracking logic
                             total_rem_seconds = int(rem.total_seconds())
                             h, r = divmod(total_rem_seconds, 3600)
                             m, s = divmod(r, 60)
@@ -444,11 +431,13 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
                                 local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
+                                st.query_params.update({"sync_tick": str(time.time())})
                                 
                             if current_now >= fifteen_min_overdue_time and db_s_not < 2:
                                 dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
                                 local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=2 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
+                                st.query_params.update({"sync_tick": str(time.time())})
 
                             if current_now < escalation_time:
                                 grace = escalation_time - current_now
@@ -459,6 +448,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
                                     local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                     conn.commit()
+                                    st.query_params.update({"sync_tick": str(time.time())})
                                 if db_s_not == 1: st.error("🚨 Supervisor alert sent to Google Chat.")
                                 elif db_s_not == 2: st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
                         
@@ -468,7 +458,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 time_logged_now = datetime.now()
                                 elapsed_delta = time_logged_now - start_time
                                 
-                                # CRITICAL FIX: Use total_seconds() instead of .seconds to ensure day boundaries do not break calculations
                                 actual_minutes_used = max(1, int(elapsed_delta.total_seconds() / 60.0))
                                 
                                 base_hourly_rate = 0
@@ -476,23 +465,25 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 if match_digits: 
                                     base_hourly_rate = int(match_digits.group())
                                 
-                                # Enforce float math precision calculations
                                 dynamic_target_threshold = max(1, int(float(base_hourly_rate) * (float(actual_minutes_used) / 60.0)))
                                 is_escalated = 1 if val < dynamic_target_threshold else 0
                                 
                                 if is_escalated:
                                     dispatch_real_time_alert(f"📉 **PRODUCTION ALERT: GOAL NOT MET** 📉\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nCalculated Target for {actual_minutes_used} min: {dynamic_target_threshold} | Logged: **{val}**")
                                 
-                                # Push variables safely to metrics history archive ledger
                                 local_cursor.execute("INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), actual_minutes_used))
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
+                                
+                                # CHANGE: Explicitly update query string targets to instantly force-refresh UI states globally
+                                st.query_params.update({"sync_tick": str(time.time())})
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
                             if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
+                                st.query_params.update({"sync_tick": str(time.time())})
                                 st.rerun()
 
 # --- 7. CORE APP ROUTING INTERFACE ---
@@ -529,6 +520,7 @@ with tab_mgmt:
                     local_cursor.execute("INSERT OR REPLACE INTO dynamic_queues VALUES (?, ?, ?)", (target_dept[1], new_q_name, new_q_goal))
                     conn.commit()
                     st.success(f"Added baseline operational tracking line: {new_q_name} at {new_q_goal}/hr")
+                    st.query_params.update({"sync_tick": str(time.time())})
                     st.rerun()
             
             st.markdown("<br><br>", unsafe_allow_html=True)
@@ -549,6 +541,7 @@ with tab_mgmt:
                         conn.commit()
                         st.session_state["selected_profile_state"] = "-- Create New Profile --"
                         st.success(f"Decommissioned {s_name} from system.")
+                        st.query_params.update({"sync_tick": str(time.time())})
                         st.rerun()
                     st.markdown("<hr style='margin:2px 0px !important;'>", unsafe_allow_html=True)
                     
@@ -569,6 +562,7 @@ with tab_mgmt:
                         if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{hash(q_name)}", use_container_width=True):
                             local_cursor.execute("DELETE FROM dynamic_queues WHERE dept_prefix=? AND queue_name=?", (q_prefix, q_name))
                             conn.commit()
+                            st.query_params.update({"sync_tick": str(time.time())})
                             st.rerun()
 
 # --- 9. ADVANCED HISTORICAL & TRENDS ANALYTICS TAB ---
@@ -607,28 +601,21 @@ with tab_analytics:
                 if not match:
                     return pd.Series([0, "✅ Met Goal"])
                 
-                # Dynamic pro-rata scaling calculation
                 base_hourly_target = int(match.group())
                 actual_min = max(1, int(row["duration_minutes"]))
                 
-                # Target items = Base hourly goal * (Actual Minutes / 60) -> Handled using explicit float math rules
                 pro_rated_calculated_goal = max(1, int(float(base_hourly_target) * (float(actual_min) / 60.0)))
                 
                 status_label = "✅ Met Goal" if int(row["input_number"]) >= pro_rated_calculated_goal else "❌ Missed Goal"
                 return pd.Series([pro_rated_calculated_goal, status_label])
 
-            # Process dynamic performance rows cleanly
             df_filtered[["Pro-Rated Goal", "True Performance Status"]] = df_filtered.apply(recalculate_pro_rata_metrics, axis=1)
             df_filtered["Actual Time Used"] = df_filtered["duration_minutes"].apply(lambda x: f"{x} Min")
             
             display_df = df_filtered[[
                 "log_date", "tech_name", "department", "queue", "Actual Time Used", "Pro-Rated Goal", "input_number", "True Performance Status"
             ]].rename(columns={
-                "log_date": "Date",
-                "tech_name": "Technician Name",
-                "department": "Department",
-                "queue": "Assigned Queue",
-                "input_number": "Logged Units"
+                "log_date": "Date", "tech_name": "Technician Name", "department": "Department", "queue": "Assigned Queue", "input_number": "Logged Units"
             })
             
             def highlight_status(val):
@@ -680,6 +667,7 @@ with st.container(border=True):
             if new_target_time.strftime("%H:%M") != chk["reminder_time"]:
                 local_cursor.execute("UPDATE daily_checklist SET reminder_time=?, reminder_sent=0, supervisor_escaped=0 WHERE log_date=?", (new_target_time.strftime("%H:%M"), CURRENT_DATE))
                 conn.commit()
+                st.query_params.update({"sync_tick": str(time.time())})
                 st.rerun()
             
     with c_col:
@@ -724,6 +712,7 @@ with st.container(border=True):
                 up_cursor = conn.cursor()
                 up_cursor.execute(f"UPDATE daily_checklist SET {db_prefix}=?, {db_prefix}_date=?, {db_prefix}_target=?, {db_prefix}_by=?, {db_prefix}_notes=? WHERE log_date=?", (curr_status, str(curr_odt), str(curr_tdt), curr_by, curr_notes, CURRENT_DATE))
                 conn.commit()
+                st.query_params.update({"sync_tick": str(time.time())})
                 st.rerun()
 
         render_checklist_row(c_col, "Rejection Queue", "rejection_queue", "rej")
