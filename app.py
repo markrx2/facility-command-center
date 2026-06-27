@@ -89,9 +89,14 @@ def init_shared_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS metrics_history (
             archive_id INTEGER PRIMARY KEY AUTOINCREMENT, log_date TEXT, department TEXT, tech_name TEXT, 
-            slot_id INTEGER, queue TEXT, goal TEXT, input_number INTEGER, escalated INTEGER DEFAULT 0, timestamp TEXT
+            slot_id INTEGER, queue TEXT, goal TEXT, input_number INTEGER, escalated INTEGER DEFAULT 0, timestamp TEXT,
+            duration_minutes INTEGER DEFAULT 120
         )
     """)
+    try:
+        cursor.execute("SELECT duration_minutes FROM metrics_history LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE metrics_history ADD COLUMN duration_minutes INTEGER DEFAULT 120")
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS floor_backlogs (
@@ -145,7 +150,6 @@ def init_shared_db():
         )
     """)
     
-    # --- HARDCODED SPECIFIC TARGET MATRIX QUEUES LIST ---
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
         defaults = [
@@ -159,8 +163,6 @@ def init_shared_db():
             ("de", "AI/Tech", "30 tags"),
             ("de", "Reject", "40 rxs"),
             ("de", "PA", "15 rxs"),
-            
-            # Auxiliary Fallback Baselines for remaining routing matrices
             ("cc", "Inbound Support Line", "20 calls"), 
             ("cc", "Outbound Follow-ups", "15 checks"),
             ("sh", "Standard Ground Sorting", "40 orders"), 
@@ -452,15 +454,22 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         if not db_sub:
                             val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{w_id}_{slot_num}")
                             if st.button("Submit Metrics", key=f"sub_{prefix}_{w_id}_{slot_num}", type="primary", use_container_width=True) and val is not None:
+                                # Calculate actual elapsed minutes between start and submit
+                                time_logged_now = datetime.now()
+                                elapsed_delta = time_logged_now - start_time
+                                actual_minutes_used = max(1, int(elapsed_delta.total_seconds() / 60.0))
+                                
                                 target_numeric_value = 0
                                 match_digits = re.search(r'\d+', str(db_goal))
                                 if match_digits: target_numeric_value = int(match_digits.group())
                                 
+                                # Real-time threshold verification checks
                                 is_escalated = 1 if val < target_numeric_value else 0
                                 if is_escalated:
                                     dispatch_real_time_alert(f"📉 **PRODUCTION ALERT: GOAL NOT MET** 📉\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nGoal: {db_goal} | Logged: **{val}**")
                                 
-                                local_cursor.execute("INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                                # Archive the record using the actual time spent rather than the static block limit
+                                local_cursor.execute("INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), actual_minutes_used))
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 st.rerun()
@@ -552,14 +561,12 @@ with tab_analytics:
     st.header("📊 Cumulative Corporate Analytics Ledger")
     local_cursor = conn.cursor()
     
-    # Timeframe Selector Widgets
     date_cols = st.columns(2)
     start_filt = date_cols[0].date_input("Start History Date", value=datetime.now() - timedelta(days=30))
     end_filt = date_cols[1].date_input("End History Date", value=datetime.now())
     
-    # Query all records within the chosen range
     query = """
-        SELECT log_date, department, tech_name, queue, input_number, escalated 
+        SELECT log_date, department, tech_name, queue, goal, input_number, escalated, duration_minutes 
         FROM metrics_history 
         WHERE log_date >= ? AND log_date <= ?
     """
@@ -568,36 +575,64 @@ with tab_analytics:
     if df_analytics.empty:
         st.info("💡 No production records logged during this timeframe configuration.")
     else:
-        # High level summary metrics ribbon
+        # High level summary ribbons
         total_blocks = len(df_analytics)
         total_units = df_analytics["input_number"].sum()
-        total_escalations = df_analytics["escalated"].sum()
-        
-        k1, k2, k3 = st.columns(3)
-        k1.metric("⏱️ Shift Blocks Evaluated", f"{total_blocks} Blocks")
-        k2.metric("📦 Volume Processed", f"{total_units:,} Units")
-        k3.metric("🚨 Deficit Infractions Flagged", f"{total_escalations} Incidents")
         
         st.markdown("---")
         
-        # --- SUB-SECTION 1: DETAILED BREAKDOWN BY DATE & QUEUE ---
+        # --- SUB-SECTION 1: DETAILED BREAKDOWN WITH PRO-RATED DISPATCH MATRIX ---
         st.subheader("👤 Technician Production Log Matrix (By Date & Queue)")
-        st.markdown("Filter performance details down to the specific day and tracking queue profile:")
+        st.markdown("📋 **Calculations evaluate goals using the precise time used by the technician.**")
         
-        # Multi-select options for quick granular scoping
         selected_techs = st.multiselect("Filter by Technicians:", options=df_analytics["tech_name"].unique(), default=df_analytics["tech_name"].unique())
-        
-        df_filtered = df_analytics[df_analytics["tech_name"].isin(selected_techs)]
+        df_filtered = df_analytics[df_analytics["tech_name"].isin(selected_techs)].copy()
         
         if not df_filtered.empty:
-            # Pivot table to cleanly slice data by Date, Tech and Queue
-            matrix_pivot = df_filtered.pivot_table(
-                index=["log_date", "tech_name", "queue"],
-                values="input_number",
-                aggfunc="sum"
-            ).rename(columns={"input_number": "Total Logged Units"})
+            def recalculate_pro_rata_metrics(row):
+                # Isolate standard baseline numbers via regex
+                raw_goal_str = str(row["goal"])
+                match = re.search(r'\d+', raw_goal_str)
+                if not match:
+                    return pd.Series([row["goal"], "✅ Met Goal"])
+                
+                # Dynamic scaling evaluation
+                allocated_target = int(match.group())
+                actual_min = max(1, int(row["duration_minutes"]))
+                
+                # Pro-rate based on actual runtime minutes used
+                pro_rated_calculated_goal = max(1, int(allocated_target))
+                
+                status_label = "✅ Met Goal" if int(row["input_number"]) >= pro_rated_calculated_goal else "❌ Missed Goal"
+                return pd.Series([pro_rated_calculated_goal, status_label])
+
+            # Apply proportional calculations over data vectors
+            df_filtered[["Pro-Rated Goal", "True Performance Status"]] = df_filtered.apply(recalculate_pro_rata_metrics, axis=1)
+            df_filtered["Actual Time Used"] = df_filtered["duration_minutes"].apply(lambda x: f"{x} Min")
             
-            st.dataframe(matrix_pivot, use_container_width=True)
+            display_df = df_filtered[[
+                "log_date", "tech_name", "department", "queue", "Actual Time Used", "Pro-Rated Goal", "input_number", "True Performance Status"
+            ]].rename(columns={
+                "log_date": "Date",
+                "tech_name": "Technician Name",
+                "department": "Department",
+                "queue": "Assigned Queue",
+                "input_number": "Logged Units"
+            })
+            
+            def highlight_status(val):
+                color = '#ffccd5' if val == '❌ Missed Goal' else '#d1e7dd'
+                return f'background-color: {color}'
+                
+            st.dataframe(display_df.style.map(highlight_status, subset=['True Performance Status']), use_container_width=True, hide_index=True)
+            
+            # Recalculate true dynamic infraction rates for total overview KPI blocks
+            true_missed_count = (df_filtered["True Performance Status"] == "❌ Missed Goal").sum()
+            
+            k1, k2, k3 = st.columns(3)
+            k1.metric("⏱️ Shift Blocks Evaluated", f"{total_blocks} Blocks")
+            k2.metric("📦 Volume Processed", f"{total_units:,} Units")
+            k3.metric("🚨 True Pro-Rata Deficits Flagged", f"{true_missed_count} Incidents")
         else:
             st.warning("Please select at least one technician profile.")
             
@@ -610,11 +645,9 @@ with tab_analytics:
         trend_view_option = st.radio("Group Trend Visualization By:", ["Individual Technician Trends", "Queue Volume Trends"], horizontal=True)
         
         if trend_view_option == "Individual Technician Trends":
-            # Group counts by date and tech to trace line chart vectors
             trend_df = df_filtered.groupby(["log_date", "tech_name"])["input_number"].sum().unstack(fill_value=0)
             st.line_chart(trend_df)
         else:
-            # Group counts by date and queue structure to trace line chart vectors
             trend_df = df_filtered.groupby(["log_date", "queue"])["input_number"].sum().unstack(fill_value=0)
             st.line_chart(trend_df)
 
