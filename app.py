@@ -210,7 +210,7 @@ def dispatch_individual_chat_alert(tech_webhook_url, message_body):
         return False
     try:
         payload = {"text": message_body}
-        response = requests.post(tech_webhook_url, json=payload, headers={"Content-Type": "application/json"})
+        response = requests.post(url, json=payload, headers={"Content-Type": "application/json"})
         return response.status_code == 200
     except Exception as e:
         print(f"Direct Tech Chat Node Alert Refusal: {str(e)}")
@@ -364,7 +364,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         
-        # BUTTON 1: SAFE WIPE FROM CURRENT GRID VIEW ONLY (Safely removes a technician from today's active department lines without erasing global details or analytical history)
+        # BUTTON 1: SAFE WIPE FROM CURRENT GRID VIEW ONLY
         if is_mgr_active:
             if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
@@ -388,14 +388,25 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     if is_mgr_active:
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
                         
-                        # BUTTON 2: RESET SLOT (Wipes block record cleanly and triggers visual form redraw)
+                        # FIXED: BUTTON 2: RESET SLOT (Deletes slot data AND purges state widgets entirely)
                         if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                             conn.commit()
+                            
+                            # Purge widget caching blocks from memory to instantly force a clean start view layout
+                            state_keys_to_clear = [
+                                f"num_{prefix}_{w_id}_{slot_num}",
+                                f"q_{prefix}_{w_id}_{slot_num}",
+                                f"dur_{prefix}_{w_id}_{slot_num}"
+                            ]
+                            for key in state_keys_to_clear:
+                                if key in st.session_state:
+                                    del st.session_state[key]
+                                    
                             st.query_params.update({"sync_tick": str(time.time())})
                             st.rerun()
                             
-                        # BUTTON 3: FORCE CLOCK RESET (Restarts countdown constraint markers back to defaults)
+                        # BUTTON 3: FORCE CLOCK RESET
                         if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary", disabled=(slot_row is None)):
                             if slot_row is not None:
                                 now_reset_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
