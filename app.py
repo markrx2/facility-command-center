@@ -39,7 +39,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- TRUE BROWSER HEARTBEAT ENGINE ---
-# Runs a rapid 5-second matrix state evaluation check across all active nodes to keep browsers sync'd
 st.components.v1.html(
     """
     <script>
@@ -151,6 +150,15 @@ def init_shared_db():
             return_fourteen_queue_by TEXT DEFAULT '', return_fourteen_queue_notes TEXT DEFAULT '', return_fourteen_queue_date TEXT DEFAULT '', return_fourteen_queue_target TEXT DEFAULT ''
         )
     """)
+
+    try:
+        cursor.execute("SELECT erx_queue FROM daily_checklist LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue TEXT DEFAULT 'Pending'")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_by TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_notes TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_date TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_target TEXT DEFAULT ''")
     
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
@@ -185,7 +193,7 @@ def dispatch_individual_chat_alert(tech_webhook_url, message_body):
         return False
     try:
         payload = {"text": message_body}
-        response = requests.post(url, json=payload, headers={"Content-Type": "application/json"})
+        response = requests.post(tech_webhook_url, json=payload, headers={"Content-Type": "application/json"})
         return response.status_code == 200
     except Exception as e:
         print(f"Direct Tech Chat Node Alert Refusal: {str(e)}")
@@ -277,7 +285,6 @@ if submit_deployment:
     else:
         st.sidebar.warning("Please input both name and email routing vectors.")
 
-
 # --- 5. TOP-LEVEL BACKLOG MATRIX INPUT INJECTOR ---
 def render_global_backlog_ribbon():
     backlog_cursor = conn.cursor()
@@ -312,10 +319,9 @@ def render_global_backlog_ribbon():
         params = list(updates.values()) + [CURRENT_DATE]
         backlog_cursor.execute(f"UPDATE floor_backlogs SET {set_clause} WHERE log_date=?", params)
         conn.commit()
-        st.query_params.update({"sync_tick": str(time.time())}) # Global app-state synchronization event
+        st.query_params.update({"sync_tick": str(time.time())})
         st.rerun()
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
-
 
 # --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
 def render_synchronized_matrix(db_table, prefix, dept_label):
@@ -479,8 +485,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
-                            
-                            # SECURED GUARD: Reset Slot has been moved inside the manager-privilege bubble
                             if is_mgr_active:
                                 if st.button("🔄 Reset Slot", key=f"rst_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                     local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
@@ -699,13 +703,21 @@ with st.container(border=True):
             curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}")
             
             try:
-                date_delta = (curr_tdt - curr_odt).days
-                if date_delta > 0:
-                    cols[3].markdown(f"<div style='text-align:center; padding-top:24px;'><span style='background-color:#ffeec2; color:#b76e00; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:12px;'>⚠️ {date_delta} Days</span></div>", unsafe_allow_html=True)
+                if db_prefix == "erx_queue":
+                    date_delta = (datetime.now().date() - curr_odt).days
                 else:
-                    cols[3].markdown(f"<div style='text-align:center; padding-top:24px;'><span style='background-color:#d1e7dd; color:#0f5132; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:12px;'>✅ Current</span></div>", unsafe_allow_html=True)
+                    date_delta = (curr_tdt - curr_odt).days
+                
+                header_html = "<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div>"
+                
+                if date_delta > 0:
+                    badge_html = f"<div style='text-align:center;'><span style='background-color:#f8d7da; color:#842029; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>🚨 {date_delta} Days</span></div>"
+                    cols[3].markdown(f"{header_html}{badge_html}", unsafe_allow_html=True)
+                else:
+                    badge_html = f"<div style='text-align:center;'><span style='background-color:#d1e7dd; color:#0f5132; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>✅ Current</span></div>"
+                    cols[3].markdown(f"{header_html}{badge_html}", unsafe_allow_html=True)
             except:
-                cols[3].text_input("Days", value="-", disabled=True, key=f"delta_err_{prefix_key}")
+                cols[3].text_input("Aging", value="-", disabled=True, key=f"delta_err_{prefix_key}")
                 
             curr_by = cols[4].text_input("Verified By", value=stored_by, key=f"by_{prefix_key}_{CURRENT_DATE}")
             curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=f"notes_{prefix_key}_{CURRENT_DATE}")
@@ -717,13 +729,15 @@ with st.container(border=True):
                 st.query_params.update({"sync_tick": str(time.time())})
                 st.rerun()
 
-        render_checklist_row(c_col, "Rejection Queue", "rejection_queue", "rej")
+        # ALPHABETIZED CHECKLIST MATRIX
+        render_checklist_row(c_col, "14 Day Return Queue Checked", "return_fourteen_queue", "ret_14", is_fourteen_day_threshold=True)
+        render_checklist_row(c_col, "AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
+        render_checklist_row(c_col, "Billing Queue Checked", "billing", "bill")
+        render_checklist_row(c_col, "Data Re-Entry Checked", "data_re_entry", "re_ent")
+        render_checklist_row(c_col, "Dispense Queue Checked", "dispense", "disp")
+        render_checklist_row(c_col, "ERx Queue Checked-Any Rx from previous day?", "erx_queue", "erx_chk")
+        render_checklist_row(c_col, "Future Bill Queue Checked", "future_bill", "fut")
+        render_checklist_row(c_col, "Ordering Queue Checked", "ordering", "ord")
         render_checklist_row(c_col, "Prior Authorization Queue", "pa_queue", "pa")
-        render_checklist_row(c_col, "Untransmitted Claims Ledger", "untransmitted_claims", "untrans")
-        render_checklist_row(c_col, "Future Bill Queue", "future_bill", "fut")
-        render_checklist_row(c_col, "Data Re-Entry Desk", "data_re_entry", "re_ent")
-        render_checklist_row(c_col, "AI Tech Verification Check", "ai_tech_check", "ai_tch")
-        render_checklist_row(c_col, "Corporate Billing Module", "billing", "bill")
-        render_checklist_row(c_col, "Ordering Queue Logistics", "ordering", "ord")
-        render_checklist_row(c_col, "Dispense Station Matrix", "dispense", "disp")
-        render_checklist_row(c_col, "14-Day Return Threshold Queue", "return_fourteen_queue", "ret_14", is_fourteen_day_threshold=True)
+        render_checklist_row(c_col, "Rejection Queue Checked", "rejection_queue", "rej")
+        render_checklist_row(c_col, "Untransmitted Claims Completed", "untransmitted_claims", "untrans")
