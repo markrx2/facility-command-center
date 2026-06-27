@@ -158,7 +158,7 @@ def init_shared_db():
             ("de", "Autofill Regular", "50 rxs"),
             ("de", "Autofill Facility", "75 rxs"),
             ("de", "Ekit Non-Controlled", "50 rxs"),
-            ("de", "Ekit Controlled", "1 day"),
+            ("de", "Ekit Controlled", "10 rxs"),
             ("de", "On Hold", "40 rxs"),
             ("de", "AI/Tech", "30 tags"),
             ("de", "Reject", "40 rxs"),
@@ -396,11 +396,12 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             else:
                                 calculated_goal_str = base_goal_str
                                 
-                            st.caption(f"🎯 Calculated Target: **{calculated_goal_str}** *(Base: {base_goal_str}/hr)*")
+                            st.caption(f"🎯 Scheduled Target: **{calculated_goal_str}** *(Base: {base_goal_str}/hr)*")
                             
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                local_cursor.execute(f"INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, worker, slot_num, chosen_q, calculated_goal_str, now_str, chosen_dur_min))
+                                # Save the raw hourly base target directly to 'goal' instead of pre-computed values
+                                local_cursor.execute(f"INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, worker, slot_num, chosen_q, base_goal_str, now_str, chosen_dur_min))
                                 conn.commit()
                                 st.rerun()
                         else:
@@ -409,8 +410,17 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         db_queue, db_goal, db_start, db_input = slot_row["queue"], slot_row["goal"], slot_row["start_time"], slot_row["input_number"]
                         db_t_not, db_s_not, db_sub, db_dur_min = slot_row["tech_notified"], slot_row["supervisor_notified"], slot_row["submitted"], slot_row["duration_minutes"]
                         
+                        # Dynamically derive display target strings for the floor UI
+                        numeric_match = re.search(r'\d+', str(db_goal))
+                        if numeric_match:
+                            b_num = int(numeric_match.group())
+                            sfx = db_goal.replace(str(b_num), "").strip()
+                            display_target = f"{int(b_num * (db_dur_min / 60.0))} {sfx}".strip()
+                        else:
+                            display_target = db_goal
+
                         st.markdown(f"Queue: `{db_queue}`")
-                        st.caption(f"Target Goal: **{db_goal}** ({db_dur_min} min block)")
+                        st.caption(f"Target Goal: **{display_target}** ({db_dur_min} min allocated)")
                         
                         start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
                         end_time = start_time + timedelta(minutes=db_dur_min)
@@ -454,21 +464,23 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         if not db_sub:
                             val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{w_id}_{slot_num}")
                             if st.button("Submit Metrics", key=f"sub_{prefix}_{w_id}_{slot_num}", type="primary", use_container_width=True) and val is not None:
-                                # Calculate actual elapsed minutes between start and submit
                                 time_logged_now = datetime.now()
                                 elapsed_delta = time_logged_now - start_time
                                 actual_minutes_used = max(1, int(elapsed_delta.total_seconds() / 60.0))
                                 
-                                target_numeric_value = 0
+                                # Pure dynamic pro-rata calculation based on elapsed fractional hours
+                                base_hourly_rate = 0
                                 match_digits = re.search(r'\d+', str(db_goal))
-                                if match_digits: target_numeric_value = int(match_digits.group())
+                                if match_digits: 
+                                    base_hourly_rate = int(match_digits.group())
                                 
-                                # Real-time threshold verification checks
-                                is_escalated = 1 if val < target_numeric_value else 0
+                                dynamic_target_threshold = max(1, int(base_hourly_rate * (actual_minutes_used / 60.0)))
+                                is_escalated = 1 if val < dynamic_target_threshold else 0
+                                
                                 if is_escalated:
-                                    dispatch_real_time_alert(f"📉 **PRODUCTION ALERT: GOAL NOT MET** 📉\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nGoal: {db_goal} | Logged: **{val}**")
+                                    dispatch_real_time_alert(f"📉 **PRODUCTION ALERT: GOAL NOT MET** 📉\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nCalculated Target for {actual_minutes_used} min: {dynamic_target_threshold} | Logged: **{val}**")
                                 
-                                # Archive the record using the actual time spent rather than the static block limit
+                                # Push raw hourly targets down to metrics history archive ledger
                                 local_cursor.execute("INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), actual_minutes_used))
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
@@ -507,7 +519,7 @@ with tab_mgmt:
             st.subheader("➕ Create Custom Queue Trackers")
             target_dept = st.selectbox("Select Department Destination:", [("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")], key="mgmt_dept_selector")
             new_q_name = st.text_input("New Queue Name:", placeholder="e.g., Priority Tier 3 Verification", key="mgmt_q_name_input").strip()
-            new_q_goal = st.text_input("Production Unit Goal Target (PER 1 HOUR):", placeholder="e.g., 50 claims", key="mgmt_goal_input").strip()
+            new_q_goal = st.text_input("Production Unit Goal Target (PER 1 HOUR):", placeholder="e.g., 50 rxs", key="mgmt_goal_input").strip()
             
             if st.button("Save New Queue Component", type="primary", use_container_width=True, key="mgmt_save_btn"):
                 if new_q_name and new_q_goal:
@@ -566,7 +578,7 @@ with tab_analytics:
     end_filt = date_cols[1].date_input("End History Date", value=datetime.now())
     
     query = """
-        SELECT log_date, department, tech_name, queue, goal, input_number, escalated, duration_minutes 
+        SELECT log_date, department, tech_name, queue, goal, input_number, duration_minutes 
         FROM metrics_history 
         WHERE log_date >= ? AND log_date <= ?
     """
@@ -575,13 +587,10 @@ with tab_analytics:
     if df_analytics.empty:
         st.info("💡 No production records logged during this timeframe configuration.")
     else:
-        # High level summary ribbons
         total_blocks = len(df_analytics)
         total_units = df_analytics["input_number"].sum()
         
         st.markdown("---")
-        
-        # --- SUB-SECTION 1: DETAILED BREAKDOWN WITH PRO-RATED DISPATCH MATRIX ---
         st.subheader("👤 Technician Production Log Matrix (By Date & Queue)")
         st.markdown("📋 **Calculations evaluate goals using the precise time used by the technician.**")
         
@@ -590,23 +599,22 @@ with tab_analytics:
         
         if not df_filtered.empty:
             def recalculate_pro_rata_metrics(row):
-                # Isolate standard baseline numbers via regex
                 raw_goal_str = str(row["goal"])
                 match = re.search(r'\d+', raw_goal_str)
                 if not match:
-                    return pd.Series([row["goal"], "✅ Met Goal"])
+                    return pd.Series([0, "✅ Met Goal"])
                 
-                # Dynamic scaling evaluation
-                allocated_target = int(match.group())
+                # Dynamic pro-rata scaling calculation
+                base_hourly_target = int(match.group())
                 actual_min = max(1, int(row["duration_minutes"]))
                 
-                # Pro-rate based on actual runtime minutes used
-                pro_rated_calculated_goal = max(1, int(allocated_target))
+                # Target items = Base hourly goal * (Actual Minutes / 60)
+                pro_rated_calculated_goal = max(1, int(base_hourly_target * (actual_min / 60.0)))
                 
                 status_label = "✅ Met Goal" if int(row["input_number"]) >= pro_rated_calculated_goal else "❌ Missed Goal"
                 return pd.Series([pro_rated_calculated_goal, status_label])
 
-            # Apply proportional calculations over data vectors
+            # Process dynamic performance rows cleanly
             df_filtered[["Pro-Rated Goal", "True Performance Status"]] = df_filtered.apply(recalculate_pro_rata_metrics, axis=1)
             df_filtered["Actual Time Used"] = df_filtered["duration_minutes"].apply(lambda x: f"{x} Min")
             
@@ -626,7 +634,6 @@ with tab_analytics:
                 
             st.dataframe(display_df.style.map(highlight_status, subset=['True Performance Status']), use_container_width=True, hide_index=True)
             
-            # Recalculate true dynamic infraction rates for total overview KPI blocks
             true_missed_count = (df_filtered["True Performance Status"] == "❌ Missed Goal").sum()
             
             k1, k2, k3 = st.columns(3)
@@ -637,13 +644,9 @@ with tab_analytics:
             st.warning("Please select at least one technician profile.")
             
         st.markdown("---")
-        
-        # --- SUB-SECTION 2: TIMELINE TREND LINES ---
         st.subheader("📈 Operational Velocity Trend Analysis")
-        st.markdown("Monitor performance timelines to observe output patterns over the selected timeframe:")
         
         trend_view_option = st.radio("Group Trend Visualization By:", ["Individual Technician Trends", "Queue Volume Trends"], horizontal=True)
-        
         if trend_view_option == "Individual Technician Trends":
             trend_df = df_filtered.groupby(["log_date", "tech_name"])["input_number"].sum().unstack(fill_value=0)
             st.line_chart(trend_df)
