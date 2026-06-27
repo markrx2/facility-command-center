@@ -4,6 +4,7 @@ import requests
 import hashlib
 import re
 import smtplib
+import pandas as pd
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 
@@ -55,7 +56,6 @@ st.components.v1.html(
 
 # --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
-    # Bumped filename signature to cleanly overwrite database schemas with correct rxs labels
     conn = sqlite3.connect("facility_matrix_v5.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
@@ -193,7 +193,7 @@ def dispatch_individual_chat_alert(tech_webhook_url, message_body):
         return False
     try:
         payload = {"text": message_body}
-        response = requests.post(tech_webhook_url, json=payload, headers={"Content-Type": "application/json"})
+        response = requests.post(url, json=payload, headers={"Content-Type": "application/json"})
         return response.status_code == 200
     except Exception as e:
         print(f"Direct Tech Chat Node Alert Refusal: {str(e)}")
@@ -547,37 +547,76 @@ with tab_mgmt:
                             conn.commit()
                             st.rerun()
 
-# --- 9. REAL-TIME HISTORICAL GRAPHICAL ANALYTICS ---
+# --- 9. ADVANCED HISTORICAL & TRENDS ANALYTICS TAB ---
 with tab_analytics:
     st.header("📊 Cumulative Corporate Analytics Ledger")
     local_cursor = conn.cursor()
+    
+    # Timeframe Selector Widgets
     date_cols = st.columns(2)
     start_filt = date_cols[0].date_input("Start History Date", value=datetime.now() - timedelta(days=30))
     end_filt = date_cols[1].date_input("End History Date", value=datetime.now())
     
-    local_cursor.execute("SELECT log_date, department, tech_name, input_number, escalated FROM metrics_history WHERE log_date >= ? AND log_date <= ?", (start_filt.strftime("%Y-%m-%d"), end_filt.strftime("%Y-%m-%d")))
-    historical_records = local_cursor.fetchall()
+    # Query all records within the chosen range
+    query = """
+        SELECT log_date, department, tech_name, queue, input_number, escalated 
+        FROM metrics_history 
+        WHERE log_date >= ? AND log_date <= ?
+    """
+    df_analytics = pd.read_sql_query(query, sqlite3.connect("facility_matrix_v5.db"), params=(start_filt.strftime("%Y-%m-%d"), end_filt.strftime("%Y-%m-%d")))
     
-    totals = {"Blocks": 0, "Units": 0, "Alerts": 0}
-    tech_chart_series = {}
-    dept_chart_series = {"Data Entry": 0, "Call Center": 0, "Shipping": 0, "Fill": 0}
-    
-    for row in historical_records:
-        totals["Blocks"] += 1
-        totals["Units"] += int(row["input_number"])
-        if int(row["escalated"]) > 0: totals["Alerts"] += 1
-        dept_chart_series[row["department"]] = dept_chart_series.get(row["department"], 0) + int(row["input_number"])
-        tech_chart_series[row["tech_name"]] = tech_chart_series.get(row["tech_name"], 0) + int(row["input_number"])
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("⏱️ Lifetime Shift Blocks Logged", f"{totals['Blocks']} Blocks")
-    k2.metric("📦 Cumulative Processed Volume", f"{totals['Units']} Units")
-    k3.metric("🚨 Total Goal Deficit Infractions", f"{totals['Alerts']} Incidents")
-    
-    st.markdown("---")
-    if tech_chart_series:
-        st.markdown("### Historical Production Metrics per Technician")
-        st.bar_chart(tech_chart_series)
+    if df_analytics.empty:
+        st.info("💡 No production records logged during this timeframe configuration.")
+    else:
+        # High level summary metrics ribbon
+        total_blocks = len(df_analytics)
+        total_units = df_analytics["input_number"].sum()
+        total_escalations = df_analytics["escalated"].sum()
+        
+        k1, k2, k3 = st.columns(3)
+        k1.metric("⏱️ Shift Blocks Evaluated", f"{total_blocks} Blocks")
+        k2.metric("📦 Volume Processed", f"{total_units:,} Units")
+        k3.metric("🚨 Deficit Infractions Flagged", f"{total_escalations} Incidents")
+        
+        st.markdown("---")
+        
+        # --- SUB-SECTION 1: DETAILED BREAKDOWN BY DATE & QUEUE ---
+        st.subheader("👤 Technician Production Log Matrix (By Date & Queue)")
+        st.markdown("Filter performance details down to the specific day and tracking queue profile:")
+        
+        # Multi-select options for quick granular scoping
+        selected_techs = st.multiselect("Filter by Technicians:", options=df_analytics["tech_name"].unique(), default=df_analytics["tech_name"].unique())
+        
+        df_filtered = df_analytics[df_analytics["tech_name"].isin(selected_techs)]
+        
+        if not df_filtered.empty:
+            # Pivot table to cleanly slice data by Date, Tech and Queue
+            matrix_pivot = df_filtered.pivot_table(
+                index=["log_date", "tech_name", "queue"],
+                values="input_number",
+                aggfunc="sum"
+            ).rename(columns={"input_number": "Total Logged Units"})
+            
+            st.dataframe(matrix_pivot, use_container_width=True)
+        else:
+            st.warning("Please select at least one technician profile.")
+            
+        st.markdown("---")
+        
+        # --- SUB-SECTION 2: TIMELINE TREND LINES ---
+        st.subheader("📈 Operational Velocity Trend Analysis")
+        st.markdown("Monitor performance timelines to observe output patterns over the selected timeframe:")
+        
+        trend_view_option = st.radio("Group Trend Visualization By:", ["Individual Technician Trends", "Queue Volume Trends"], horizontal=True)
+        
+        if trend_view_option == "Individual Technician Trends":
+            # Group counts by date and tech to trace line chart vectors
+            trend_df = df_filtered.groupby(["log_date", "tech_name"])["input_number"].sum().unstack(fill_value=0)
+            st.line_chart(trend_df)
+        else:
+            # Group counts by date and queue structure to trace line chart vectors
+            trend_df = df_filtered.groupby(["log_date", "queue"])["input_number"].sum().unstack(fill_value=0)
+            st.line_chart(trend_df)
 
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST ---
 st.markdown("<br>", unsafe_allow_html=True)
