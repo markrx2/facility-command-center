@@ -55,8 +55,8 @@ st.components.v1.html(
 
 # --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
-    # Rolled over to v4 to cleanly enforce the new corporate default queues structure
-    conn = sqlite3.connect("facility_matrix_v4.db", check_same_thread=False)
+    # Bumped filename signature to cleanly overwrite database schemas with correct rxs labels
+    conn = sqlite3.connect("facility_matrix_v5.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
@@ -149,16 +149,16 @@ def init_shared_db():
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
         defaults = [
-            ("de", "ERx Regular", "50 rx"),
-            ("de", "ERx Facility", "60 rx"),
-            ("de", "Autofill Regular", "50 rx"),
-            ("de", "Autofill Facility", "75 rx"),
-            ("de", "Ekit Non-Controlled", "50 rx"),
+            ("de", "ERx Regular", "50 rxs"),
+            ("de", "ERx Facility", "60 rxs"),
+            ("de", "Autofill Regular", "50 rxs"),
+            ("de", "Autofill Facility", "75 rxs"),
+            ("de", "Ekit Non-Controlled", "50 rxs"),
             ("de", "Ekit Controlled", "1 day"),
-            ("de", "On Hold", "40 rx"),
+            ("de", "On Hold", "40 rxs"),
             ("de", "AI/Tech", "30 tags"),
-            ("de", "Reject", "40 rx"),
-            ("de", "PA1", "5 rx"),
+            ("de", "Reject", "40 rxs"),
+            ("de", "PA", "15 rxs"),
             
             # Auxiliary Fallback Baselines for remaining routing matrices
             ("cc", "Inbound Support Line", "20 calls"), 
