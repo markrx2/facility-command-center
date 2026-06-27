@@ -36,12 +36,11 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- TRUE BROWSER HEARTBEAT ENGINE (BUGFIX: NO LONGER CLICKS UNWANTED BUTTONS) ---
+# --- TRUE BROWSER HEARTBEAT ENGINE ---
 st.components.v1.html(
     """
     <script>
         const interval = setInterval(function() {
-            // Target the background container element rather than raw interactive buttons
             const streamlitDoc = window.parent.document;
             const updateTrigger = streamlitDoc.createElement('button');
             updateTrigger.style.display = 'none';
@@ -56,7 +55,8 @@ st.components.v1.html(
 
 # --- 2. DATABASE SETUP & MIGRATION ENGINE ---
 def init_shared_db():
-    conn = sqlite3.connect("facility_matrix_v3.db", check_same_thread=False)
+    # Rolled over to v4 to cleanly enforce the new corporate default queues structure
+    conn = sqlite3.connect("facility_matrix_v4.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     
@@ -145,13 +145,28 @@ def init_shared_db():
         )
     """)
     
+    # --- HARDCODED SPECIFIC TARGET MATRIX QUEUES LIST ---
     cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
     if cursor.fetchone()[0] == 0:
         defaults = [
-            ("de", "Queue Alpha - Tier 1", "15 tickets"), ("de", "Queue Beta - Network Ops", "5 alerts"),
-            ("cc", "Inbound Support Line", "20 calls"), ("cc", "Outbound Follow-ups", "15 checks"),
-            ("sh", "Standard Ground Sorting", "40 orders"), ("sh", "Priority/Overnight Air", "20 shipments"),
-            ("fi", "Automated Dispensing", "10 cells"), ("fi", "Manual Counter Line", "50 fills")
+            ("de", "ERx Regular", "50 rx"),
+            ("de", "ERx Facility", "60 rx"),
+            ("de", "Autofill Regular", "50 rx"),
+            ("de", "Autofill Facility", "75 rx"),
+            ("de", "Ekit Non-Controlled", "50 rx"),
+            ("de", "Ekit Controlled", "1 day"),
+            ("de", "On Hold", "40 rx"),
+            ("de", "AI/Tech", "30 tags"),
+            ("de", "Reject", "40 rx"),
+            ("de", "PA1", "5 rx"),
+            
+            # Auxiliary Fallback Baselines for remaining routing matrices
+            ("cc", "Inbound Support Line", "20 calls"), 
+            ("cc", "Outbound Follow-ups", "15 checks"),
+            ("sh", "Standard Ground Sorting", "40 orders"), 
+            ("sh", "Priority/Overnight Air", "20 shipments"),
+            ("fi", "Automated Dispensing", "10 cells"), 
+            ("fi", "Manual Counter Line", "50 fills")
         ]
         cursor.executemany("INSERT OR IGNORE INTO dynamic_queues VALUES (?, ?, ?)", defaults)
         
@@ -329,7 +344,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
-    # BUGFIX: Grab manager validation globally from session state to avoid laggy UI lookups
     is_mgr_active = st.session_state.get("mgr_pwd_input_field") == "admin123"
 
     for worker, tech_profiles in active_roster.items():
@@ -382,7 +396,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 
                             st.caption(f"🎯 Calculated Target: **{calculated_goal_str}** *(Base: {base_goal_str}/hr)*")
                             
-                            # BUGFIX: Ensure start configuration requires an explicit click action validation
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 local_cursor.execute(f"INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, worker, slot_num, chosen_q, calculated_goal_str, now_str, chosen_dur_min))
@@ -475,7 +488,6 @@ with tab_mgmt:
     st.header("⚙️ System Queue & Target Goal Adjustments")
     st.markdown("---")
     
-    # BUGFIX: Ensure removal is processed cleanly and immediately relative to the execution frame
     if not is_manager:
         st.warning("🔒 Access Locked: Enter the valid password (`admin123`) in the left sidebar to unlock modifications.")
     else:
