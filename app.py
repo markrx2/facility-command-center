@@ -364,7 +364,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         
-        # BUTTON 1: WIPE TIMERS FROM GRID (Safely clears employee from today's active dashboard department views without deleting global profiles or archives)
+        # BUTTON 1: SAFE WIPE FROM CURRENT GRID VIEW ONLY (Safely removes a technician from today's active department lines without erasing global details or analytical history)
         if is_mgr_active:
             if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
@@ -384,19 +384,18 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
                     
-                    # --- UNCONDITIONAL SUPERVISOR CONTROL HEADER BAR ---
-                                   if is_mgr_active:
+                    # --- UNCONDITIONAL HOISTED ADMINISTRATIVE MANAGEMENT BUTTON DECK ---
+                    if is_mgr_active:
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
                         
-                        # FIXED: BUTTON 2: RESET SLOT (Wipes entry out of daily tracker completely and forces clean layout redraw)
+                        # BUTTON 2: RESET SLOT (Wipes block record cleanly and triggers visual form redraw)
                         if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                             conn.commit()
-                            # Force Streamlit to forget any button state and immediately rebuild the UI layout
                             st.query_params.update({"sync_tick": str(time.time())})
                             st.rerun()
                             
-                        # BUTTON 3: FORCE CLOCK RESET (Alters countdown constraints back to default)
+                        # BUTTON 3: FORCE CLOCK RESET (Restarts countdown constraint markers back to defaults)
                         if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary", disabled=(slot_row is None)):
                             if slot_row is not None:
                                 now_reset_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
