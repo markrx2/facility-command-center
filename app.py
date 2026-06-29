@@ -750,6 +750,8 @@ with st.container(border=True):
             row_keys = list(chk.keys()) if chk else []
             stored_status = chk[db_prefix] if (db_prefix in row_keys and chk[db_prefix]) else "Pending"
             stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in row_keys else ""
+            
+            # SAFE FALLBACK: If column doesn't exist in the DB, gracefully default to empty string instead of breaking
             stored_tdt = chk[f"{db_prefix}_target"] if f"{db_prefix}_target" in row_keys else ""
             stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in row_keys else ""
             stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
@@ -758,6 +760,7 @@ with st.container(border=True):
             curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}_{CURRENT_DATE}")
             curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}")
             
+            # Isolating delta logic safely to prevent cascading layout collapse if database rows are structurally mismatched
             try:
                 if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"]:
                     date_delta = (datetime.now().date() - curr_odt).days
@@ -785,20 +788,24 @@ with st.container(border=True):
                     badge_html = f"<div style='text-align:center;'><span style='background-color:#d1e7dd; color:#0f5132; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>✅ Current</span></div>"
                 
                 cols[3].markdown(f"{header_html}{badge_html}", unsafe_allow_html=True)
-            except:
-                cols[3].text_input("Aging", value="-", disabled=True, key=f"delta_err_{prefix_key}")
+            except Exception:
+                cols[3].markdown("<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div><div style='text-align:center;'><span style='background-color:#cbd5e1; color:#1e293b; padding:6px 10px; border-radius:4px; font-size:12px;'>-</span></div>", unsafe_allow_html=True)
                 
             curr_by = cols[4].text_input("Verified By", value=stored_by, key=f"by_{prefix_key}_{CURRENT_DATE}")
             curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=f"notes_{prefix_key}_{CURRENT_DATE}")
             
             if (curr_status != stored_status or str(curr_odt) != str(stored_odt) or str(curr_tdt) != str(stored_tdt) or curr_by != stored_by or curr_notes != stored_notes):
                 up_cursor = conn.cursor()
-                up_cursor.execute(f"UPDATE daily_checklist SET {db_prefix}=?, {db_prefix}_date=?, {db_prefix}_target=?, {db_prefix}_by=?, {db_prefix}_notes=? WHERE log_date=?", (curr_status, str(curr_odt), str(stored_tdt), curr_by, curr_notes, CURRENT_DATE))
+                up_cursor.execute(f"""
+                    UPDATE daily_checklist 
+                    SET {db_prefix}=?, {db_prefix}_date=?, {db_prefix}_target=?, {db_prefix}_by=?, {db_prefix}_notes=? 
+                    WHERE log_date=?
+                """, (curr_status, str(curr_odt), str(curr_tdt), curr_by, curr_notes, CURRENT_DATE))
                 conn.commit()
                 st.query_params.update({"sync_tick": str(time.time())})
                 st.rerun()
 
-        # ALPHABETIZED CHECKLIST MATRIX WITH UNIQUE ROUTING AGING CONDITIONS
+        # Renders the full matrix reliably regardless of backend structural changes
         render_checklist_row(c_col, "14 Day Return Queue Checked", "return_fourteen_queue", "ret_14", is_fourteen_day_threshold=True)
         render_checklist_row(c_col, "AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
         render_checklist_row(c_col, "Billing Queue Checked", "billing", "bill")
