@@ -305,9 +305,6 @@ def render_global_backlog_ribbon():
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
 
 # --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
-# FIX: Injected native fragment execution mechanism here.
-# This loops exclusively this function framework container every 5 seconds,
-# updating running metrics/clocks dynamically without wiping unsubmitted form data elsewhere.
 @st.fragment(run_every="5s")
 def render_synchronized_matrix(db_table, prefix, dept_label):
     local_cursor = conn.cursor()
@@ -354,21 +351,21 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     if is_mgr_active:
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
                         
-        if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary"):
-    local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-    conn.commit()
-    
-    state_keys_to_clear = [
-        f"num_{prefix}_{w_id}_{slot_num}", 
-        f"q_{prefix}_{w_id}_{slot_num}", 
-        f"dur_{prefix}_{w_id}_{slot_num}"
-    ]
-    for key in state_keys_to_clear:
-        if key in st.session_state:
-            del st.session_state[key]
-    
-    st.session_state["refresh_counter"] += 1
-    st.rerun()
+                        if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary"):
+                            local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                            conn.commit()
+                            
+                            state_keys_to_clear = [
+                                f"num_{prefix}_{w_id}_{slot_num}", 
+                                f"q_{prefix}_{w_id}_{slot_num}", 
+                                f"dur_{prefix}_{w_id}_{slot_num}"
+                            ]
+                            for key in state_keys_to_clear:
+                                if key in st.session_state:
+                                    del st.session_state[key]
+                            
+                            st.session_state["refresh_counter"] += 1
+                            st.rerun()
                             
                         if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary", disabled=(slot_row is None)):
                             if slot_row is not None:
@@ -464,7 +461,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 st.session_state["refresh_counter"] += 1
-                                st.rerun()
+                                p.rerun()
                         
                         if db_s_not == 1: st.error("🚨 Supervisor alert sent to Google Chat.")
                         elif db_s_not == 2: st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
