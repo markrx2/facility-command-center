@@ -217,10 +217,6 @@ def dispatch_individual_chat_alert(tech_webhook_url, message_body):
     return False
 
 def dispatch_individual_tech_notification(recipient_email, worker_name, slot, department):
-    """
-    Dispatches critical tracking notifications directly via SMTP relay.
-    Pulls credentials seamlessly from Streamlit Secrets context architecture.
-    """
     if "email" not in st.secrets:
         return False
     try:
@@ -244,7 +240,6 @@ def dispatch_individual_tech_notification(recipient_email, worker_name, slot, de
         msg['Subject'] = f"⏱️ HUB NOTICE: Timer Ended - {worker_name} | {department} (Slot {slot})"
         msg['From'] = f"Facility Command Hub <{system_sender}>"
         
-        # Route to employee if provided, and copy management distribution list
         recipients = [manager_distribution_list]
         if recipient_email and "@" in recipient_email:
             recipients.append(recipient_email)
@@ -381,7 +376,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         
-        # MAIN ROW DISMISSAL CONTROL
         if is_mgr_active:
             if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
@@ -401,11 +395,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                     slot_row = local_cursor.fetchone()
                     
-                    # --- UNCONDITIONAL HOISTED ADMINISTRATIVE MANAGEMENT BUTTON DECK ---
                     if is_mgr_active:
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
                         
-                        # UNCONDITIONAL REMOVAL ENGINE (Wipes tech immediately upon click)
                         if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
                             local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
@@ -413,9 +405,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             
                             for s in range(1, 5):
                                 state_keys_to_clear = [
-                                    f"num_{prefix}_{w_id}_{s}",
-                                    f"q_{prefix}_{w_id}_{s}",
-                                    f"dur_{prefix}_{w_id}_{s}"
+                                    f"num_{prefix}_{w_id}_{s}", f"q_{prefix}_{w_id}_{s}", f"dur_{prefix}_{w_id}_{s}"
                                 ]
                                 for key in state_keys_to_clear:
                                     if key in st.session_state:
@@ -425,7 +415,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             st.query_params.update({"sync_tick": str(time.time())})
                             st.rerun()
                             
-                        # BUTTON 2: FORCE CLOCK RESET
                         if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary", disabled=(slot_row is None)):
                             if slot_row is not None:
                                 now_reset_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -527,7 +516,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 elapsed_delta = time_logged_now - start_time
                                 
                                 actual_minutes_used = max(1, int(elapsed_delta.total_seconds() / 60.0))
-                                
                                 base_hourly_rate = 0
                                 match_digits = re.search(r'\d+', str(db_goal))
                                 if match_digits: 
@@ -665,9 +653,7 @@ with tab_analytics:
                 
                 base_hourly_target = int(match.group())
                 actual_min = max(1, int(row["duration_minutes"]))
-                
                 pro_rated_calculated_goal = max(1, int(float(base_hourly_target) * (float(actual_min) / 60.0)))
-                
                 status_label = "✅ Met Goal" if int(row["input_number"]) >= pro_rated_calculated_goal else "❌ Missed Goal"
                 return pd.Series([pro_rated_calculated_goal, status_label])
 
@@ -706,7 +692,7 @@ with tab_analytics:
             trend_df = df_filtered.groupby(["log_date", "queue"])["input_number"].sum().unstack(fill_value=0)
             st.line_chart(trend_df)
 
-# --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST ---
+# --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
 with st.container(border=True):
     st.header("📋 Global Facility Daily Queue Verification Log")
@@ -722,6 +708,7 @@ with st.container(border=True):
         chk = local_cursor.fetchone()
         
     c_col, f_col = st.columns([3.2, 1])
+    
     with f_col:
         with st.container(border=True):
             t_obj = datetime.strptime(chk["reminder_time"], "%H:%M").time()
@@ -731,6 +718,25 @@ with st.container(border=True):
                 conn.commit()
                 st.query_params.update({"sync_tick": str(time.time())})
                 st.rerun()
+            
+            # --- 30 MINUTE OVERDUE ESCALATION TRACKER ---
+            current_time_now = datetime.now()
+            deadline_datetime = datetime.combine(current_time_now.date(), t_obj)
+            escalation_deadline = deadline_datetime + timedelta(minutes=30)
+            
+            if current_time_now >= escalation_deadline and chk["supervisor_escaped"] == 0:
+                if chk["reminder_sent"] == 0: 
+                    escalation_chat_msg = (
+                        f"⏰ **🚨 CRITICAL OPERATIONS ESCALATION** 🚨 ⏰\n\n"
+                        f"The **Global Facility Daily Queue Verification Log** has NOT been submitted for today.\n"
+                        f"⏳ **Target Deadline:** {chk['reminder_time']} EST\n"
+                        f"❌ **Status:** Overdue by 30+ minutes without supervisor sign-off.\n\n"
+                        f"Please complete and log all verification vectors immediately."
+                    )
+                    dispatch_real_time_alert(escalation_chat_msg)
+                    local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1, reminder_sent=1 WHERE log_date=?", (CURRENT_DATE,))
+                    conn.commit()
+                    st.toast("🚨 Deadline escalation alert dispatched to Google Chat!", icon="📧")
             
     with c_col:
         opt = ["Pending", "Yes", "No"]
@@ -743,15 +749,15 @@ with st.container(border=True):
                 return datetime.strptime(val_str, "%Y-%m-%d").date() if "-" in val_str else datetime.strptime(val_str, "%m/%d/%Y").date()
             except: return datetime.now().date()
 
-        def render_checklist_row(form_container, label, db_prefix, prefix_key, is_fourteen_day_threshold=False):
-            form_container.markdown(f"##### {label}")
-            cols = form_container.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
+        form_states = {}
+
+        def render_checklist_row(label, db_prefix, prefix_key):
+            st.markdown(f"##### {label}")
+            cols = st.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
             
             row_keys = list(chk.keys()) if chk else []
             stored_status = chk[db_prefix] if (db_prefix in row_keys and chk[db_prefix]) else "Pending"
             stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in row_keys else ""
-            
-            # SAFE FALLBACK: If column doesn't exist in the DB, gracefully default to empty string instead of breaking
             stored_tdt = chk[f"{db_prefix}_target"] if f"{db_prefix}_target" in row_keys else ""
             stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in row_keys else ""
             stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
@@ -760,7 +766,7 @@ with st.container(border=True):
             curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}_{CURRENT_DATE}")
             curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}")
             
-            # Isolating delta logic safely to prevent cascading layout collapse if database rows are structurally mismatched
+            date_delta = 0
             try:
                 if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"]:
                     date_delta = (datetime.now().date() - curr_odt).days
@@ -768,7 +774,6 @@ with st.container(border=True):
                     date_delta = (curr_tdt - curr_odt).days
                 
                 header_html = "<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div>"
-                
                 is_red = False
                 if date_delta > 0:
                     if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims"]:
@@ -790,32 +795,66 @@ with st.container(border=True):
                 cols[3].markdown(f"{header_html}{badge_html}", unsafe_allow_html=True)
             except Exception:
                 cols[3].markdown("<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div><div style='text-align:center;'><span style='background-color:#cbd5e1; color:#1e293b; padding:6px 10px; border-radius:4px; font-size:12px;'>-</span></div>", unsafe_allow_html=True)
-                
+                is_red = False
+
             curr_by = cols[4].text_input("Verified By", value=stored_by, key=f"by_{prefix_key}_{CURRENT_DATE}")
             curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=f"notes_{prefix_key}_{CURRENT_DATE}")
             
-            if (curr_status != stored_status or str(curr_odt) != str(stored_odt) or str(curr_tdt) != str(stored_tdt) or curr_by != stored_by or curr_notes != stored_notes):
-                up_cursor = conn.cursor()
+            form_states[db_prefix] = {
+                "label": label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
+                "by": curr_by, "notes": curr_notes, "is_red": is_red, "delta": date_delta
+            }
+
+        # Render rows sequentially safely
+        render_checklist_row("14 Day Return Queue Checked", "return_fourteen_queue", "ret_14")
+        render_checklist_row("AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
+        render_checklist_row("Billing Queue Checked", "billing", "bill")
+        render_checklist_row("Central Fill Queue Checked", "central_fill_queue", "c_fill")
+        render_checklist_row("Data Re-Entry Checked", "data_re_entry", "re_ent")
+        render_checklist_row("Dispense Queue Checked", "dispense", "disp")
+        render_checklist_row("ERx Queue Checked-Any Rx from previous day?", "erx_queue", "erx_chk")
+        render_checklist_row("Future Bill Queue Checked", "future_bill", "fut")
+        render_checklist_row("On Hold Queue Checked", "on_hold_queue", "on_hld")
+        render_checklist_row("Ordering Queue Checked", "ordering", "ord")
+        render_checklist_row("Prior Authorization Queue", "pa_queue", "pa")
+        render_checklist_row("Rejection Queue Checked", "rejection_queue", "rej")
+        render_checklist_row("Untransmitted Claims Completed", "untransmitted_claims", "untrans")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # --- BATCH REPORT SAVE & COMPILATION TRIGGER BUTTON ---
+        if st.button("💾 Submit Daily Verification Report", type="primary", use_container_width=True):
+            up_cursor = conn.cursor()
+            deficiency_list = []
+            
+            for db_field, data in form_states.items():
                 up_cursor.execute(f"""
                     UPDATE daily_checklist 
-                    SET {db_prefix}=?, {db_prefix}_date=?, {db_prefix}_target=?, {db_prefix}_by=?, {db_prefix}_notes=? 
+                    SET {db_field}=?, {db_field}_date=?, {db_field}_target=?, {db_field}_by=?, {db_field}_notes=? 
                     WHERE log_date=?
-                """, (curr_status, str(curr_odt), str(curr_tdt), curr_by, curr_notes, CURRENT_DATE))
-                conn.commit()
-                st.query_params.update({"sync_tick": str(time.time())})
-                st.rerun()
-
-        # Renders the full matrix reliably regardless of backend structural changes
-        render_checklist_row(c_col, "14 Day Return Queue Checked", "return_fourteen_queue", "ret_14", is_fourteen_day_threshold=True)
-        render_checklist_row(c_col, "AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
-        render_checklist_row(c_col, "Billing Queue Checked", "billing", "bill")
-        render_checklist_row(c_col, "Central Fill Queue Checked", "central_fill_queue", "c_fill")
-        render_checklist_row(c_col, "Data Re-Entry Checked", "data_re_entry", "re_ent")
-        render_checklist_row(c_col, "Dispense Queue Checked", "dispense", "disp")
-        render_checklist_row(c_col, "ERx Queue Checked-Any Rx from previous day?", "erx_queue", "erx_chk")
-        render_checklist_row(c_col, "Future Bill Queue Checked", "future_bill", "fut")
-        render_checklist_row(c_col, "On Hold Queue Checked", "on_hold_queue", "on_hld")
-        render_checklist_row(c_col, "Ordering Queue Checked", "ordering", "ord")
-        render_checklist_row(c_col, "Prior Authorization Queue", "pa_queue", "pa")
-        render_checklist_row(c_col, "Rejection Queue Checked", "rejection_queue", "rej")
-        render_checklist_row(c_col, "Untransmitted Claims Completed", "untransmitted_claims", "untrans")
+                """, (data["status"], data["odt"], data["tdt"], data["by"], data["notes"], CURRENT_DATE))
+                
+                if data["status"] == "No" or data["is_red"]:
+                    flag_reason = "⚠️ STATUS: NO" if data["status"] == "No" else "🚨 CRITICAL AGING"
+                    notes_str = f" (Notes: {data['by']} - {data['notes']})" if data['by'] or data['notes'] else ""
+                    deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {flag_reason} | Backlog: {data['delta']} Days{notes_str}")
+            
+            up_cursor.execute("UPDATE daily_checklist SET reminder_sent=1 WHERE log_date=?", (CURRENT_DATE,))
+            conn.commit()
+            
+            if deficiency_list:
+                compiled_violations = "\n\n".join(deficiency_list)
+                unified_chat_payload = (
+                    f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n"
+                    f"⏰ **Timestamp:** {datetime.now().strftime('%H:%M:%S')} EST\n"
+                    f"⚠️ *The following operational tracking points require attention:* \n\n"
+                    f"{compiled_violations}"
+                )
+                dispatch_real_time_alert(unified_chat_payload)
+                st.success("Verification data saved. Deficiency summary report compiled and pushed to Google Chat!")
+            else:
+                st.success("Verification metrics logged successfully! All operational channels are current.")
+                
+            time.sleep(1)
+            st.query_params.update({"sync_tick": str(time.time())})
+            st.rerun()
