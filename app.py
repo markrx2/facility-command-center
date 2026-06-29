@@ -354,22 +354,21 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     if is_mgr_active:
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
                         
-                        if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary"):
-                            local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
-                            local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
-                            conn.commit()
-                            
-                            for s in range(1, 5):
-                                state_keys_to_clear = [
-                                    f"num_{prefix}_{w_id}_{s}", f"q_{prefix}_{w_id}_{s}", f"dur_{prefix}_{w_id}_{s}"
-                                ]
-                                for key in state_keys_to_clear:
-                                    if key in st.session_state:
-                                        del st.session_state[key]
-                            
-                            st.session_state["selected_profile_state"] = "-- Create New Profile --"
-                            st.session_state["refresh_counter"] += 1
-                            st.rerun()
+        if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary"):
+    local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+    conn.commit()
+    
+    state_keys_to_clear = [
+        f"num_{prefix}_{w_id}_{slot_num}", 
+        f"q_{prefix}_{w_id}_{slot_num}", 
+        f"dur_{prefix}_{w_id}_{slot_num}"
+    ]
+    for key in state_keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
+    
+    st.session_state["refresh_counter"] += 1
+    st.rerun()
                             
                         if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary", disabled=(slot_row is None)):
                             if slot_row is not None:
