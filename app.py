@@ -144,7 +144,7 @@ def init_shared_db():
             billing_by TEXT DEFAULT '', billing_notes TEXT DEFAULT '', billing_date TEXT DEFAULT '', billing_target TEXT DEFAULT '',
             ordering_by TEXT DEFAULT '', ordering_notes TEXT DEFAULT '', ordering_date TEXT DEFAULT '', ordering_target TEXT DEFAULT '',
             dispense_by TEXT DEFAULT '', dispense_notes TEXT DEFAULT '', dispense_date TEXT DEFAULT '', dispense_target TEXT DEFAULT '',
-            return_fourteen_queue_by TEXT DEFAULT '', return_fourteen_queue_notes TEXT DEFAULT '', return_fourteen_queue_date TEXT DEFAULT '', return_fourteen_queue_target TEXT DEFAULT ''
+            return_fourteen_queue_by TEXT DEFAULT '', return_fourteen_queue_notes TEXT DEFAULT '', return_fourteen_queue_date TEXT DEFAULT '', return_fourteen_queue_target TEXT DEFAULT '
         )
     """)
 
@@ -254,6 +254,7 @@ def dispatch_individual_tech_notification(recipient_email, worker_name, slot, de
 st.sidebar.header("🔐 Global System Control Deck")
 pwd_input = st.sidebar.text_input("Enter Manager Override Password:", type="password", key="mgr_pwd_input_field")
 is_manager = False
+
 if pwd_input == "admin123":
     st.sidebar.success("🔑 Admin Privileges Active")
     is_manager = True
@@ -307,7 +308,7 @@ if submit_deployment:
         """, (dest_dept[1], new_worker_name, new_worker_email, new_worker_webhook))
         conn.commit()
         st.session_state["selected_profile_state"] = "-- Create New Profile --"
-        st.experimental_rerun()
+        st.rerun()
     else:
         st.sidebar.warning("Please input both name and email routing vectors.")
 
@@ -345,7 +346,7 @@ def render_global_backlog_ribbon():
         params = list(updates.values()) + [CURRENT_DATE]
         backlog_cursor.execute(f"UPDATE floor_backlogs SET {set_clause} WHERE log_date=?", params)
         conn.commit()
-        st.experimental_rerun()
+        st.rerun()
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
 
 # --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
@@ -378,7 +379,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                 local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
                 conn.commit()
                 st.session_state["selected_profile_state"] = "-- Create New Profile --"
-                st.experimental_rerun()
+                st.rerun()
 
         cols = st.columns(4)
         
@@ -407,14 +408,14 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                         del st.session_state[key]
                             
                             st.session_state["selected_profile_state"] = "-- Create New Profile --"
-                            st.experimental_rerun()
+                            st.rerun()
                             
                         if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary", disabled=(slot_row is None)):
                             if slot_row is not None:
                                 now_reset_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 local_cursor.execute(f"UPDATE {db_table} SET start_time=?, tech_notified=0, supervisor_notified=0, submitted=0 WHERE log_date=? AND tech_name=? AND slot_id=?", (now_reset_str, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
-                                st.experimental_rerun()
+                                st.rerun()
                     
                     if not slot_row:
                         if goals_dict:
@@ -440,7 +441,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 local_cursor.execute(f"INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, worker, slot_num, chosen_q, base_goal_str, now_str, chosen_dur_min))
                                 conn.commit()
-                                st.experimental_rerun()
+                                st.rerun()
                         else:
                             st.warning("Configure queues in Management panel.")
                     else:
@@ -480,13 +481,13 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
                                 local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
-                                st.experimental_rerun()
+                                st.rerun()
                                 
                             if current_now >= fifteen_min_overdue_time and db_s_not < 2:
                                 dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
                                 local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=2 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
-                                st.experimental_rerun()
+                                st.rerun()
 
                             if current_now < escalation_time:
                                 grace = escalation_time - current_now
@@ -497,9 +498,10 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
                                     local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                     conn.commit()
-                                    st.experimental_rerun()
-                                if db_s_not == 1: st.error("🚨 Supervisor alert sent to Google Chat.")
-                                elif db_s_not == 2: st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
+                                    st.rerun()
+                        
+                        if db_s_not == 1: st.error("🚨 Supervisor alert sent to Google Chat.")
+                        elif db_s_not == 2: st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
                         
                         if not db_sub:
                             val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{w_id}_{slot_num}")
@@ -522,7 +524,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 local_cursor.execute("INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), actual_minutes_used))
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
-                                st.experimental_rerun()
+                                st.rerun()
                         else:
                             st.success(f"✅ Logged Units: **{db_input}**")
 
@@ -560,7 +562,7 @@ with tab_mgmt:
                     local_cursor.execute("INSERT OR REPLACE INTO dynamic_queues VALUES (?, ?, ?)", (target_dept[1], new_q_name, new_q_goal))
                     conn.commit()
                     st.success(f"Added baseline operational tracking line: {new_q_name} at {new_q_goal}/hr")
-                    st.experimental_rerun()
+                    st.rerun()
             
             st.markdown("<br><br>", unsafe_allow_html=True)
             st.subheader("🗑 ... Decommission Employee Profiles")
@@ -577,10 +579,14 @@ with tab_mgmt:
                     s_col1.markdown(f"👤 **{s_name}** `({d_lbl})`")
                     if s_col2.button("Remove Profile", key=f"del_staff_{s_prefix}_{hash(s_name)}", type="secondary", use_container_width=True):
                         local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (s_prefix, s_name))
+                        local_cursor.execute(f"DELETE FROM data_entry_slots WHERE log_date=? AND tech_name=?", (CURRENT_DATE, s_name))
+                        local_cursor.execute(f"DELETE FROM call_center_slots WHERE log_date=? AND tech_name=?", (CURRENT_DATE, s_name))
+                        local_cursor.execute(f"DELETE FROM shipping_slots WHERE log_date=? AND tech_name=?", (CURRENT_DATE, s_name))
+                        local_cursor.execute(f"DELETE FROM fill_slots WHERE log_date=? AND tech_name=?", (CURRENT_DATE, s_name))
                         conn.commit()
                         st.session_state["selected_profile_state"] = "-- Create New Profile --"
                         st.success(f"Decommissioned {s_name} from system.")
-                        st.experimental_rerun()
+                        st.rerun()
                     st.markdown("<hr style='margin:2px 0px !important;'>", unsafe_allow_html=True)
                     
         with m_col2:
@@ -600,7 +606,7 @@ with tab_mgmt:
                         if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{hash(q_name)}", use_container_width=True):
                             local_cursor.execute("DELETE FROM dynamic_queues WHERE dept_prefix=? AND queue_name=?", (q_prefix, q_name))
                             conn.commit()
-                            st.experimental_rerun()
+                            st.rerun()
 
 # --- 9. ADVANCED HISTORICAL & TRENDS ANALYTICS TAB ---
 with tab_analytics:
@@ -657,7 +663,7 @@ with tab_analytics:
                 color = '#ffccd5' if val == '❌ Missed Goal' else '#d1e7dd'
                 return f'background-color: {color}'
                 
-            st.dataframe(display_df.style.map(highlight_status, subset=['True Performance Status']), use_container_width=True, hide_index=True)
+            st.dataframe(display_df.style.applymap(highlight_status, subset=['True Performance Status']), use_container_width=True, hide_index=True)
             
             true_missed_count = (df_filtered["True Performance Status"] == "❌ Missed Goal").sum()
             
@@ -703,7 +709,7 @@ with st.container(border=True):
             if new_target_time.strftime("%H:%M") != chk["reminder_time"]:
                 local_cursor.execute("UPDATE daily_checklist SET reminder_time=?, reminder_sent=0, supervisor_escaped=0 WHERE log_date=?", (new_target_time.strftime("%H:%M"), CURRENT_DATE))
                 conn.commit()
-                st.experimental_rerun()
+                st.rerun()
             
             # --- 30 MINUTE OVERDUE ESCALATION TRACKER (TIMEZONE LOCKED) ---
             eastern_tz = ZoneInfo("America/New_York")
@@ -844,4 +850,4 @@ with st.container(border=True):
                 st.success("Verification metrics logged successfully! All operational channels are current.")
                 
             time.sleep(1)
-            st.experimental_rerun()
+            st.rerun()
