@@ -166,7 +166,7 @@ def dispatch_individual_tech_notification(recipient_email, personnel_name, block
     sender_identity = "facility-tracker-automation@carepointrx.com"
     smtp_gateway_host = "smtp.gmail.com"
     smtp_gateway_port = 587
-    app_authentication_token = "mvkj hgfd lpoi uytr" # Placeholder layout matching systemic variables
+    app_authentication_token = "mvkj hgfd lpoi uytr"
     
     email_carrier_wrapper = MIMEMultipart()
     email_carrier_wrapper["From"] = sender_identity
@@ -202,6 +202,124 @@ def dispatch_individual_tech_notification(recipient_email, personnel_name, block
     except Exception as e:
         print(f"SMTP Notification Engine Interruption: {str(e)}")
         return False
+
+# --- 3. UNIFIED GLOBAL BACKGROUND AUTOMATION MATRIX FRAGMENT ---
+@st.fragment(run_every="5s")
+def execution_global_background_automation_engine():
+    bg_conn = sqlite3.connect("facility_matrix_v5.db", check_same_thread=False)
+    bg_conn.row_factory = sqlite3.Row
+    bg_cursor = bg_conn.cursor()
+    current_now = datetime.now()
+    
+    # 3A. TICK THROUGH ALL DEPARTMENTS AND PROCESS EXPIRED TIMERS
+    dept_mappings = [
+        ("data_entry_slots", "de", "Data Entry"),
+        ("call_center_slots", "cc", "Call Center"),
+        ("shipping_slots", "sh", "Shipping"),
+        ("fill_slots", "fi", "Fill")
+    ]
+    
+    state_changed = False
+    
+    for table_name, prefix, label in dept_mappings:
+        bg_cursor.execute(f"SELECT * FROM {table_name} WHERE log_date=? AND submitted=0 AND start_time IS NOT NULL", (CURRENT_DATE,))
+        active_timers = bg_cursor.fetchall()
+        
+        for row in active_timers:
+            worker = row["tech_name"]
+            slot_num = row["slot_id"]
+            db_start = row["start_time"]
+            db_dur_min = row["duration_minutes"]
+            db_t_not = row["tech_notified"]
+            db_s_not = row["supervisor_notified"]
+            
+            start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
+            end_time = start_time + timedelta(minutes=db_dur_min)
+            escalation_time = end_time + timedelta(minutes=10)
+            fifteen_min_overdue_time = end_time + timedelta(minutes=15)
+            
+            if current_now >= end_time:
+                # Fire Initial Technician Alerts once at expiration marker
+                if db_t_not == 0:
+                    bg_cursor.execute("SELECT tech_email, tech_webhook FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
+                    roster_profile = bg_cursor.fetchone()
+                    tech_email = roster_profile["tech_email"] if roster_profile else None
+                    tech_webhook = roster_profile["tech_webhook"] if roster_profile else None
+                    
+                    if tech_email:
+                        dispatch_individual_tech_notification(tech_email, worker, slot_num, label)
+                    if tech_webhook:
+                        dispatch_individual_chat_alert(tech_webhook, f"⏱️ **Timer Expired!**\nYour tracking block timer has ended for *{label}* (Slot {slot_num}).\n\nPlease log counts.")
+                    dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {label} Slot {slot_num} without metrics.")
+                    
+                    bg_cursor.execute(f"UPDATE {table_name} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                    state_changed = True
+                
+                # Fire Tier 1 Escalation at 10 Minutes post-deadline
+                if current_now >= escalation_time and db_s_not == 0:
+                    dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {label} Slot {slot_num}.")
+                    bg_cursor.execute(f"UPDATE {table_name} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                    state_changed = True
+                    
+                # Fire Tier 2 Critical Alert at 15 Minutes post-deadline
+                if current_now >= fifteen_min_overdue_time and db_s_not < 2:
+                    dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
+                    bg_cursor.execute(f"UPDATE {table_name} SET supervisor_notified=2 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                    state_changed = True
+
+    # 3B. TICK THROUGH SYSTEM-WIDE CHECKLIST SUBMISSION VERIFICATION DEADLINES
+    bg_cursor.execute("SELECT reminder_time, reminder_sent, supervisor_escaped FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
+    chk_row = bg_cursor.fetchone()
+    
+    if chk_row:
+        try:
+            t_obj = datetime.strptime(chk_row["reminder_time"], "%H:%M").time()
+            if EASTERN_TZ:
+                current_time_now = datetime.now(EASTERN_TZ)
+            else:
+                current_time_now = datetime.now()
+                
+            deadline_datetime = datetime.combine(current_time_now.date(), t_obj)
+            if EASTERN_TZ:
+                deadline_datetime = deadline_datetime.replace(tzinfo=EASTERN_TZ)
+                
+            dilation_deadline = deadline_datetime + timedelta(minutes=30)
+            
+            # Action A: Exactly at 4:00 PM (or configured deadline) -> Fire initial required warning notification
+            if current_time_now >= deadline_datetime and chk_row["reminder_sent"] == 0:
+                initial_warning_msg = (
+                    f"📋 **FACILITY OPERATIONS REQUIREMENT REMINDER**\n\n"
+                    f"The **Global Facility Daily Queue Verification Log** deadline has been reached.\n"
+                    f"⏳ **Target Deadline:** {chk_row['reminder_time']} EST\n"
+                    f"⚠️ *Please ensure all daily backlogs and checklist audits are finalized and submitted.*"
+                )
+                dispatch_real_time_alert(initial_warning_msg)
+                bg_cursor.execute("UPDATE daily_checklist SET reminder_sent=1 WHERE log_date=?", (CURRENT_DATE,))
+                state_changed = True
+                
+            # Action B: 30 Minutes Overdue (e.g. 4:30 PM) -> Fire Critical Escalation Alert
+            if current_time_now >= dilation_deadline and chk_row["supervisor_escaped"] == 0:
+                escalation_chat_msg = (
+                    f"⏰ **🚨 CRITICAL OPERATIONS ESCALATION** 🚨 ⏰\n\n"
+                    f"The **Global Facility Daily Queue Verification Log** has NOT been submitted for today.\n"
+                    f"⏳ **Target Deadline:** {chk_row['reminder_time']} EST\n"
+                    f"❌ **Status:** Overdue by 30+ minutes without supervisor sign-off.\n\n"
+                    f"Please complete and log all verification vectors immediately."
+                )
+                dispatch_real_time_alert(escalation_chat_msg)
+                bg_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
+                state_changed = True
+        except Exception as e:
+            print(f"Checklist Background Engine Processing Error: {str(e)}")
+
+    if state_changed:
+        bg_conn.commit()
+        st.session_state["refresh_counter"] += 1
+        st.rerun()
+    bg_conn.close()
+
+# Start background engine loop
+execution_global_background_automation_engine()
 
 # --- 4. GLOBAL SIDEBAR MANAGEMENT CONTROL HUB ---
 st.sidebar.header("🔐 Global System Control Deck")
@@ -353,11 +471,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         
                         if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary"):
                             if slot_num == 1:
-                                # Scenario A: Remove entirely from roster and tracking table to let them move to another department page
                                 local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
                                 local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
                             else:
-                                # Scenario B: Wipes only this slot block back to a blank selectbox while safeguarding surrounding slots
                                 local_cursor.execute(f"""
                                     UPDATE {db_table} 
                                     SET queue=NULL, goal=NULL, start_time=NULL, duration_minutes=60, input_number=NULL, 
@@ -387,7 +503,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.session_state["refresh_counter"] += 1
                                 st.rerun()
                     
-                    # Row condition check: handles missing assignments or reset/blank slate template items
                     if not slot_row or slot_row["queue"] is None:
                         if goals_dict:
                             chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}")
@@ -437,7 +552,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         
                         start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
                         end_time = start_time + timedelta(minutes=db_dur_min)
-                        fifteen_min_overdue_time = end_time + timedelta(minutes=15)
                         escalation_time = end_time + timedelta(minutes=10)
                         current_now = datetime.now()
                         
@@ -450,38 +564,10 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             st.progress(1.0 - (float(total_rem_seconds) / (float(db_dur_min) * 60.0)))
                         elif not db_sub:
                             st.error("🛑 Timer Expired!")
-                            if db_t_not == 0:
-                                dispatch_individual_tech_notification(tech_email, worker, slot_num, dept_label)
-                                if tech_webhook:
-                                    dispatch_individual_chat_alert(tech_webhook, f"⏱️ **Timer Expired!**\nYour tracking block timer has ended for *{dept_label}* (Slot {slot_num}).\n\nPlease log counts.")
-                                dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {dept_label} Slot {slot_num} without metrics.")
-                                local_cursor.execute(f"UPDATE {db_table} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                conn.commit()
-                                st.session_state["refresh_counter"] += 1
-                                st.rerun()
-                                
-                            if current_now >= fifteen_min_overdue_time and db_s_not < 2:
-                                dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
-                                local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=2 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                conn.commit()
-                                st.session_state["refresh_counter"] += 1
-                                st.rerun()
-
-                        if current_now < escalation_time:
-                            grace = escalation_time - current_now
-                            gm, gs = divmod(int(grace.total_seconds()), 60)
-                            if current_now >= end_time and not db_sub:
-                                st.warning(f"⚠️ Escalation in: {int(gm):02d}:{int(gs):02d}")
-                        else:
-                            if db_s_not == 0 and not db_sub:
-                                dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
-                                local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                conn.commit()
-                                st.session_state["refresh_counter"] += 1
-                                st.rerun()
                         
-                        if db_s_not == 1: st.error("🚨 Supervisor alert sent to Google Chat.")
-                        elif db_s_not == 2: st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
+                        if current_now >= escalation_time and not db_sub:
+                            if db_s_not == 1: st.error("🚨 Supervisor alert sent to Google Chat.")
+                            elif db_s_not == 2: st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
                         
                         if not db_sub:
                             val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}")
@@ -696,32 +782,6 @@ with st.container(border=True):
                 st.session_state["refresh_counter"] += 1
                 st.rerun()
             
-            # --- 30 MINUTE OVERDUE ESCALATION TRACKER (TIMEZONE LOCKED) ---
-            if EASTERN_TZ:
-                current_time_now = datetime.now(EASTERN_TZ)
-            else:
-                current_time_now = datetime.now()
-            
-            deadline_datetime = datetime.combine(current_time_now.date(), t_obj)
-            if EASTERN_TZ:
-                deadline_datetime = deadline_datetime.replace(tzinfo=EASTERN_TZ)
-                
-            dilation_deadline = deadline_datetime + timedelta(minutes=30)
-            
-            if current_time_now >= dilation_deadline and chk["supervisor_escaped"] == 0:
-                if chk["reminder_sent"] == 0: 
-                    escalation_chat_msg = (
-                        f"⏰ **🚨 CRITICAL OPERATIONS ESCALATION** 🚨 ⏰\n\n"
-                        f"The **Global Facility Daily Queue Verification Log** has NOT been submitted for today.\n"
-                        f"⏳ **Target Deadline:** {chk['reminder_time']} EST\n"
-                        f"❌ **Status:** Overdue by 30+ minutes without supervisor sign-off.\n\n"
-                        f"Please complete and log all verification vectors immediately."
-                    )
-                    dispatch_real_time_alert(escalation_chat_msg)
-                    local_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1, reminder_sent=1 WHERE log_date=?", (CURRENT_DATE,))
-                    conn.commit()
-                    st.toast("🚨 Deadline escalation alert dispatched to Google Chat!", icon="📧")
-            
     with c_col:
         opt = ["Pending", "Yes", "No"]
         
@@ -823,7 +883,8 @@ with st.container(border=True):
                     notes_str = f" (Notes: {data['by']} - {data['notes']})" if data['by'] or data['notes'] else ""
                     deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {flag_reason} | Backlog: {data['delta']} Days{notes_str}")
             
-            up_cursor.execute("UPDATE daily_checklist SET reminder_sent=1 WHERE log_date=?", (CURRENT_DATE,))
+            # Ensure submission locks out further automated notifications for today
+            up_cursor.execute("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
             conn.commit()
             
             if deficiency_list:
