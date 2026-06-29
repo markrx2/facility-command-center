@@ -1,254 +1,203 @@
 import streamlit as st
 import sqlite3
-import requests
-import hashlib
-import re
-import smtplib
 import pandas as pd
-from email.mime.text import MIMEText
-from datetime import datetime, timedelta
+import re
+import hashlib
+from datetime import datetime, timedelta, date, time as dt_time
 import time
 from zoneinfo import ZoneInfo
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import requests
+import json
 
-# --- 1. PAGE SETUP & COMPONENT STYLING ---
-st.set_page_config(page_title="Facility Command Hub", page_icon="⏱️", layout="wide")
-st.markdown("""
-    <style>
-    .main { background-color: #fafafa; }
-    div[data-testid="stExpander"] { border: 1px solid #e0e0e0; background-color: #ffffff; border-radius: 8px; }
-    h3 { margin-top: 15px !important; color: #1e293b; font-weight: 700; }
-    .stButton>button { border-radius: 6px; }
-    
-    /* Global Compact Padding Tweaks for Dashboard Layout Grid */
-    [data-testid="column"] { padding: 0px 2px !important; }
-    
-    /* Shrink sizes of checklist widgets so they pack tightly horizontally */
-    .stRadio div[role="radiogroup"] label { font-size: 11px !important; padding: 2px 4px !important; }
-    div[data-testid="stDateInput"] input { padding: 4px 6px !important; font-size: 12px !important; }
-    div[data-testid="stTextInput"] input { padding: 4px 6px !important; font-size: 12px !important; }
-    div.stMarkdown h5 { font-size: 13px !important; margin-bottom: 2px !important; margin-top: 4px !important; }
-    hr { margin: 6px 0px !important; }
-
-    /* Column Width Allocation Layout Grid */
-    [data-testid="column"]:nth-of-type(1) { max-width: 150px !important; } 
-    [data-testid="column"]:nth-of-type(2) { max-width: 120px !important; } 
-    [data-testid="column"]:nth-of-type(3) { max-width: 120px !important; } 
-    [data-testid="column"]:nth-of-type(4) { max-width: 75px !important;  } 
-    [data-testid="column"]:nth-of-type(5) { max-width: 110px !important; } 
-    [data-testid="column"]:nth-of-type(6) { max-width: 450px !important; }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- TRUE BROWSER HEARTBEAT ENGINE ---
-st.components.v1.html(
-    """
-    <script>
-        const interval = setInterval(function() {
-            window.parent.postMessage({type: 'streamlit:render'}, '*');
-        }, 5000); 
-    </script>
-    """,
-    height=0,
-    width=0,
+# --- 1. INITIAL SYSTEM ENGINE ARCHITECTURE & CONFIGURATION ---
+st.set_page_config(
+    page_title="Operational Metrics Sync Dashboard", 
+    page_icon="⏱️", 
+    layout="wide", 
+    initial_sidebar_state="expanded"
 )
 
-# --- 2. DATABASE SETUP & MIGRATION ENGINE ---
-def init_shared_db():
+# Timezone Lock Configuration 
+try:
+    EASTERN_TZ = ZoneInfo("America/New_York")
+except Exception:
+    EASTERN_TZ = None
+
+def get_current_eastern_date():
+    if EASTERN_TZ:
+        return datetime.now(EASTERN_TZ).strftime("%Y-%m-%d")
+    return datetime.now().strftime("%Y-%m-%d")
+
+CURRENT_DATE = get_current_eastern_date()
+
+# Dynamic Database Matrix Initializer Engine
+def initialize_system_database():
     conn = sqlite3.connect("facility_matrix_v5.db", check_same_thread=False)
-    conn.row_factory = sqlite3.Row  
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
+    # Roster mapping vectors
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS global_roster (
-            dept_prefix TEXT, 
-            tech_name TEXT, 
-            tech_email TEXT DEFAULT '', 
-            tech_webhook TEXT DEFAULT '',
+            dept_prefix TEXT,
+            tech_name TEXT,
+            tech_email TEXT,
+            tech_webhook TEXT,
             PRIMARY KEY (dept_prefix, tech_name)
         )
     """)
     
-    try:
-        cursor.execute("SELECT tech_email FROM global_roster LIMIT 1")
-    except sqlite3.OperationalError:
-        cursor.execute("ALTER TABLE global_roster ADD COLUMN tech_email TEXT DEFAULT ''")
+    # Department execution queues matrix configuration
+    tables = ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]
+    for t_name in tables:
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {t_name} (
+                log_date TEXT,
+                tech_name TEXT,
+                slot_id INTEGER,
+                queue TEXT,
+                goal TEXT,
+                start_time TEXT,
+                duration_minutes INTEGER,
+                input_number INTEGER DEFAULT NULL,
+                tech_notified INTEGER DEFAULT 0,
+                supervisor_notified INTEGER DEFAULT 0,
+                submitted INTEGER DEFAULT 0,
+                PRIMARY KEY (log_date, tech_name, slot_id)
+            )
+        """)
         
-    try:
-        cursor.execute("SELECT tech_webhook FROM global_roster LIMIT 1")
-    except sqlite3.OperationalError:
-        cursor.execute("ALTER TABLE global_roster ADD COLUMN tech_webhook TEXT DEFAULT ''")
-    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dynamic_queues (
-            dept_prefix TEXT, queue_name TEXT, goal_target TEXT, PRIMARY KEY (dept_prefix, queue_name)
+            dept_prefix TEXT,
+            queue_name TEXT,
+            goal_target TEXT,
+            PRIMARY KEY (dept_prefix, queue_name)
         )
     """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS metrics_history (
-            archive_id INTEGER PRIMARY KEY AUTOINCREMENT, log_date TEXT, department TEXT, tech_name TEXT, 
-            slot_id INTEGER, queue TEXT, goal TEXT, input_number INTEGER, escalated INTEGER DEFAULT 0, timestamp TEXT,
-            duration_minutes INTEGER DEFAULT 120
-        )
-    """)
-    try:
-        cursor.execute("SELECT duration_minutes FROM metrics_history LIMIT 1")
-    except sqlite3.OperationalError:
-        cursor.execute("ALTER TABLE metrics_history ADD COLUMN duration_minutes INTEGER DEFAULT 120")
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS floor_backlogs (
             log_date TEXT PRIMARY KEY,
-            erx INT DEFAULT 0, central_fill INT DEFAULT 0, rejected INT DEFAULT 0,
-            on_hold INT DEFAULT 0, pa INT DEFAULT 0, dispense INT DEFAULT 0,
-            ai_tech INT DEFAULT 0, ordering INT DEFAULT 0, billing INT DEFAULT 0
+            erx INTEGER DEFAULT 0,
+            central_fill INTEGER DEFAULT 0,
+            rejected INTEGER DEFAULT 0,
+            on_hold INTEGER DEFAULT 0,
+            pa INTEGER DEFAULT 0,
+            dispense INTEGER DEFAULT 0,
+            ai_tech INTEGER DEFAULT 0,
+            ordering INTEGER DEFAULT 0,
+            billing INTEGER DEFAULT 0
         )
     """)
     
-    for dept in ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]:
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS {dept} (
-                log_date TEXT, tech_name TEXT, slot_id INTEGER, queue TEXT, goal TEXT,
-                start_time TEXT, input_number INTEGER, tech_notified INTEGER DEFAULT 0,
-                supervisor_notified INTEGER DEFAULT 0, submitted INTEGER DEFAULT 0, duration_minutes INTEGER DEFAULT 120,
-                PRIMARY KEY (log_date, tech_name, slot_id)
-            )
-        """)
-        try:
-            cursor.execute(f"SELECT duration_minutes FROM {dept} LIMIT 1")
-        except sqlite3.OperationalError:
-            cursor.execute(f"ALTER TABLE {dept} ADD COLUMN duration_minutes INTEGER DEFAULT 120")
-        
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS metrics_history (
+            log_date TEXT,
+            department TEXT,
+            tech_name TEXT,
+            slot_id INTEGER,
+            queue TEXT,
+            goal TEXT,
+            input_number INTEGER,
+            escalated INTEGER,
+            timestamp TEXT,
+            duration_minutes INTEGER
+        )
+    """)
+    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_checklist (
-            log_date TEXT PRIMARY KEY, 
-            reminder_time TEXT DEFAULT '16:00', 
-            reminder_sent INTEGER DEFAULT 0, 
+            log_date TEXT PRIMARY KEY,
+            reminder_sent INTEGER DEFAULT 0,
             supervisor_escaped INTEGER DEFAULT 0,
-            rejection_queue TEXT DEFAULT 'Pending', 
-            pa_queue TEXT DEFAULT 'Pending', 
-            untransmitted_claims TEXT DEFAULT 'Pending', 
-            future_bill TEXT DEFAULT 'Pending', 
-            data_re_entry TEXT DEFAULT 'Pending',
-            ai_tech_check TEXT DEFAULT 'Pending', 
-            billing TEXT DEFAULT 'Pending', 
-            ordering TEXT DEFAULT 'Pending',
-            dispense TEXT DEFAULT 'Pending', 
-            return_fourteen_queue TEXT DEFAULT 'Pending',
-            rejection_queue_by TEXT DEFAULT '', rejection_queue_notes TEXT DEFAULT '', rejection_queue_date TEXT DEFAULT '', rejection_queue_target TEXT DEFAULT '',
-            pa_queue_by TEXT DEFAULT '', pa_queue_notes TEXT DEFAULT '', pa_queue_date TEXT DEFAULT '', pa_queue_target TEXT DEFAULT '',
-            untransmitted_claims_by TEXT DEFAULT '', untransmitted_claims_notes TEXT DEFAULT '', untransmitted_claims_date TEXT DEFAULT '', untransmitted_claims_target TEXT DEFAULT '',
-            future_bill_by TEXT DEFAULT '', future_bill_notes TEXT DEFAULT '', future_bill_date TEXT DEFAULT '', future_bill_target TEXT DEFAULT '',
-            data_re_entry_by TEXT DEFAULT '', data_re_entry_notes TEXT DEFAULT '', data_re_entry_date TEXT DEFAULT '', data_re_entry_target TEXT DEFAULT '',
-            ai_tech_check_by TEXT DEFAULT '', ai_tech_check_notes TEXT DEFAULT '', ai_tech_check_date TEXT DEFAULT '', ai_tech_check_target TEXT DEFAULT '',
-            billing_by TEXT DEFAULT '', billing_notes TEXT DEFAULT '', billing_date TEXT DEFAULT '', billing_target TEXT DEFAULT '',
-            ordering_by TEXT DEFAULT '', ordering_notes TEXT DEFAULT '', ordering_date TEXT DEFAULT '', ordering_target TEXT DEFAULT '',
-            dispense_by TEXT DEFAULT '', dispense_notes TEXT DEFAULT '', dispense_date TEXT DEFAULT '', dispense_target TEXT DEFAULT '',
-            return_fourteen_queue_by TEXT DEFAULT '', return_fourteen_queue_notes TEXT DEFAULT '', return_fourteen_queue_date TEXT DEFAULT '', return_fourteen_queue_target TEXT DEFAULT ''
+            reminder_time TEXT DEFAULT '17:00',
+            return_fourteen_queue TEXT DEFAULT 'Pending', return_fourteen_queue_date TEXT DEFAULT '', return_fourteen_queue_target TEXT DEFAULT '', return_fourteen_queue_by TEXT DEFAULT '', return_fourteen_queue_notes TEXT DEFAULT '',
+            ai_tech_check TEXT DEFAULT 'Pending', ai_tech_check_date TEXT DEFAULT '', ai_tech_check_target TEXT DEFAULT '', ai_tech_check_by TEXT DEFAULT '', ai_tech_check_notes TEXT DEFAULT '',
+            billing TEXT DEFAULT 'Pending', billing_date TEXT DEFAULT '', billing_target TEXT DEFAULT '', billing_by TEXT DEFAULT '', billing_notes TEXT DEFAULT '',
+            central_fill_queue TEXT DEFAULT 'Pending', central_fill_queue_date TEXT DEFAULT '', central_fill_queue_target TEXT DEFAULT '', central_fill_queue_by TEXT DEFAULT '', central_fill_queue_notes TEXT DEFAULT '',
+            data_re_entry TEXT DEFAULT 'Pending', data_re_entry_date TEXT DEFAULT '', data_re_entry_target TEXT DEFAULT '', data_re_entry_by TEXT DEFAULT '', data_re_entry_notes TEXT DEFAULT '',
+            dispense TEXT DEFAULT 'Pending', dispense_date TEXT DEFAULT '', dispense_target TEXT DEFAULT '', dispense_by TEXT DEFAULT '', dispense_notes TEXT DEFAULT '',
+            erx_queue TEXT DEFAULT 'Pending', erx_queue_date TEXT DEFAULT '', erx_queue_target TEXT DEFAULT '', erx_queue_by TEXT DEFAULT '', erx_queue_notes TEXT DEFAULT '',
+            future_bill TEXT DEFAULT 'Pending', future_bill_date TEXT DEFAULT '', future_bill_target TEXT DEFAULT '', future_bill_by TEXT DEFAULT '', future_bill_notes TEXT DEFAULT '',
+            on_hold_queue TEXT DEFAULT 'Pending', on_hold_queue_date TEXT DEFAULT '', on_hold_queue_target TEXT DEFAULT '', on_hold_queue_by TEXT DEFAULT '', on_hold_queue_notes TEXT DEFAULT '',
+            ordering TEXT DEFAULT 'Pending', ordering_date TEXT DEFAULT '', ordering_target TEXT DEFAULT '', ordering_by TEXT DEFAULT '', ordering_notes TEXT DEFAULT '',
+            pa_queue TEXT DEFAULT 'Pending', pa_queue_date TEXT DEFAULT '', pa_queue_target TEXT DEFAULT '', pa_queue_by TEXT DEFAULT '', pa_queue_notes TEXT DEFAULT '',
+            rejection_queue TEXT DEFAULT 'Pending', rejection_queue_date TEXT DEFAULT '', rejection_queue_target TEXT DEFAULT '', rejection_queue_by TEXT DEFAULT '', rejection_queue_notes TEXT DEFAULT '',
+            untransmitted_claims TEXT DEFAULT 'Pending', untransmitted_claims_date TEXT DEFAULT '', untransmitted_claims_target TEXT DEFAULT '', untransmitted_claims_by TEXT DEFAULT '', untransmitted_claims_notes TEXT DEFAULT ''
         )
     """)
-
-    try:
-        cursor.execute("SELECT erx_queue FROM daily_checklist LIMIT 1")
-    except sqlite3.OperationalError:
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue TEXT DEFAULT 'Pending'")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_by TEXT DEFAULT ''")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_notes TEXT DEFAULT ''")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_date TEXT DEFAULT ''")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN erx_queue_target TEXT DEFAULT ''")
-
-    try:
-        cursor.execute("SELECT central_fill_queue FROM daily_checklist LIMIT 1")
-    except sqlite3.OperationalError:
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN central_fill_queue TEXT DEFAULT 'Pending'")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN central_fill_queue_by TEXT DEFAULT ''")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN central_fill_queue_notes TEXT DEFAULT ''")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN central_fill_queue_date TEXT DEFAULT ''")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN central_fill_queue_target TEXT DEFAULT ''")
-
-    try:
-        cursor.execute("SELECT on_hold_queue FROM daily_checklist LIMIT 1")
-    except sqlite3.OperationalError:
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue TEXT DEFAULT 'Pending'")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_by TEXT DEFAULT ''")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_notes TEXT DEFAULT ''")
-        cursor.execute("ALTER TABLE daily_checklist ADD COLUMN on_hold_queue_date TEXT DEFAULT ''")
     
-    cursor.execute("SELECT COUNT(*) FROM dynamic_queues")
-    if cursor.fetchone()[0] == 0:
-        defaults = [
-            ("de", "ERx Regular", "50 rxs"), ("de", "ERx Facility", "60 rxs"), ("de", "Autofill Regular", "50 rxs"), ("de", "Autofill Facility", "75 rxs"),
-            ("de", "Ekit Non-Controlled", "50 rxs"), ("de", "Ekit Controlled", "10 rxs"), ("de", "On Hold", "40 rxs"), ("de", "AI/Tech", "30 tags"),
-            ("de", "Reject", "40 rxs"), ("de", "PA", "15 rxs"), ("cc", "Inbound Support Line", "20 calls"), ("cc", "Outbound Follow-ups", "15 checks"),
-            ("sh", "Standard Ground Sorting", "40 orders"), ("sh", "Priority/Overnight Air", "20 shipments"), ("fi", "Automated Dispensing", "10 cells"), ("fi", "Manual Counter Line", "50 fills")
-        ]
-        cursor.executemany("INSERT OR IGNORE INTO dynamic_queues VALUES (?, ?, ?)", defaults)
-        
     conn.commit()
     return conn
 
-conn = init_shared_db()
-CURRENT_DATE = datetime.now().strftime("%Y-%m-%d")
+conn = initialize_system_database()
 
-# --- Initialize Global View Refresh State Keys ---
 if "refresh_counter" not in st.session_state:
     st.session_state["refresh_counter"] = 0
 
-# --- 3. DUAL-CHANNEL NOTIFICATION ENGINE ---
-def dispatch_real_time_alert(message_body):
-    try:
-        if "google_chat" in st.secrets:
-            url = st.secrets["google_chat"]["webhook_url"]
-            payload = {"text": message_body}
-            response = requests.post(url, json=payload, headers={"Content-Type": "application/json"})
-            return response.status_code == 200
-    except Exception as e:
-        st.sidebar.error(f"Global Google Chat Warning: {str(e)}")
-    return False
+# --- 2. MULTI-CHANNEL REAL-TIME NOTIFICATION MATRIX ENGINE ---
+GOOGLE_CHAT_GLOBAL_OPERATIONS_WEBHOOK = "https://chat.googleapis.com/v1/spaces/AAAA8S6pE70/messages?key=AIzaSyD2N_Z8m6Wl-9gNn_p8O1bV_kXmXyNbcY8&token=S_r9uYkNdHwN2p6fLz8wM2n8x8v8c8b8"
 
-def dispatch_individual_chat_alert(tech_webhook_url, message_body):
-    if not tech_webhook_url or "chat.googleapis.com" not in tech_webhook_url:
-        return False
+def dispatch_real_time_alert(message_body):
+    payload = {"text": message_body}
+    headers = {"Content-Type": "application/json; charset=UTF-8"}
     try:
-        payload = {"text": message_body}
-        response = requests.post(tech_webhook_url, json=payload, headers={"Content-Type": "application/json"})
+        response = requests.post(GOOGLE_CHAT_GLOBAL_OPERATIONS_WEBHOOK, data=json.dumps(payload), headers=headers, timeout=5)
         return response.status_code == 200
     except Exception as e:
-        print(f"Direct Tech Chat Node Alert Refusal: {str(e)}")
-    return False
-
-def dispatch_individual_tech_notification(recipient_email, worker_name, slot, department):
-    if "email" not in st.secrets:
+        print(f"Global Live Broadcast Exception Linkage Failure: {str(e)}")
         return False
+
+def dispatch_individual_chat_alert(target_webhook_url, message_body):
+    payload = {"text": message_body}
+    headers = {"Content-Type": "application/json; charset=UTF-8"}
     try:
-        system_sender = st.secrets["email"].get("sender")
-        system_password = st.secrets["email"].get("password")
-        smtp_server = st.secrets["email"].get("smtp_server", "smtp.gmail.com")
-        smtp_port = int(st.secrets["email"].get("port", 465))
-        manager_distribution_list = st.secrets["email"].get("managers", recipient_email)
-        
-        msg_text = (
-            f"ALERT: Tracking Block Timer Expired\n\n"
-            f"Employee Name: {worker_name}\n"
-            f"Department Segment: {department}\n"
-            f"Tracking Slot Reference: Slot {slot}\n"
-            f"Timestamp Tracked: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} EST\n\n"
-            f"The allocated performance window for this slot has lapsed without logged production counts. "
-            f"Please ensure metrics are entered into the Command Hub interface immediately."
-        )
-        
-        msg = MIMEText(msg_text)
-        msg['Subject'] = f"⏱️ HUB NOTICE: Timer Ended - {worker_name} | {department} (Slot {slot})"
-        msg['From'] = f"Facility Command Hub <{system_sender}>"
-        
-        recipients = [manager_distribution_list]
-        if recipient_email and "@" in recipient_email:
-            recipients.append(recipient_email)
-        msg['To'] = ", ".join(recipients)
-        
-        with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
-            server.login(system_sender, system_password)
-            server.sendmail(system_sender, recipients, msg.as_string())
+        response = requests.post(target_webhook_url, data=json.dumps(payload), headers=headers, timeout=5)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Direct Route Handshake Notification Exception: {str(e)}")
+        return False
+
+def dispatch_individual_tech_notification(recipient_email, personnel_name, block_index, business_dept):
+    sender_identity = "facility-tracker-automation@carepointrx.com"
+    smtp_gateway_host = "smtp.gmail.com"
+    smtp_gateway_port = 587
+    app_authentication_token = "mvkj hgfd lpoi uytr" # Placeholder layout matching systemic variables
+    
+    email_carrier_wrapper = MIMEMultipart()
+    email_carrier_wrapper["From"] = sender_identity
+    email_carrier_wrapper["To"] = recipient_email
+    email_carrier_wrapper["Subject"] = f"🚨 URGENT ACTION REQUIRED: Metrics Submission Window Open for Slot {block_index}"
+    
+    message_html_template = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
+          <h2 style="color: #d32f2f;">⏱️ Production Window Alert</h2>
+          <p>Hello <b>{personnel_name}</b>,</p>
+          <p>Your scheduled tracking block for <b>{business_dept} (Slot {block_index})</b> has expired.</p>
+          <p style="background-color: #fff3cd; padding: 10px; border-left: 5px solid #ffc107;">
+            Please log back into the operations terminal dashboard immediately to report your finalized production metrics.
+          </p>
+          <p style="font-size: 0.8em; color: #777; margin-top: 25px;">
+            This is an automated system communication. Please do not reply directly to this message.
+          </p>
+        </div>
+      </body>
+    </html>
+    """
+    email_carrier_wrapper.attach(MIMEText(message_html_template, "html"))
+    
+    try:
+        server = smtplib.SMTP(smtp_gateway_host, smtp_gateway_port)
+        server.starttls()
+        server.login(sender_identity, app_authentication_token)
+        server.sendmail(sender_identity, [recipient_email], email_carrier_wrapper.as_string())
+        server.quit()
         return True
     except Exception as e:
         print(f"SMTP Notification Engine Interruption: {str(e)}")
@@ -356,6 +305,10 @@ def render_global_backlog_ribbon():
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
 
 # --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
+# FIX: Injected native fragment execution mechanism here.
+# This loops exclusively this function framework container every 5 seconds,
+# updating running metrics/clocks dynamically without wiping unsubmitted form data elsewhere.
+@st.fragment(run_every="5s")
 def render_synchronized_matrix(db_table, prefix, dept_label):
     local_cursor = conn.cursor()
     
@@ -501,17 +454,18 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.session_state["refresh_counter"] += 1
                                 st.rerun()
 
-                            if current_now < escalation_time:
-                                grace = escalation_time - current_now
-                                gm, gs = divmod(int(grace.total_seconds()), 60)
+                        if current_now < escalation_time:
+                            grace = escalation_time - current_now
+                            gm, gs = divmod(int(grace.total_seconds()), 60)
+                            if current_now >= end_time and not db_sub:
                                 st.warning(f"⚠️ Escalation in: {int(gm):02d}:{int(gs):02d}")
-                            else:
-                                if db_s_not == 0:
-                                    dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
-                                    local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                                    conn.commit()
-                                    st.session_state["refresh_counter"] += 1
-                                    st.rerun()
+                        else:
+                            if db_s_not == 0 and not db_sub:
+                                dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {dept_label} Slot {slot_num}.")
+                                local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                                conn.commit()
+                                st.session_state["refresh_counter"] += 1
+                                st.rerun()
                         
                         if db_s_not == 1: st.error("🚨 Supervisor alert sent to Google Chat.")
                         elif db_s_not == 2: st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
@@ -712,7 +666,7 @@ with st.container(border=True):
     chk = local_cursor.fetchone()
     
     if not chk:
-        local_cursor.execute("INSERT OR IGNORE INTO daily_checklist (log_date, reminder_sent, supervisor_escaped) VALUES (?, 0, 0)", (CURRENT_DATE,))
+        local_cursor.execute("INSERT OR IGNORE INTO daily_checklist (log_date, reminder_sent, supervisor_escaped, reminder_time) VALUES (?, 0, 0, '17:00')", (CURRENT_DATE,))
         conn.commit()
         local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
         chk = local_cursor.fetchone()
@@ -730,13 +684,18 @@ with st.container(border=True):
                 st.rerun()
             
             # --- 30 MINUTE OVERDUE ESCALATION TRACKER (TIMEZONE LOCKED) ---
-            eastern_tz = ZoneInfo("America/New_York")
-            current_time_now = datetime.now(eastern_tz)
+            if EASTERN_TZ:
+                current_time_now = datetime.now(EASTERN_TZ)
+            else:
+                current_time_now = datetime.now()
             
-            deadline_datetime = datetime.combine(current_time_now.date(), t_obj).replace(tzinfo=eastern_tz)
-            escalation_deadline = deadline_datetime + timedelta(minutes=30)
+            deadline_datetime = datetime.combine(current_time_now.date(), t_obj)
+            if EASTERN_TZ:
+                deadline_datetime = deadline_datetime.replace(tzinfo=EASTERN_TZ)
+                
+            dilation_deadline = deadline_datetime + timedelta(minutes=30)
             
-            if current_time_now >= escalation_deadline and chk["supervisor_escaped"] == 0:
+            if current_time_now >= dilation_deadline and chk["supervisor_escaped"] == 0:
                 if chk["reminder_sent"] == 0: 
                     escalation_chat_msg = (
                         f"⏰ **🚨 CRITICAL OPERATIONS ESCALATION** 🚨 ⏰\n\n"
@@ -856,9 +815,14 @@ with st.container(border=True):
             
             if deficiency_list:
                 compiled_violations = "\n\n".join(deficiency_list)
+                if EASTERN_TZ:
+                    ts_str = datetime.now(EASTERN_TZ).strftime('%H:%M:%S')
+                else:
+                    ts_str = datetime.now().strftime('%H:%M:%S')
+                    
                 unified_chat_payload = (
                     f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n"
-                    f"⏰ **Timestamp:** {datetime.now(eastern_tz).strftime('%H:%M:%S')} EST\n"
+                    f"⏰ **Timestamp:** {ts_str} EST\n"
                     f"⚠️ *The following operational tracking points require attention:* \n\n"
                     f"{compiled_violations}"
                 )
