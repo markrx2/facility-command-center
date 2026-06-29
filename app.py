@@ -580,17 +580,29 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 time_logged_now = datetime.now()
                                 elapsed_delta = time_logged_now - start_time
                                 
+                                # 1. Calculate precise minutes elapsed since the clock started
                                 actual_minutes_used = max(1, int(elapsed_delta.total_seconds() / 60.0))
+                                
+                                # 2. Extract base hourly target rate
                                 base_hourly_rate = 0
                                 match_digits = re.search(r'\d+', str(db_goal))
                                 if match_digits: 
                                     base_hourly_rate = int(match_digits.group())
                                 
+                                # 3. Calculate dynamic target threshold strictly on PRO-RATA active minutes
                                 dynamic_target_threshold = max(1, int(float(base_hourly_rate) * (float(actual_minutes_used) / 60.0)))
                                 is_escalated = 1 if val < dynamic_target_threshold else 0
                                 
+                                # 4. Immediately fire the Google Chat notification if they fell under their pro-rata target
                                 if is_escalated:
-                                    dispatch_real_time_alert(f"📉 **PRODUCTION ALERT: GOAL NOT MET** 📉\nTechnician: {worker.upper()}\nDepartment: {dept_label}\nCalculated Target for {actual_minutes_used} min: {dynamic_target_threshold} | Logged: **{val}**")
+                                    dispatch_real_time_alert(
+                                        f"📉 **PRODUCTION ALERT: GOAL NOT MET (PRO-RATA)** 📉\n"
+                                        f"👤 **Technician:** {worker.upper()}\n"
+                                        f"🏢 **Department:** {dept_label}\n"
+                                        f"⏱️ **Active Time Spent:** {actual_minutes_used} minutes\n"
+                                        f"🎯 **Pro-Rata Target Expected:** {dynamic_target_threshold} units *(Based on {base_hourly_rate}/hr)*\n"
+                                        f"📥 **Logged Production:** **{val}** units"
+                                    )
                                 
                                 local_cursor.execute("INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), actual_minutes_used))
                                 local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
@@ -889,7 +901,7 @@ with st.container(border=True):
                     deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {flag_reason} | Backlog: {data['delta']} Days{notes_str}")
             
             # Ensure submission locks out further automated notifications for today
-            up_cursor.execute("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1 WHERE log_date?", (CURRENT_DATE,))
+            up_cursor.execute("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
             conn.commit()
             
             if deficiency_list:
