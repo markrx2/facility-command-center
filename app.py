@@ -663,7 +663,7 @@ with tab_analytics:
                 color = '#ffccd5' if val == '❌ Missed Goal' else '#d1e7dd'
                 return f'background-color: {color}'
                 
-            st.dataframe(display_df.style.applymap(highlight_status, subset=['True Performance Status']), use_container_width=True, hide_index=True)
+            st.dataframe(display_df.style.map(highlight_status, subset=['True Performance Status']), use_container_width=True, hide_index=True)
             
             true_missed_count = (df_filtered["True Performance Status"] == "❌ Missed Goal").sum()
             
