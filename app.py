@@ -8,6 +8,7 @@ import pandas as pd
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 import time
+from zoneinfo import ZoneInfo
 
 # --- 1. PAGE SETUP & COMPONENT STYLING ---
 st.set_page_config(page_title="Facility Command Hub", page_icon="⏱️", layout="wide")
@@ -719,9 +720,11 @@ with st.container(border=True):
                 st.query_params.update({"sync_tick": str(time.time())})
                 st.rerun()
             
-            # --- 30 MINUTE OVERDUE ESCALATION TRACKER ---
-            current_time_now = datetime.now()
-            deadline_datetime = datetime.combine(current_time_now.date(), t_obj)
+            # --- 30 MINUTE OVERDUE ESCALATION TRACKER (TIMEZONE LOCKED) ---
+            eastern_tz = ZoneInfo("America/New_York")
+            current_time_now = datetime.now(eastern_tz)
+            
+            deadline_datetime = datetime.combine(current_time_now.date(), t_obj).replace(tzinfo=eastern_tz)
             escalation_deadline = deadline_datetime + timedelta(minutes=30)
             
             if current_time_now >= escalation_deadline and chk["supervisor_escaped"] == 0:
@@ -846,7 +849,7 @@ with st.container(border=True):
                 compiled_violations = "\n\n".join(deficiency_list)
                 unified_chat_payload = (
                     f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n"
-                    f"⏰ **Timestamp:** {datetime.now().strftime('%H:%M:%S')} EST\n"
+                    f"⏰ **Timestamp:** {datetime.now(eastern_tz).strftime('%H:%M:%S')} EST\n"
                     f"⚠️ *The following operational tracking points require attention:* \n\n"
                     f"{compiled_violations}"
                 )
