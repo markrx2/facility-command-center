@@ -11,6 +11,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import requests
 import json
+from streamlit_autorefresh import st_autorefresh
 
 # --- 1. INITIAL SYSTEM ENGINE ARCHITECTURE & CONFIGURATION ---
 st.set_page_config(
@@ -19,6 +20,10 @@ st.set_page_config(
     layout="wide", 
     initial_sidebar_state="expanded"
 )
+
+# Global browser heartbeat. Keeps the GitHub/Streamlit container awake
+# and forces a script check cycle every 10 seconds.
+st_autorefresh(interval=10000, key="global_system_heartbeat")
 
 # Timezone Lock Configuration 
 try:
@@ -285,7 +290,7 @@ def execution_global_background_automation_engine():
                 
             dilation_deadline = deadline_datetime + timedelta(minutes=30)
             
-            # Action A: Exactly at 4:00 PM (or configured deadline) -> Fire initial required warning notification
+            # Action A: Exactly at configured deadline -> Fire initial required warning notification
             if current_time_now >= deadline_datetime and chk_row["reminder_sent"] == 0:
                 initial_warning_msg = (
                     f"📋 **FACILITY OPERATIONS REQUIREMENT REMINDER**\n\n"
@@ -297,7 +302,7 @@ def execution_global_background_automation_engine():
                 bg_cursor.execute("UPDATE daily_checklist SET reminder_sent=1 WHERE log_date=?", (CURRENT_DATE,))
                 state_changed = True
                 
-            # Action B: 30 Minutes Overdue (e.g. 4:30 PM) -> Fire Critical Escalation Alert
+            # Action B: 30 Minutes Overdue -> Fire Critical Escalation Alert
             if current_time_now >= dilation_deadline and chk_row["supervisor_escaped"] == 0:
                 escalation_chat_msg = (
                     f"⏰ **🚨 CRITICAL OPERATIONS ESCALATION** 🚨 ⏰\n\n"
@@ -884,7 +889,7 @@ with st.container(border=True):
                     deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {flag_reason} | Backlog: {data['delta']} Days{notes_str}")
             
             # Ensure submission locks out further automated notifications for today
-            up_cursor.execute("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
+            up_cursor.execute("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1 WHERE log_date?", (CURRENT_DATE,))
             conn.commit()
             
             if deficiency_list:
