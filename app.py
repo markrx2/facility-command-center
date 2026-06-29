@@ -145,7 +145,7 @@ if "refresh_counter" not in st.session_state:
     st.session_state["refresh_counter"] = 0
 
 # --- 2. MULTI-CHANNEL REAL-TIME NOTIFICATION MATRIX ENGINE ---
-GOOGLE_CHAT_GLOBAL_OPERATIONS_WEBHOOK = "https://chat.googleapis.com/v1/spaces/AAAA8S6pE70/messages?key=AIzaSyD2N_Z8m6Wl-9gNn_p8O1bV_kXmXyNbcY8&token=S_r9uYkNdHwN2p6fLz8wM2n8x8v8c8b8"
+GOOGLE_CHAT_GLOBAL_OPERATIONS_WEBHOOK = "https://chat.googleapis.com/v1/spaces/AAQATY7w4Z0/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=5569MIu7p1CFknuUrLO2c_-xN3uM1Nj2NyZ77Nhz3kU"
 
 def dispatch_real_time_alert(message_body):
     payload = {"text": message_body}
