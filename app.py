@@ -210,35 +210,52 @@ def dispatch_individual_chat_alert(tech_webhook_url, message_body):
         return False
     try:
         payload = {"text": message_body}
-        response = requests.post(url, json=payload, headers={"Content-Type": "application/json"})
+        response = requests.post(tech_webhook_url, json=payload, headers={"Content-Type": "application/json"})
         return response.status_code == 200
     except Exception as e:
         print(f"Direct Tech Chat Node Alert Refusal: {str(e)}")
     return False
 
 def dispatch_individual_tech_notification(recipient_email, worker_name, slot, department):
-    if not recipient_email or "@" not in recipient_email:
+    """
+    Dispatches critical tracking notifications directly via SMTP relay.
+    Pulls credentials seamlessly from Streamlit Secrets context architecture.
+    """
+    if "email" not in st.secrets:
         return False
     try:
-        if "email" in st.secrets:
-            system_sender = st.secrets["email"]["sender"]
-            system_password = st.secrets["email"]["password"]
-            smtp_server = st.secrets["email"].get("smtp_server", "smtp.gmail.com")
-            smtp_port = int(st.secrets["email"].get("port", 465))
-            
-            msg_text = (f"Hello {worker_name},\n\nYour tracking block timer has ended for {department} (Slot {slot}).\n\nPlease navigate back to the Facility Command Hub dashboard immediately to log your production counts.\n\nThank you!")
-            msg = MIMEText(msg_text)
-            msg['Subject'] = f"⏱️ Action Required: Timer Ended - Slot {slot} ({department})"
-            msg['From'] = f"Facility Command Hub <{system_sender}>"
-            msg['To'] = recipient_email
-            
-            with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
-                server.login(system_sender, system_password)
-                server.sendmail(system_sender, [recipient_email], msg.as_string())
-            return True
+        system_sender = st.secrets["email"].get("sender")
+        system_password = st.secrets["email"].get("password")
+        smtp_server = st.secrets["email"].get("smtp_server", "smtp.gmail.com")
+        smtp_port = int(st.secrets["email"].get("port", 465))
+        manager_distribution_list = st.secrets["email"].get("managers", recipient_email)
+        
+        msg_text = (
+            f"ALERT: Tracking Block Timer Expired\n\n"
+            f"Employee Name: {worker_name}\n"
+            f"Department Segment: {department}\n"
+            f"Tracking Slot Reference: Slot {slot}\n"
+            f"Timestamp Tracked: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} EST\n\n"
+            f"The allocated performance window for this slot has lapsed without logged production counts. "
+            f"Please ensure metrics are entered into the Command Hub interface immediately."
+        )
+        
+        msg = MIMEText(msg_text)
+        msg['Subject'] = f"⏱️ HUB NOTICE: Timer Ended - {worker_name} | {department} (Slot {slot})"
+        msg['From'] = f"Facility Command Hub <{system_sender}>"
+        
+        # Route to employee if provided, and copy management distribution list
+        recipients = [manager_distribution_list]
+        if recipient_email and "@" in recipient_email:
+            recipients.append(recipient_email)
+        msg['To'] = ", ".join(recipients)
+        
+        with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
+            server.login(system_sender, system_password)
+            server.sendmail(system_sender, recipients, msg.as_string())
         return True
     except Exception as e:
-        print(f"Individual Tech Notification Refusal: {str(e)}")
+        print(f"SMTP Notification Engine Interruption: {str(e)}")
         return False
 
 # --- 4. GLOBAL SIDEBAR MANAGEMENT CONTROL HUB ---
@@ -408,7 +425,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             st.query_params.update({"sync_tick": str(time.time())})
                             st.rerun()
                             
-                        # BUTTON 3: FORCE CLOCK RESET
+                        # BUTTON 2: FORCE CLOCK RESET
                         if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary", disabled=(slot_row is None)):
                             if slot_row is not None:
                                 now_reset_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
