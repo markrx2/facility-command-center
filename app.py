@@ -352,7 +352,19 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
                         
                         if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary"):
-                            local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                            if slot_num == 1:
+                                # Scenario A: Remove entirely from roster and tracking table to let them move to another department page
+                                local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
+                                local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
+                            else:
+                                # Scenario B: Wipes only this slot block back to a blank selectbox while safeguarding surrounding slots
+                                local_cursor.execute(f"""
+                                    UPDATE {db_table} 
+                                    SET queue=NULL, goal=NULL, start_time=NULL, duration_minutes=60, input_number=NULL, 
+                                        tech_notified=0, supervisor_notified=0, submitted=0 
+                                    WHERE log_date=? AND tech_name=? AND slot_id=?
+                                """, (CURRENT_DATE, worker, slot_num))
+                            
                             conn.commit()
                             
                             state_keys_to_clear = [
@@ -367,15 +379,16 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             st.session_state["refresh_counter"] += 1
                             st.rerun()
                             
-                        if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary", disabled=(slot_row is None)):
-                            if slot_row is not None:
+                        if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary", disabled=(slot_row is None or slot_row["start_time"] is None)):
+                            if slot_row is not None and slot_row["start_time"] is not None:
                                 now_reset_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 local_cursor.execute(f"UPDATE {db_table} SET start_time=?, tech_notified=0, supervisor_notified=0, submitted=0 WHERE log_date=? AND tech_name=? AND slot_id=?", (now_reset_str, CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 st.session_state["refresh_counter"] += 1
                                 st.rerun()
                     
-                    if not slot_row:
+                    # Row condition check: handles missing assignments or reset/blank slate template items
+                    if not slot_row or slot_row["queue"] is None:
                         if goals_dict:
                             chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}")
                             base_goal_str = goals_dict[chosen_q]
@@ -397,7 +410,11 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                local_cursor.execute(f"INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, worker, slot_num, chosen_q, base_goal_str, now_str, chosen_dur_min))
+                                local_cursor.execute(f"""
+                                    INSERT OR REPLACE INTO {db_table} 
+                                    (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes, input_number, tech_notified, supervisor_notified, submitted) 
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0)
+                                """, (CURRENT_DATE, worker, slot_num, chosen_q, base_goal_str, now_str, chosen_dur_min))
                                 conn.commit()
                                 st.session_state["refresh_counter"] += 1
                                 st.rerun()
@@ -461,7 +478,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 local_cursor.execute(f"UPDATE {db_table} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
                                 conn.commit()
                                 st.session_state["refresh_counter"] += 1
-                                p.rerun()
+                                st.rerun()
                         
                         if db_s_not == 1: st.error("🚨 Supervisor alert sent to Google Chat.")
                         elif db_s_not == 2: st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
