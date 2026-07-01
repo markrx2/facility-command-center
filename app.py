@@ -12,6 +12,7 @@ import requests
 import json
 from streamlit_autorefresh import st_autorefresh
 from sqlalchemy import text, create_engine
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import sessionmaker
 
 # --- 1. INITIAL SYSTEM ENGINE ARCHITECTURE & CONFIGURATION ---
@@ -43,10 +44,18 @@ def initialize_system_database():
     db_config = st.secrets["supabase_db"]
     
     # Establish a structured SQLAlchemy URL object instance to protect special character passwords
-    db_url = f"postgresql://{db_config['username']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}?sslmode=require"
+    url_object = URL.create(
+        drivername="postgresql",
+        username=db_config["username"],
+        password=db_config["password"],
+        host=db_config["host"],
+        port=db_config["port"],
+        database=db_config["database"],
+        query={"sslmode": "require"}
+    )
     
     # Instantiate custom engine configuration with clean structural pooling parameters
-    engine = create_engine(db_url, pool_pre_ping=True, pool_recycle=300)
+    engine = create_engine(url_object, pool_pre_ping=True, pool_recycle=300)
     
     # Map a standard context sessionmaker instance onto the connection engine
     class StreamlitSessionContextWrapper:
