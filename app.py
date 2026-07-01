@@ -11,7 +11,8 @@ from email.mime.multipart import MIMEMultipart
 import requests
 import json
 from streamlit_autorefresh import st_autorefresh
-from sqlalchemy import text
+from sqlalchemy import text, create_engine
+from sqlalchemy.orm import sessionmaker
 
 # --- 1. INITIAL SYSTEM ENGINE ARCHITECTURE & CONFIGURATION ---
 st.set_page_config(
@@ -37,10 +38,25 @@ def get_current_eastern_date():
 
 CURRENT_DATE = get_current_eastern_date()
 
-# Dynamic Supabase Database Matrix Initializer Engine using Streamlit's Native Connection API
+# Dynamic Supabase Database Matrix Initializer Engine passing clean parameters straight to the driver
 def initialize_system_database():
-    # Streamlit automatically pulls dialect, host, username, password, etc., from [supabase_db]
-    db_conn = st.connection("supabase_db", type="sql")
+    db_config = st.secrets["supabase_db"]
+    
+    # Establish a structured SQLAlchemy URL object instance to protect special character passwords
+    db_url = f"postgresql://{db_config['username']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}?sslmode=require"
+    
+    # Instantiate custom engine configuration with clean structural pooling parameters
+    engine = create_engine(db_url, pool_pre_ping=True, pool_recycle=300)
+    
+    # Map a standard context sessionmaker instance onto the connection engine
+    class StreamlitSessionContextWrapper:
+        def __init__(self, engine):
+            self.Session = sessionmaker(bind=engine)
+        @property
+        def session(self):
+            return self.Session()
+            
+    db_conn = StreamlitSessionContextWrapper(engine)
     
     with db_conn.session as session:
         # Roster mapping vectors
@@ -163,7 +179,7 @@ if "refresh_counter" not in st.session_state:
     st.session_state["refresh_counter"] = 0
 
 # --- 2. MULTI-CHANNEL REAL-TIME NOTIFICATION MATRIX ENGINE ---
-GOOGLE_CHAT_GLOBAL_OPERATIONS_WEBHOOK = "https://chat.googleapis.com/v1/spaces/AAQATY7w4Z0/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=5569MIu7p1CFknuUrLO2c_-xN3uM1Nj2NyZ77Nhz3kU"
+GOOGLE_CHAT_GLOBAL_OPERATIONS_WEBHOOK = st.secrets["google_chat"]["webhook_url"]
 
 def dispatch_real_time_alert(message_body):
     payload = {"text": message_body}
@@ -722,7 +738,6 @@ with tab_analytics:
         WHERE log_date >= :start AND log_date <= :end
     """)
     
-    # Executing select query through native Streamlit execution map
     with db_conn.session as session:
         res_analytics = session.execute(query, {"start": start_filt.strftime("%Y-%m-%d"), "end": end_filt.strftime("%Y-%m-%d")}).fetchall()
     
