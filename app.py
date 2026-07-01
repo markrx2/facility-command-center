@@ -39,8 +39,8 @@ CURRENT_DATE = get_current_eastern_date()
 
 # Dynamic Supabase Database Matrix Initializer Engine using Streamlit's Native Connection API
 def initialize_system_database():
-    # Establishes connection using standard postgresql backend driver via st.connection
-    db_conn = st.connection("supabase_db", type="sql", url=st.secrets["secrets"]["SUPABASE_URL"])
+    # Streamlit automatically pulls dialect, host, username, password, etc., from [supabase_db]
+    db_conn = st.connection("supabase_db", type="sql")
     
     with db_conn.session as session:
         # Roster mapping vectors
