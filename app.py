@@ -1,9 +1,8 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import re
 import hashlib
-from datetime import datetime, timedelta, date, time as dt_time
+from datetime import datetime, timedelta
 import time
 from zoneinfo import ZoneInfo
 import smtplib
@@ -21,8 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Global browser heartbeat. Keeps the GitHub/Streamlit container awake
-# and forces a script check cycle every 10 seconds.
+# Global browser heartbeat. Keeps the container awake and forces a script check cycle every 10 seconds.
 st_autorefresh(interval=10000, key="global_system_heartbeat")
 
 # Timezone Lock Configuration 
@@ -38,108 +36,127 @@ def get_current_eastern_date():
 
 CURRENT_DATE = get_current_eastern_date()
 
-# Dynamic Database Matrix Initializer Engine
+# Dynamic Supabase Database Matrix Initializer Engine using Streamlit's Native Connection API
 def initialize_system_database():
-    conn = sqlite3.connect("facility_matrix_v5.db", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    # Establishes connection using standard postgresql backend driver via st.connection
+    db_conn = st.connection("supabase_db", type="sql", url=st.secrets["secrets"]["SUPABASE_URL"])
     
-    # Roster mapping vectors
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS global_roster (
-            dept_prefix TEXT,
-            tech_name TEXT,
-            tech_email TEXT,
-            tech_webhook TEXT,
-            PRIMARY KEY (dept_prefix, tech_name)
-        )
-    """)
-    
-    # Department execution queues matrix configuration
-    tables = ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]
-    for t_name in tables:
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS {t_name} (
+    with db_conn.session as session:
+        # Roster mapping vectors
+        session.execute("""
+            CREATE TABLE IF NOT EXISTS global_roster (
+                dept_prefix TEXT,
+                tech_name TEXT,
+                tech_email TEXT,
+                tech_webhook TEXT,
+                PRIMARY KEY (dept_prefix, tech_name)
+            )
+        """)
+        
+        # Department execution queues matrix configuration
+        tables = ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]
+        for t_name in tables:
+            session.execute(f"""
+                CREATE TABLE IF NOT EXISTS {t_name} (
+                    log_date TEXT,
+                    tech_name TEXT,
+                    slot_id INTEGER,
+                    queue TEXT,
+                    goal TEXT,
+                    start_time TEXT,
+                    duration_minutes INTEGER,
+                    input_number INTEGER DEFAULT NULL,
+                    tech_notified INTEGER DEFAULT 0,
+                    supervisor_notified INTEGER DEFAULT 0,
+                    submitted INTEGER DEFAULT 0,
+                    PRIMARY KEY (log_date, tech_name, slot_id)
+                )
+            """)
+            
+        session.execute("""
+            CREATE TABLE IF NOT EXISTS dynamic_queues (
+                dept_prefix TEXT,
+                queue_name TEXT,
+                goal_target TEXT,
+                PRIMARY KEY (dept_prefix, queue_name)
+            )
+        """)
+        
+        session.execute("""
+            CREATE TABLE IF NOT EXISTS floor_backlogs (
+                log_date TEXT PRIMARY KEY,
+                erx INTEGER DEFAULT 0,
+                central_fill INTEGER DEFAULT 0,
+                rejected INTEGER DEFAULT 0,
+                on_hold INTEGER DEFAULT 0,
+                pa INTEGER DEFAULT 0,
+                dispense INTEGER DEFAULT 0,
+                ai_tech INTEGER DEFAULT 0,
+                ordering INTEGER DEFAULT 0,
+                billing INTEGER DEFAULT 0
+            )
+        """)
+        
+        session.execute("""
+            CREATE TABLE IF NOT EXISTS metrics_history (
                 log_date TEXT,
+                department TEXT,
                 tech_name TEXT,
                 slot_id INTEGER,
                 queue TEXT,
                 goal TEXT,
-                start_time TEXT,
-                duration_minutes INTEGER,
-                input_number INTEGER DEFAULT NULL,
-                tech_notified INTEGER DEFAULT 0,
-                supervisor_notified INTEGER DEFAULT 0,
-                submitted INTEGER DEFAULT 0,
-                PRIMARY KEY (log_date, tech_name, slot_id)
+                input_number INTEGER,
+                escalated INTEGER,
+                timestamp TEXT,
+                duration_minutes INTEGER
             )
         """)
         
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS dynamic_queues (
-            dept_prefix TEXT,
-            queue_name TEXT,
-            goal_target TEXT,
-            PRIMARY KEY (dept_prefix, queue_name)
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS floor_backlogs (
-            log_date TEXT PRIMARY KEY,
-            erx INTEGER DEFAULT 0,
-            central_fill INTEGER DEFAULT 0,
-            rejected INTEGER DEFAULT 0,
-            on_hold INTEGER DEFAULT 0,
-            pa INTEGER DEFAULT 0,
-            dispense INTEGER DEFAULT 0,
-            ai_tech INTEGER DEFAULT 0,
-            ordering INTEGER DEFAULT 0,
-            billing INTEGER DEFAULT 0
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS metrics_history (
-            log_date TEXT,
-            department TEXT,
-            tech_name TEXT,
-            slot_id INTEGER,
-            queue TEXT,
-            goal TEXT,
-            input_number INTEGER,
-            escalated INTEGER,
-            timestamp TEXT,
-            duration_minutes INTEGER
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS daily_checklist (
-            log_date TEXT PRIMARY KEY,
-            reminder_sent INTEGER DEFAULT 0,
-            supervisor_escaped INTEGER DEFAULT 0,
-            reminder_time TEXT DEFAULT '17:00',
-            return_fourteen_queue TEXT DEFAULT 'Pending', return_fourteen_queue_date TEXT DEFAULT '', return_fourteen_queue_target TEXT DEFAULT '', return_fourteen_queue_by TEXT DEFAULT '', return_fourteen_queue_notes TEXT DEFAULT '',
-            ai_tech_check TEXT DEFAULT 'Pending', ai_tech_check_date TEXT DEFAULT '', ai_tech_check_target TEXT DEFAULT '', ai_tech_check_by TEXT DEFAULT '', ai_tech_check_notes TEXT DEFAULT '',
-            billing TEXT DEFAULT 'Pending', billing_date TEXT DEFAULT '', billing_target TEXT DEFAULT '', billing_by TEXT DEFAULT '', billing_notes TEXT DEFAULT '',
-            central_fill_queue TEXT DEFAULT 'Pending', central_fill_queue_date TEXT DEFAULT '', central_fill_queue_target TEXT DEFAULT '', central_fill_queue_by TEXT DEFAULT '', central_fill_queue_notes TEXT DEFAULT '',
-            data_re_entry TEXT DEFAULT 'Pending', data_re_entry_date TEXT DEFAULT '', data_re_entry_target TEXT DEFAULT '', data_re_entry_by TEXT DEFAULT '', data_re_entry_notes TEXT DEFAULT '',
-            dispense TEXT DEFAULT 'Pending', dispense_date TEXT DEFAULT '', dispense_target TEXT DEFAULT '', dispense_by TEXT DEFAULT '', dispense_notes TEXT DEFAULT '',
-            erx_queue TEXT DEFAULT 'Pending', erx_queue_date TEXT DEFAULT '', erx_queue_target TEXT DEFAULT '', erx_queue_by TEXT DEFAULT '', erx_queue_notes TEXT DEFAULT '',
-            future_bill TEXT DEFAULT 'Pending', future_bill_date TEXT DEFAULT '', future_bill_target TEXT DEFAULT '', future_bill_by TEXT DEFAULT '', future_bill_notes TEXT DEFAULT '',
-            on_hold_queue TEXT DEFAULT 'Pending', on_hold_queue_date TEXT DEFAULT '', on_hold_queue_target TEXT DEFAULT '', on_hold_queue_by TEXT DEFAULT '', on_hold_queue_notes TEXT DEFAULT '',
-            ordering TEXT DEFAULT 'Pending', ordering_date TEXT DEFAULT '', ordering_target TEXT DEFAULT '', ordering_by TEXT DEFAULT '', ordering_notes TEXT DEFAULT '',
-            pa_queue TEXT DEFAULT 'Pending', pa_queue_date TEXT DEFAULT '', pa_queue_target TEXT DEFAULT '', pa_queue_by TEXT DEFAULT '', pa_queue_notes TEXT DEFAULT '',
-            rejection_queue TEXT DEFAULT 'Pending', rejection_queue_date TEXT DEFAULT '', rejection_queue_target TEXT DEFAULT '', rejection_queue_by TEXT DEFAULT '', rejection_queue_notes TEXT DEFAULT '',
-            untransmitted_claims TEXT DEFAULT 'Pending', untransmitted_claims_date TEXT DEFAULT '', untransmitted_claims_target TEXT DEFAULT '', untransmitted_claims_by TEXT DEFAULT '', untransmitted_claims_notes TEXT DEFAULT ''
-        )
-    """)
-    
-    conn.commit()
-    return conn
+        session.execute("""
+            CREATE TABLE IF NOT EXISTS daily_checklist (
+                log_date TEXT PRIMARY KEY,
+                reminder_sent INTEGER DEFAULT 0,
+                supervisor_escaped INTEGER DEFAULT 0,
+                reminder_time TEXT DEFAULT '17:00',
+                return_fourteen_queue TEXT DEFAULT 'Pending', return_fourteen_queue_date TEXT DEFAULT '', return_fourteen_queue_target TEXT DEFAULT '', return_fourteen_queue_by TEXT DEFAULT '', return_fourteen_queue_notes TEXT DEFAULT '',
+                ai_tech_check TEXT DEFAULT 'Pending', ai_tech_check_date TEXT DEFAULT '', ai_tech_check_target TEXT DEFAULT '', ai_tech_check_by TEXT DEFAULT '', ai_tech_check_notes TEXT DEFAULT '',
+                billing TEXT DEFAULT 'Pending', billing_date TEXT DEFAULT '', billing_target TEXT DEFAULT '', billing_by TEXT DEFAULT '', billing_notes TEXT DEFAULT '',
+                central_fill_queue TEXT DEFAULT 'Pending', central_fill_queue_date TEXT DEFAULT '', central_fill_queue_target TEXT DEFAULT '', central_fill_queue_by TEXT DEFAULT '', central_fill_queue_notes TEXT DEFAULT '',
+                data_re_entry TEXT DEFAULT 'Pending', data_re_entry_date TEXT DEFAULT '', data_re_entry_target TEXT DEFAULT '', data_re_entry_by TEXT DEFAULT '', data_re_entry_notes TEXT DEFAULT '',
+                dispense TEXT DEFAULT 'Pending', dispense_date TEXT DEFAULT '', dispense_target TEXT DEFAULT '', dispense_by TEXT DEFAULT '', dispense_notes TEXT DEFAULT '',
+                erx_queue TEXT DEFAULT 'Pending', erx_queue_date TEXT DEFAULT '', erx_queue_target TEXT DEFAULT '', erx_queue_by TEXT DEFAULT '', erx_queue_notes TEXT DEFAULT '',
+                future_bill TEXT DEFAULT 'Pending', future_bill_date TEXT DEFAULT '', future_bill_target TEXT DEFAULT '', future_bill_by TEXT DEFAULT '', future_bill_notes TEXT DEFAULT '',
+                on_hold_queue TEXT DEFAULT 'Pending', on_hold_queue_date TEXT DEFAULT '', on_hold_queue_target TEXT DEFAULT '', on_hold_queue_by TEXT DEFAULT '', on_hold_queue_notes TEXT DEFAULT '',
+                ordering TEXT DEFAULT 'Pending', ordering_date TEXT DEFAULT '', ordering_target TEXT DEFAULT '', ordering_by TEXT DEFAULT '', ordering_notes TEXT DEFAULT '',
+                pa_queue TEXT DEFAULT 'Pending', pa_queue_date TEXT DEFAULT '', pa_queue_target TEXT DEFAULT '', pa_queue_by TEXT DEFAULT '', pa_queue_notes TEXT DEFAULT '',
+                rejection_queue TEXT DEFAULT 'Pending', rejection_queue_date TEXT DEFAULT '', rejection_queue_target TEXT DEFAULT '', rejection_queue_by TEXT DEFAULT '', rejection_queue_notes TEXT DEFAULT '',
+                untransmitted_claims TEXT DEFAULT 'Pending', untransmitted_claims_date TEXT DEFAULT '', untransmitted_claims_target TEXT DEFAULT '', untransmitted_claims_by TEXT DEFAULT '', untransmitted_claims_notes TEXT DEFAULT ''
+            )
+        """)
+        session.commit()
 
-conn = initialize_system_database()
+        # SELF-HEALING AUTOMATIC QUEUE RECOVERY SEEDER 
+        res = session.execute("SELECT COUNT(*) as cnt FROM dynamic_queues").fetchone()
+        if res[0] == 0:
+            default_queues = [
+                {"prefix": "de", "name": "Standard Data Entry", "target": "40 rxs"},
+                {"prefix": "de", "name": "Priority Intake", "target": "50 rxs"},
+                {"prefix": "cc", "name": "Inbound Patient Queue", "target": "15 calls"},
+                {"prefix": "cc", "name": "Outbound MD Escalations", "target": "10 calls"},
+                {"prefix": "sh", "name": "Bulk Packout", "target": "60 orders"},
+                {"prefix": "sh", "name": "Cold Chain Manifests", "target": "30 orders"},
+                {"prefix": "fi", "name": "Primary Dispensing Line", "target": "45 rxs"},
+                {"prefix": "fi", "name": "Specialty Compounding", "target": "15 rxs"}
+            ]
+            for dq in default_queues:
+                session.execute(
+                    "INSERT INTO dynamic_queues (dept_prefix, queue_name, goal_target) VALUES (:prefix, :name, :target)",
+                    {"prefix": dq["prefix"], "name": dq["name"], "target": dq["target"]}
+                )
+            session.commit()
+    return db_conn
+
+db_conn = initialize_system_database()
 
 if "refresh_counter" not in st.session_state:
     st.session_state["refresh_counter"] = 0
@@ -211,12 +228,8 @@ def dispatch_individual_tech_notification(recipient_email, personnel_name, block
 # --- 3. UNIFIED GLOBAL BACKGROUND AUTOMATION MATRIX FRAGMENT ---
 @st.fragment(run_every="5s")
 def execution_global_background_automation_engine():
-    bg_conn = sqlite3.connect("facility_matrix_v5.db", check_same_thread=False)
-    bg_conn.row_factory = sqlite3.Row
-    bg_cursor = bg_conn.cursor()
     current_now = datetime.now()
     
-    # 3A. TICK THROUGH ALL DEPARTMENTS AND PROCESS EXPIRED TIMERS
     dept_mappings = [
         ("data_entry_slots", "de", "Data Entry"),
         ("call_center_slots", "cc", "Call Center"),
@@ -226,143 +239,143 @@ def execution_global_background_automation_engine():
     
     state_changed = False
     
-    for table_name, prefix, label in dept_mappings:
-        bg_cursor.execute(f"SELECT * FROM {table_name} WHERE log_date=? AND submitted=0 AND start_time IS NOT NULL", (CURRENT_DATE,))
-        active_timers = bg_cursor.fetchall()
+    with db_conn.session as session:
+        for table_name, prefix, label in dept_mappings:
+            active_timers = session.execute(
+                f"SELECT * FROM {table_name} WHERE log_date = :c_date AND submitted = 0 AND start_time IS NOT NULL",
+                {"c_date": CURRENT_DATE}
+            ).fetchall()
+            
+            for row in active_timers:
+                worker = row.tech_name
+                slot_num = row.slot_id
+                db_start = row.start_time
+                db_dur_min = row.duration_minutes
+                db_t_not = row.tech_notified
+                db_s_not = row.supervisor_notified
+                
+                start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
+                end_time = start_time + timedelta(minutes=db_dur_min)
+                escalation_time = end_time + timedelta(minutes=10)
+                fifteen_min_overdue_time = end_time + timedelta(minutes=15)
+                
+                if current_now >= end_time:
+                    if db_t_not == 0:
+                        roster_profile = session.execute(
+                            "SELECT tech_email, tech_webhook FROM global_roster WHERE dept_prefix = :pfx AND tech_name = :t_name",
+                            {"pfx": prefix, "t_name": worker}
+                        ).fetchone()
+                        
+                        tech_email = roster_profile.tech_email if roster_profile else None
+                        tech_webhook = roster_profile.tech_webhook if roster_profile else None
+                        
+                        if tech_email:
+                            dispatch_individual_tech_notification(tech_email, worker, slot_num, label)
+                        if tech_webhook:
+                            dispatch_individual_chat_alert(tech_webhook, f"⏱️ **Timer Expired!**\nYour tracking block timer has ended for *{label}* (Slot {slot_num}).\n\nPlease log counts.")
+                        dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {label} Slot {slot_num} without metrics.")
+                        
+                        session.execute(
+                            f"UPDATE {table_name} SET tech_notified = 1 WHERE log_date = :c_date AND tech_name = :t_name AND slot_id = :s_id",
+                            {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num}
+                        )
+                        state_changed = True
+                    
+                    if current_now >= escalation_time and db_s_not == 0:
+                        dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {label} Slot {slot_num}.")
+                        session.execute(
+                            f"UPDATE {table_name} SET supervisor_notified = 1 WHERE log_date = :c_date AND tech_name = :t_name AND slot_id = :s_id",
+                            {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num}
+                        )
+                        state_changed = True
+                        
+                    if current_now >= fifteen_min_overdue_time and db_s_not < 2:
+                        dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
+                        session.execute(
+                            f"UPDATE {table_name} SET supervisor_notified = 2 WHERE log_date = :c_date AND tech_name = :t_name AND slot_id = :s_id",
+                            {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num}
+                        )
+                        state_changed = True
+
+        chk_row = session.execute(
+            "SELECT reminder_time, reminder_sent, supervisor_escaped FROM daily_checklist WHERE log_date = :c_date",
+            {"c_date": CURRENT_DATE}
+        ).fetchone()
         
-        for row in active_timers:
-            worker = row["tech_name"]
-            slot_num = row["slot_id"]
-            db_start = row["start_time"]
-            db_dur_min = row["duration_minutes"]
-            db_t_not = row["tech_notified"]
-            db_s_not = row["supervisor_notified"]
-            
-            start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
-            end_time = start_time + timedelta(minutes=db_dur_min)
-            escalation_time = end_time + timedelta(minutes=10)
-            fifteen_min_overdue_time = end_time + timedelta(minutes=15)
-            
-            if current_now >= end_time:
-                # Fire Initial Technician Alerts once at expiration marker
-                if db_t_not == 0:
-                    bg_cursor.execute("SELECT tech_email, tech_webhook FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
-                    roster_profile = bg_cursor.fetchone()
-                    tech_email = roster_profile["tech_email"] if roster_profile else None
-                    tech_webhook = roster_profile["tech_webhook"] if roster_profile else None
+        if chk_row:
+            try:
+                t_obj = datetime.strptime(chk_row.reminder_time, "%H:%M").time()
+                current_time_now = datetime.now(EASTERN_TZ) if EASTERN_TZ else datetime.now()
+                deadline_datetime = datetime.combine(current_time_now.date(), t_obj)
+                if EASTERN_TZ:
+                    deadline_datetime = deadline_datetime.replace(tzinfo=EASTERN_TZ)
                     
-                    if tech_email:
-                        dispatch_individual_tech_notification(tech_email, worker, slot_num, label)
-                    if tech_webhook:
-                        dispatch_individual_chat_alert(tech_webhook, f"⏱️ **Timer Expired!**\nYour tracking block timer has ended for *{label}* (Slot {slot_num}).\n\nPlease log counts.")
-                    dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {label} Slot {slot_num} without metrics.")
-                    
-                    bg_cursor.execute(f"UPDATE {table_name} SET tech_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                    state_changed = True
+                dilation_deadline = deadline_datetime + timedelta(minutes=30)
                 
-                # Fire Tier 1 Escalation at 10 Minutes post-deadline
-                if current_now >= escalation_time and db_s_not == 0:
-                    dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {label} Slot {slot_num}.")
-                    bg_cursor.execute(f"UPDATE {table_name} SET supervisor_notified=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                if current_time_now >= deadline_datetime and chk_row.reminder_sent == 0:
+                    initial_warning_msg = (
+                        f"📋 **FACILITY OPERATIONS REQUIREMENT REMINDER**\n\n"
+                        f"The **Global Facility Daily Queue Verification Log** deadline has been reached.\n"
+                        f"⏳ **Target Deadline:** {chk_row.reminder_time} EST\n"
+                        f"⚠️ *Please ensure all daily backlogs and checklist audits are finalized and submitted.*"
+                    )
+                    dispatch_real_time_alert(initial_warning_msg)
+                    session.execute("UPDATE daily_checklist SET reminder_sent = 1 WHERE log_date = :c_date", {"c_date": CURRENT_DATE})
                     state_changed = True
                     
-                # Fire Tier 2 Critical Alert at 15 Minutes post-deadline
-                if current_now >= fifteen_min_overdue_time and db_s_not < 2:
-                    dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
-                    bg_cursor.execute(f"UPDATE {table_name} SET supervisor_notified=2 WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
+                if current_time_now >= dilation_deadline and chk_row.supervisor_escaped == 0:
+                    escalation_chat_msg = (
+                        f"⏰ **🚨 CRITICAL OPERATIONS ESCALATION** 🚨 ⏰\n\n"
+                        f"The **Global Facility Daily Queue Verification Log** has NOT been submitted for today.\n"
+                        f"⏳ **Target Deadline:** {chk_row.reminder_time} EST\n"
+                        f"❌ **Status:** Overdue by 30+ minutes without supervisor sign-off.\n\n"
+                        f"Please complete and log all verification vectors immediately."
+                    )
+                    dispatch_real_time_alert(escalation_chat_msg)
+                    session.execute("UPDATE daily_checklist SET supervisor_escaped = 1 WHERE log_date = :c_date", {"c_date": CURRENT_DATE})
                     state_changed = True
+            except Exception as e:
+                print(f"Checklist Background Engine Processing Error: {str(e)}")
 
-    # 3B. TICK THROUGH SYSTEM-WIDE CHECKLIST SUBMISSION VERIFICATION DEADLINES
-    bg_cursor.execute("SELECT reminder_time, reminder_sent, supervisor_escaped FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
-    chk_row = bg_cursor.fetchone()
-    
-    if chk_row:
-        try:
-            t_obj = datetime.strptime(chk_row["reminder_time"], "%H:%M").time()
-            if EASTERN_TZ:
-                current_time_now = datetime.now(EASTERN_TZ)
-            else:
-                current_time_now = datetime.now()
-                
-            deadline_datetime = datetime.combine(current_time_now.date(), t_obj)
-            if EASTERN_TZ:
-                deadline_datetime = deadline_datetime.replace(tzinfo=EASTERN_TZ)
-                
-            dilation_deadline = deadline_datetime + timedelta(minutes=30)
-            
-            # Action A: Exactly at configured deadline -> Fire initial required warning notification
-            if current_time_now >= deadline_datetime and chk_row["reminder_sent"] == 0:
-                initial_warning_msg = (
-                    f"📋 **FACILITY OPERATIONS REQUIREMENT REMINDER**\n\n"
-                    f"The **Global Facility Daily Queue Verification Log** deadline has been reached.\n"
-                    f"⏳ **Target Deadline:** {chk_row['reminder_time']} EST\n"
-                    f"⚠️ *Please ensure all daily backlogs and checklist audits are finalized and submitted.*"
-                )
-                dispatch_real_time_alert(initial_warning_msg)
-                bg_cursor.execute("UPDATE daily_checklist SET reminder_sent=1 WHERE log_date=?", (CURRENT_DATE,))
-                state_changed = True
-                
-            # Action B: 30 Minutes Overdue -> Fire Critical Escalation Alert
-            if current_time_now >= dilation_deadline and chk_row["supervisor_escaped"] == 0:
-                escalation_chat_msg = (
-                    f"⏰ **🚨 CRITICAL OPERATIONS ESCALATION** 🚨 ⏰\n\n"
-                    f"The **Global Facility Daily Queue Verification Log** has NOT been submitted for today.\n"
-                    f"⏳ **Target Deadline:** {chk_row['reminder_time']} EST\n"
-                    f"❌ **Status:** Overdue by 30+ minutes without supervisor sign-off.\n\n"
-                    f"Please complete and log all verification vectors immediately."
-                )
-                dispatch_real_time_alert(escalation_chat_msg)
-                bg_cursor.execute("UPDATE daily_checklist SET supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
-                state_changed = True
-        except Exception as e:
-            print(f"Checklist Background Engine Processing Error: {str(e)}")
+        if state_changed:
+            session.commit()
+            st.session_state["refresh_counter"] += 1
+            st.rerun()
 
-    if state_changed:
-        bg_conn.commit()
-        st.session_state["refresh_counter"] += 1
-        st.rerun()
-    bg_conn.close()
-
-# Start background engine loop
 execution_global_background_automation_engine()
 
 # --- 4. GLOBAL SIDEBAR MANAGEMENT CONTROL HUB ---
 st.sidebar.header("🔐 Global System Control Deck")
 pwd_input = st.sidebar.text_input("Enter Manager Override Password:", type="password", key="mgr_pwd_input_field")
-is_manager = False
+is_manager = pwd_input == "admin123"
 
-if pwd_input == "admin123":
+if is_manager:
     st.sidebar.success("🔑 Admin Privileges Active")
-    is_manager = True
 elif pwd_input != "":
     st.sidebar.error("❌ Incorrect Password")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Quick Add Personnel to Floor")
 
-sidebar_db_cursor = conn.cursor()
-sidebar_db_cursor.execute("SELECT tech_name, tech_email, tech_webhook FROM global_roster ORDER BY tech_name ASC")
-saved_profiles = sidebar_db_cursor.fetchall()
+with db_conn.session as session:
+    saved_profiles = session.execute("SELECT tech_name, tech_email, tech_webhook FROM global_roster ORDER BY tech_name ASC").fetchall()
 
-profile_options = ["-- Create New Profile --"] + [p["tech_name"] for p in saved_profiles]
+profile_options = ["-- Create New Profile --"] + [p.tech_name for p in saved_profiles]
 
 if "selected_profile_state" not in st.session_state:
     st.session_state["selected_profile_state"] = "-- Create New Profile --"
 
-current_index = 0
-if st.session_state["selected_profile_state"] in profile_options:
-    current_index = profile_options.index(st.session_state["selected_profile_state"])
-
+current_index = profile_options.index(st.session_state["selected_profile_state"]) if st.session_state["selected_profile_state"] in profile_options else 0
 selected_profile = st.sidebar.selectbox("Select Existing Profile (Optional):", options=profile_options, index=current_index)
 st.session_state["selected_profile_state"] = selected_profile
 
 default_name, default_email, default_webhook = "", "", ""
 if selected_profile != "-- Create New Profile --":
-    matched_profile = next((p for p in saved_profiles if p["tech_name"] == selected_profile), None)
+    matched_profile = next((p for p in saved_profiles if p.tech_name == selected_profile), None)
     if matched_profile:
-        default_name = matched_profile["tech_name"]
-        default_email = matched_profile["tech_email"]
-        default_webhook = matched_profile["tech_webhook"]
+        default_name = matched_profile.tech_name
+        default_email = matched_profile.tech_email
+        default_webhook = matched_profile.tech_webhook
 
 with st.sidebar.form(key="sidebar_personnel_deployment_form", clear_on_submit=True):
     dest_dept = st.selectbox("Assign to Department:", options=[
@@ -377,12 +390,14 @@ with st.sidebar.form(key="sidebar_personnel_deployment_form", clear_on_submit=Tr
 
 if submit_deployment:
     if new_worker_name and new_worker_email:
-        sidebar_cursor = conn.cursor()
-        sidebar_cursor.execute("""
-            INSERT OR REPLACE INTO global_roster (dept_prefix, tech_name, tech_email, tech_webhook) 
-            VALUES (?, ?, ?, ?)
-        """, (dest_dept[1], new_worker_name, new_worker_email, new_worker_webhook))
-        conn.commit()
+        with db_conn.session as session:
+            session.execute("""
+                INSERT INTO global_roster (dept_prefix, tech_name, tech_email, tech_webhook) 
+                VALUES (:prefix, :name, :email, :webhook)
+                ON CONFLICT (dept_prefix, tech_name) DO UPDATE 
+                SET tech_email = EXCLUDED.tech_email, tech_webhook = EXCLUDED.tech_webhook
+            """, {"prefix": dest_dept[1], "name": new_worker_name, "email": new_worker_email, "webhook": new_worker_webhook})
+            session.commit()
         st.session_state["selected_profile_state"] = "-- Create New Profile --"
         st.session_state["refresh_counter"] += 1
         st.rerun()
@@ -391,15 +406,12 @@ if submit_deployment:
 
 # --- 5. TOP-LEVEL BACKLOG MATRIX INPUT INJECTOR ---
 def render_global_backlog_ribbon():
-    backlog_cursor = conn.cursor()
-    backlog_cursor.execute("SELECT * FROM floor_backlogs WHERE log_date=?", (CURRENT_DATE,))
-    row = backlog_cursor.fetchone()
-    
-    if not row:
-        backlog_cursor.execute("INSERT OR IGNORE INTO floor_backlogs (log_date) VALUES (?)", (CURRENT_DATE,))
-        conn.commit()
-        backlog_cursor.execute("SELECT * FROM floor_backlogs WHERE log_date=?", (CURRENT_DATE,))
-        row = backlog_cursor.fetchone()
+    with db_conn.session as session:
+        row = session.execute("SELECT * FROM floor_backlogs WHERE log_date = :c_date", {"c_date": CURRENT_DATE}).fetchone()
+        if not row:
+            session.execute("INSERT INTO floor_backlogs (log_date) VALUES (:c_date) ON CONFLICT (log_date) DO NOTHING", {"c_date": CURRENT_DATE})
+            session.commit()
+            row = session.execute("SELECT * FROM floor_backlogs WHERE log_date = :c_date", {"c_date": CURRENT_DATE}).fetchone()
 
     st.markdown("<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Global Real-Time Operational Queue Volume Snapshots</h4>", unsafe_allow_html=True)
     b_cols = st.columns(9)
@@ -413,16 +425,17 @@ def render_global_backlog_ribbon():
     updates = {}
     for i, (label, db_field) in enumerate(fields):
         with b_cols[i]:
-            current_value = row[db_field] if row else 0
+            current_value = getattr(row, db_field) if row else 0
             new_val = st.number_input(label, min_value=0, step=1, value=int(current_value), key=f"top_bl_{db_field}_{st.session_state['refresh_counter']}")
             if new_val != current_value:
                 updates[db_field] = new_val
 
     if updates:
-        set_clause = ", ".join([f"{k}=?" for k in updates.keys()])
-        params = list(updates.values()) + [CURRENT_DATE]
-        backlog_cursor.execute(f"UPDATE floor_backlogs SET {set_clause} WHERE log_date=?", params)
-        conn.commit()
+        set_clause = ", ".join([f"{k}=:{k}" for k in updates.keys()])
+        updates["c_date"] = CURRENT_DATE
+        with db_conn.session as session:
+            session.execute(f"UPDATE floor_backlogs SET {set_clause} WHERE log_date=:c_date", updates)
+            session.commit()
         st.session_state["refresh_counter"] += 1
         st.rerun()
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
@@ -430,14 +443,11 @@ def render_global_backlog_ribbon():
 # --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
 @st.fragment(run_every="5s")
 def render_synchronized_matrix(db_table, prefix, dept_label):
-    local_cursor = conn.cursor()
+    with db_conn.session as session:
+        goals_dict = {r.queue_name: r.goal_target for r in session.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix = :pfx", {"pfx": prefix}).fetchall()}
+        roster_rows = session.execute("SELECT tech_name, tech_email, tech_webhook FROM global_roster WHERE dept_prefix = :pfx", {"pfx": prefix}).fetchall()
     
-    local_cursor.execute("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=?", (prefix,))
-    goals_dict = {row["queue_name"]: row["goal_target"] for row in local_cursor.fetchall()}
-    
-    local_cursor.execute("SELECT tech_name, tech_email, tech_webhook FROM global_roster WHERE dept_prefix=?", (prefix,))
-    roster_rows = local_cursor.fetchall()
-    active_roster = {row["tech_name"]: {"email": row["tech_email"], "webhook": row["tech_webhook"]} for row in roster_rows}
+    active_roster = {row.tech_name: {"email": row.tech_email, "webhook": row.tech_webhook} for row in roster_rows}
 
     if not active_roster:
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
@@ -448,15 +458,15 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
     for worker, tech_profiles in active_roster.items():
         w_id = hashlib.md5(worker.encode('utf-8')).hexdigest()[:8]
         tech_email = tech_profiles["email"]
-        tech_webhook = tech_profiles["webhook"]
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         
         if is_mgr_active:
             if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}_{st.session_state['refresh_counter']}"):
-                local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
-                local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
-                conn.commit()
+                with db_conn.session as session:
+                    session.execute(f"DELETE FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name", {"c_date": CURRENT_DATE, "t_name": worker})
+                    session.execute("DELETE FROM global_roster WHERE dept_prefix=:pfx AND tech_name=:t_name", {"pfx": prefix, "t_name": worker})
+                    session.commit()
                 st.session_state["selected_profile_state"] = "-- Create New Profile --"
                 st.session_state["refresh_counter"] += 1
                 st.rerun()
@@ -468,47 +478,41 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                 with st.container(border=True):
                     st.markdown(f"**🕒 Slot {slot_num}**")
                     
-                    local_cursor.execute(f"SELECT * FROM {db_table} WHERE log_date=? AND tech_name=? AND slot_id=?", (CURRENT_DATE, worker, slot_num))
-                    slot_row = local_cursor.fetchone()
+                    with db_conn.session as session:
+                        slot_row = session.execute(f"SELECT * FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id", {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num}).fetchone()
                     
                     if is_mgr_active:
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
                         
                         if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary"):
-                            if slot_num == 1:
-                                local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (prefix, worker))
-                                local_cursor.execute(f"DELETE FROM {db_table} WHERE log_date=? AND tech_name=?", (CURRENT_DATE, worker))
-                            else:
-                                local_cursor.execute(f"""
-                                    UPDATE {db_table} 
-                                    SET queue=NULL, goal=NULL, start_time=NULL, duration_minutes=60, input_number=NULL, 
-                                        tech_notified=0, supervisor_notified=0, submitted=0 
-                                    WHERE log_date=? AND tech_name=? AND slot_id=?
-                                """, (CURRENT_DATE, worker, slot_num))
+                            with db_conn.session as session:
+                                if slot_num == 1:
+                                    session.execute("DELETE FROM global_roster WHERE dept_prefix=:pfx AND tech_name=:t_name", {"pfx": prefix, "t_name": worker})
+                                    session.execute(f"DELETE FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name", {"c_date": CURRENT_DATE, "t_name": worker})
+                                else:
+                                    session.execute(f"""
+                                        UPDATE {db_table} 
+                                        SET queue=NULL, goal=NULL, start_time=NULL, duration_minutes=60, input_number=NULL, 
+                                            tech_notified=0, supervisor_notified=0, submitted=0 
+                                        WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id
+                                    """, {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                session.commit()
                             
-                            conn.commit()
-                            
-                            state_keys_to_clear = [
-                                f"num_{prefix}_{w_id}_{slot_num}", 
-                                f"q_{prefix}_{w_id}_{slot_num}", 
-                                f"dur_{prefix}_{w_id}_{slot_num}"
-                            ]
-                            for key in state_keys_to_clear:
-                                if key in st.session_state:
-                                    del st.session_state[key]
-                            
+                            for key in [f"num_{prefix}_{w_id}_{slot_num}", f"q_{prefix}_{w_id}_{slot_num}", f"dur_{prefix}_{w_id}_{slot_num}"]:
+                                if key in st.session_state: del st.session_state[key]
                             st.session_state["refresh_counter"] += 1
                             st.rerun()
                             
-                        if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary", disabled=(slot_row is None or slot_row["start_time"] is None)):
-                            if slot_row is not None and slot_row["start_time"] is not None:
+                        if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True, type="secondary", disabled=(slot_row is None or slot_row.start_time is None)):
+                            if slot_row is not None and slot_row.start_time is not None:
                                 now_reset_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                local_cursor.execute(f"UPDATE {db_table} SET start_time=?, tech_notified=0, supervisor_notified=0, submitted=0 WHERE log_date=? AND tech_name=? AND slot_id=?", (now_reset_str, CURRENT_DATE, worker, slot_num))
-                                conn.commit()
+                                with db_conn.session as session:
+                                    session.execute(f"UPDATE {db_table} SET start_time=:st, tech_notified=0, supervisor_notified=0, submitted=0 WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id", {"st": now_reset_str, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                    session.commit()
                                 st.session_state["refresh_counter"] += 1
                                 st.rerun()
                     
-                    if not slot_row or slot_row["queue"] is None:
+                    if not slot_row or slot_row.queue is None:
                         if goals_dict:
                             chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}")
                             base_goal_str = goals_dict[chosen_q]
@@ -530,19 +534,22 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             
                             if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", use_container_width=True):
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                local_cursor.execute(f"""
-                                    INSERT OR REPLACE INTO {db_table} 
-                                    (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes, input_number, tech_notified, supervisor_notified, submitted) 
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0)
-                                """, (CURRENT_DATE, worker, slot_num, chosen_q, base_goal_str, now_str, chosen_dur_min))
-                                conn.commit()
+                                with db_conn.session as session:
+                                    session.execute(f"""
+                                        INSERT INTO {db_table} 
+                                        (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes, input_number, tech_notified, supervisor_notified, submitted) 
+                                        VALUES (:c_date, :t_name, :s_id, :queue, :goal, :st, :dur, NULL, 0, 0, 0)
+                                        ON CONFLICT (log_date, tech_name, slot_id) DO UPDATE 
+                                        SET queue=EXCLUDED.queue, goal=EXCLUDED.goal, start_time=EXCLUDED.start_time, duration_minutes=EXCLUDED.duration_minutes, submitted=0, input_number=NULL
+                                    """, {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num, "queue": chosen_q, "goal": base_goal_str, "st": now_str, "dur": chosen_dur_min})
+                                    session.commit()
                                 st.session_state["refresh_counter"] += 1
                                 st.rerun()
                         else:
                             st.warning("Configure queues in Management panel.")
                     else:
-                        db_queue, db_goal, db_start, db_input = slot_row["queue"], slot_row["goal"], slot_row["start_time"], slot_row["input_number"]
-                        db_t_not, db_s_not, db_sub, db_dur_min = slot_row["tech_notified"], slot_row["supervisor_notified"], slot_row["submitted"], slot_row["duration_minutes"]
+                        db_queue, db_goal, db_start, db_input = slot_row.queue, slot_row.goal, slot_row.start_time, slot_row.input_number
+                        db_t_not, db_s_not, db_sub, db_dur_min = slot_row.tech_notified, slot_row.supervisor_notified, slot_row.submitted, slot_row.duration_minutes
                         
                         numeric_match = re.search(r'\d+', str(db_goal))
                         if numeric_match:
@@ -579,21 +586,15 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             if st.button("Submit Metrics", key=f"sub_{prefix}_{w_id}_{slot_num}_{st.session_state['refresh_counter']}", type="primary", use_container_width=True) and val is not None:
                                 time_logged_now = datetime.now()
                                 elapsed_delta = time_logged_now - start_time
-                                
-                                # 1. Calculate precise minutes elapsed since the clock started
                                 actual_minutes_used = max(1, int(elapsed_delta.total_seconds() / 60.0))
                                 
-                                # 2. Extract base hourly target rate
                                 base_hourly_rate = 0
                                 match_digits = re.search(r'\d+', str(db_goal))
-                                if match_digits: 
-                                    base_hourly_rate = int(match_digits.group())
+                                if match_digits: base_hourly_rate = int(match_digits.group())
                                 
-                                # 3. Calculate dynamic target threshold strictly on PRO-RATA active minutes
                                 dynamic_target_threshold = max(1, int(float(base_hourly_rate) * (float(actual_minutes_used) / 60.0)))
                                 is_escalated = 1 if val < dynamic_target_threshold else 0
                                 
-                                # 4. Immediately fire the Google Chat notification if they fell under their pro-rata target
                                 if is_escalated:
                                     dispatch_real_time_alert(
                                         f"📉 **PRODUCTION ALERT: GOAL NOT MET (PRO-RATA)** 📉\n"
@@ -604,9 +605,17 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                         f"📥 **Logged Production:** **{val}** units"
                                     )
                                 
-                                local_cursor.execute("INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (CURRENT_DATE, dept_label, worker, slot_num, db_queue, db_goal, val, is_escalated, time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), actual_minutes_used))
-                                local_cursor.execute(f"UPDATE {db_table} SET input_number=?, submitted=1 WHERE log_date=? AND tech_name=? AND slot_id=?", (val, CURRENT_DATE, worker, slot_num))
-                                conn.commit()
+                                with db_conn.session as session:
+                                    session.execute("""
+                                        INSERT INTO metrics_history (log_date, department, tech_name, slot_id, queue, goal, input_number, escalated, timestamp, duration_minutes) 
+                                        VALUES (:c_date, :dept, :t_name, :s_id, :queue, :goal, :val, :esc, :ts, :dur)
+                                    """, {"c_date": CURRENT_DATE, "dept": dept_label, "t_name": worker, "s_id": slot_num, "queue": db_queue, "goal": db_goal, "val": val, "esc": is_escalated, "ts": time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), "dur": actual_minutes_used})
+                                    
+                                    session.execute(f"""
+                                        UPDATE {db_table} SET input_number=:val, submitted=1 
+                                        WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id
+                                    """, {"val": val, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                    session.commit()
                                 st.session_state["refresh_counter"] += 1
                                 st.rerun()
                         else:
@@ -633,7 +642,6 @@ with tab_mgmt:
         st.warning("🔒 Access Locked: Enter the valid password (`admin123`) in the left sidebar to unlock modifications.")
     else:
         m_col1, m_col2 = st.columns(2)
-        local_cursor = conn.cursor()
         
         with m_col1:
             st.subheader("➕ Create Custom Queue Trackers")
@@ -643,32 +651,35 @@ with tab_mgmt:
             
             if st.button("Save New Queue Component", type="primary", use_container_width=True, key="mgmt_save_btn"):
                 if new_q_name and new_q_goal:
-                    local_cursor.execute("INSERT OR REPLACE INTO dynamic_queues VALUES (?, ?, ?)", (target_dept[1], new_q_name, new_q_goal))
-                    conn.commit()
+                    with db_conn.session as session:
+                        session.execute("""
+                            INSERT INTO dynamic_queues (dept_prefix, queue_name, goal_target) VALUES (:prefix, :name, :target)
+                            ON CONFLICT (dept_prefix, queue_name) DO UPDATE SET goal_target = EXCLUDED.goal_target
+                        """, {"prefix": target_dept[1], "name": new_q_name, "target": new_q_goal})
+                        session.commit()
                     st.success(f"Added baseline operational tracking line: {new_q_name} at {new_q_goal}/hr")
                     st.session_state["refresh_counter"] += 1
                     st.rerun()
             
             st.markdown("<br><br>", unsafe_allow_html=True)
             st.subheader("🗑 ... Decommission Employee Profiles")
-            local_cursor.execute("SELECT dept_prefix, tech_name FROM global_roster ORDER BY tech_name ASC")
-            all_staff = local_cursor.fetchall()
+            with db_conn.session as session:
+                all_staff = session.execute("SELECT dept_prefix, tech_name FROM global_roster ORDER BY tech_name ASC").fetchall()
             
             if not all_staff:
                 st.info("No saved technician profiles found.")
             else:
                 for staff in all_staff:
-                    s_prefix, s_name = staff["dept_prefix"], staff["tech_name"]
+                    s_prefix, s_name = staff.dept_prefix, staff.tech_name
                     d_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[s_prefix]
                     s_col1, s_col2 = st.columns([2.5, 1])
                     s_col1.markdown(f"👤 **{s_name}** `({d_lbl})`")
                     if s_col2.button("Remove Profile", key=f"del_staff_{s_prefix}_{hash(s_name)}_{st.session_state['refresh_counter']}", type="secondary", use_container_width=True):
-                        local_cursor.execute("DELETE FROM global_roster WHERE dept_prefix=? AND tech_name=?", (s_prefix, s_name))
-                        local_cursor.execute(f"DELETE FROM data_entry_slots WHERE log_date=? AND tech_name=?", (CURRENT_DATE, s_name))
-                        local_cursor.execute(f"DELETE FROM call_center_slots WHERE log_date=? AND tech_name=?", (CURRENT_DATE, s_name))
-                        local_cursor.execute(f"DELETE FROM shipping_slots WHERE log_date=? AND tech_name=?", (CURRENT_DATE, s_name))
-                        local_cursor.execute(f"DELETE FROM fill_slots WHERE log_date=? AND tech_name=?", (CURRENT_DATE, s_name))
-                        conn.commit()
+                        with db_conn.session as session:
+                            session.execute("DELETE FROM global_roster WHERE dept_prefix=:prefix AND tech_name=:name", {"prefix": s_prefix, "name": s_name})
+                            for t in ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]:
+                                session.execute(f"DELETE FROM {t} WHERE log_date=:c_date AND tech_name=:name", {"c_date": CURRENT_DATE, "name": s_name})
+                            session.commit()
                         st.session_state["selected_profile_state"] = "-- Create New Profile --"
                         st.success(f"Decommissioned {s_name} from system.")
                         st.session_state["refresh_counter"] += 1
@@ -677,28 +688,28 @@ with tab_mgmt:
                     
         with m_col2:
             st.subheader("📋 Current Active Queue Database Matrix")
-            local_cursor.execute("SELECT dept_prefix, queue_name, goal_target FROM dynamic_queues")
-            all_qs = local_cursor.fetchall()
+            with db_conn.session as session:
+                all_qs = session.execute("SELECT dept_prefix, queue_name, goal_target FROM dynamic_queues").fetchall()
             
             if not all_qs:
                 st.info("No customized tracking queues available.")
             else:
                 for q_row in all_qs:
-                    q_prefix, q_name, q_goal = q_row["dept_prefix"], q_row["queue_name"], q_row["goal_target"]
+                    q_prefix, q_name, q_goal = q_row.dept_prefix, q_row.queue_name, q_row.goal_target
                     dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
                     with st.container(border=True):
                         st.markdown(f"**[{dept_lbl}]** `{q_name}`")
                         st.caption(f"Base Hourly Vector: {q_goal} per hour")
                         if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{hash(q_name)}_{st.session_state['refresh_counter']}", use_container_width=True):
-                            local_cursor.execute("DELETE FROM dynamic_queues WHERE dept_prefix=? AND queue_name=?", (q_prefix, q_name))
-                            conn.commit()
+                            with db_conn.session as session:
+                                session.execute("DELETE FROM dynamic_queues WHERE dept_prefix=:prefix AND queue_name=:name", {"prefix": q_prefix, "name": q_name})
+                                session.commit()
                             st.session_state["refresh_counter"] += 1
                             st.rerun()
 
 # --- 9. ADVANCED HISTORICAL & TRENDS ANALYTICS TAB ---
 with tab_analytics:
     st.header("📊 Cumulative Corporate Analytics Ledger")
-    local_cursor = conn.cursor()
     
     date_cols = st.columns(2)
     start_filt = date_cols[0].date_input("Start History Date", value=datetime.now() - timedelta(days=30))
@@ -707,9 +718,9 @@ with tab_analytics:
     query = """
         SELECT log_date, department, tech_name, queue, goal, input_number, duration_minutes 
         FROM metrics_history 
-        WHERE log_date >= ? AND log_date <= ?
+        WHERE log_date >= :start AND log_date <= :end
     """
-    df_analytics = pd.read_sql_query(query, sqlite3.connect("facility_matrix_v5.db"), params=(start_filt.strftime("%Y-%m-%d"), end_filt.strftime("%Y-%m-%d")))
+    df_analytics = db_conn.query(query, params={"start": start_filt.strftime("%Y-%m-%d"), "end": end_filt.strftime("%Y-%m-%d")})
     
     if df_analytics.empty:
         st.info("💡 No production records logged during this timeframe configuration.")
@@ -728,9 +739,7 @@ with tab_analytics:
             def recalculate_pro_rata_metrics(row):
                 raw_goal_str = str(row["goal"])
                 match = re.search(r'\d+', raw_goal_str)
-                if not match:
-                    return pd.Series([0, "✅ Met Goal"])
-                
+                if not match: return pd.Series([0, "✅ Met Goal"])
                 base_hourly_target = int(match.group())
                 actual_min = max(1, int(row["duration_minutes"]))
                 pro_rated_calculated_goal = max(1, int(float(base_hourly_target) * (float(actual_min) / 60.0)))
@@ -746,11 +755,7 @@ with tab_analytics:
                 "log_date": "Date", "tech_name": "Technician Name", "department": "Department", "queue": "Assigned Queue", "input_number": "Logged Units"
             })
             
-            def highlight_status(val):
-                color = '#ffccd5' if val == '❌ Missed Goal' else '#d1e7dd'
-                return f'background-color: {color}'
-                
-            st.dataframe(display_df.style.map(highlight_status, subset=['True Performance Status']), use_container_width=True, hide_index=True)
+            st.dataframe(display_df.style.map(lambda val: 'background-color: #ffccd5' if val == '❌ Missed Goal' else 'background-color: #d1e7dd', subset=['True Performance Status']), use_container_width=True, hide_index=True)
             
             true_missed_count = (df_filtered["True Performance Status"] == "❌ Missed Goal").sum()
             
@@ -763,39 +768,34 @@ with tab_analytics:
             
         st.markdown("---")
         st.subheader("📈 Operational Velocity Trend Analysis")
-        
         trend_view_option = st.radio("Group Trend Visualization By:", ["Individual Technician Trends", "Queue Volume Trends"], horizontal=True)
         if trend_view_option == "Individual Technician Trends":
-            trend_df = df_filtered.groupby(["log_date", "tech_name"])["input_number"].sum().unstack(fill_value=0)
-            st.line_chart(trend_df)
+            st.line_chart(df_filtered.groupby(["log_date", "tech_name"])["input_number"].sum().unstack(fill_value=0))
         else:
-            trend_df = df_filtered.groupby(["log_date", "queue"])["input_number"].sum().unstack(fill_value=0)
-            st.line_chart(trend_df)
+            st.line_chart(df_filtered.groupby(["log_date", "queue"])["input_number"].sum().unstack(fill_value=0))
 
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
 with st.container(border=True):
     st.header("📋 Global Facility Daily Queue Verification Log")
-    local_cursor = conn.cursor()
     
-    local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
-    chk = local_cursor.fetchone()
-    
-    if not chk:
-        local_cursor.execute("INSERT OR IGNORE INTO daily_checklist (log_date, reminder_sent, supervisor_escaped, reminder_time) VALUES (?, 0, 0, '17:00')", (CURRENT_DATE,))
-        conn.commit()
-        local_cursor.execute("SELECT * FROM daily_checklist WHERE log_date=?", (CURRENT_DATE,))
-        chk = local_cursor.fetchone()
+    with db_conn.session as session:
+        chk = session.execute("SELECT * FROM daily_checklist WHERE log_date = :c_date", {"c_date": CURRENT_DATE}).fetchone()
+        if not chk:
+            session.execute("INSERT INTO daily_checklist (log_date, reminder_sent, supervisor_escaped, reminder_time) VALUES (:c_date, 0, 0, '17:00') ON CONFLICT (log_date) DO NOTHING", {"c_date": CURRENT_DATE})
+            session.commit()
+            chk = session.execute("SELECT * FROM daily_checklist WHERE log_date = :c_date", {"c_date": CURRENT_DATE}).fetchone()
         
     c_col, f_col = st.columns([3.2, 1])
     
     with f_col:
         with st.container(border=True):
-            t_obj = datetime.strptime(chk["reminder_time"], "%H:%M").time()
+            t_obj = datetime.strptime(chk.reminder_time, "%H:%M").time()
             new_target_time = st.time_input("Set Verification Deadline (EST):", value=t_obj, key=f"checklist_deadline_widget_{st.session_state['refresh_counter']}")
-            if new_target_time.strftime("%H:%M") != chk["reminder_time"]:
-                local_cursor.execute("UPDATE daily_checklist SET reminder_time=?, reminder_sent=0, supervisor_escaped=0 WHERE log_date=?", (new_target_time.strftime("%H:%M"), CURRENT_DATE))
-                conn.commit()
+            if new_target_time.strftime("%H:%M") != chk.reminder_time:
+                with db_conn.session as session:
+                    session.execute("UPDATE daily_checklist SET reminder_time=:rt, reminder_sent=0, supervisor_escaped=0 WHERE log_date=:c_date", {"rt": new_target_time.strftime("%H:%M"), "c_date": CURRENT_DATE})
+                    session.commit()
                 st.session_state["refresh_counter"] += 1
                 st.rerun()
             
@@ -804,10 +804,7 @@ with st.container(border=True):
         
         def parse_stored_date(val):
             if not val or str(val).strip() == "": return datetime.now().date()
-            if isinstance(val, type(datetime.now().date())): return val
-            try:
-                val_str = str(val).strip()
-                return datetime.strptime(val_str, "%Y-%m-%d").date() if "-" in val_str else datetime.strptime(val_str, "%m/%d/%Y").date()
+            try: return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
             except: return datetime.now().date()
 
         form_states = {}
@@ -816,47 +813,31 @@ with st.container(border=True):
             st.markdown(f"##### {label}")
             cols = st.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
             
-            row_keys = list(chk.keys()) if chk else []
-            stored_status = chk[db_prefix] if (db_prefix in row_keys and chk[db_prefix]) else "Pending"
-            stored_odt = chk[f"{db_prefix}_date"] if f"{db_prefix}_date" in row_keys else ""
-            stored_tdt = chk[f"{db_prefix}_target"] if f"{db_prefix}_target" in row_keys else ""
-            stored_by = chk[f"{db_prefix}_by"] if f"{db_prefix}_by" in row_keys else ""
-            stored_notes = chk[f"{db_prefix}_notes"] if f"{db_prefix}_notes" in row_keys else ""
+            stored_status = getattr(chk, db_prefix, "Pending") if chk else "Pending"
+            stored_odt = getattr(chk, f"{db_prefix}_date", "") if chk else ""
+            stored_tdt = getattr(chk, f"{db_prefix}_target", "") if chk else ""
+            stored_by = getattr(chk, f"{db_prefix}_by", "") if chk else ""
+            stored_notes = getattr(chk, f"{db_prefix}_notes", "") if chk else ""
 
             curr_status = cols[0].selectbox("Status", options=opt, index=opt.index(stored_status) if stored_status in opt else 0, key=f"status_{prefix_key}_{CURRENT_DATE}_{st.session_state['refresh_counter']}")
             curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}_{CURRENT_DATE}_{st.session_state['refresh_counter']}")
             curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}_{st.session_state['refresh_counter']}")
             
-            date_delta = 0
             try:
-                if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"]:
-                    date_delta = (datetime.now().date() - curr_odt).days
-                else:
-                    date_delta = (curr_tdt - curr_odt).days
-                
-                header_html = "<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div>"
+                date_delta = (datetime.now().date() - curr_odt).days if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"] else (curr_tdt - curr_odt).days
                 is_red = False
                 if date_delta > 0:
-                    if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims"]:
-                        is_red = True
-                    elif db_prefix in ["ai_tech_check", "rejection_queue"] and date_delta > 4:
-                        is_red = True
-                    elif db_prefix == "return_fourteen_queue" and date_delta >= 14:
-                        is_red = True
-                    elif db_prefix not in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims", "ai_tech_check", "rejection_queue", "return_fourteen_queue"] and date_delta >= 7:
-                        is_red = True
+                    if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims"]: is_red = True
+                    elif db_prefix in ["ai_tech_check", "rejection_queue"] and date_delta > 4: is_red = True
+                    elif db_prefix == "return_fourteen_queue" and date_delta >= 14: is_red = True
+                    elif db_prefix not in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims", "ai_tech_check", "rejection_queue", "return_fourteen_queue"] and date_delta >= 7: is_red = True
 
-                if is_red:
-                    badge_html = f"<div style='text-align:center;'><span style='background-color:#f8d7da; color:#842029; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>🚨 {date_delta} Days</span></div>"
-                elif date_delta > 0:
-                    badge_html = f"<div style='text-align:center;'><span style='background-color:#fff3cd; color:#664d03; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>⚠️ {date_delta} Days</span></div>"
-                else:
-                    badge_html = f"<div style='text-align:center;'><span style='background-color:#d1e7dd; color:#0f5132; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>✅ Current</span></div>"
-                
-                cols[3].markdown(f"{header_html}{badge_html}", unsafe_allow_html=True)
+                badge_html = f"<div style='text-align:center;'><span style='background-color:#f8d7da; color:#842029; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>🚨 {date_delta} Days</span></div>" if is_red else (f"<div style='text-align:center;'><span style='background-color:#fff3cd; color:#664d03; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>⚠️ {date_delta} Days</span></div>" if date_delta > 0 else f"<div style='text-align:center;'><span style='background-color:#d1e7dd; color:#0f5132; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>✅ Current</span></div>")
+                cols[3].markdown(f"<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div>{badge_html}", unsafe_allow_html=True)
             except Exception:
                 cols[3].markdown("<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div><div style='text-align:center;'><span style='background-color:#cbd5e1; color:#1e293b; padding:6px 10px; border-radius:4px; font-size:12px;'>-</span></div>", unsafe_allow_html=True)
                 is_red = False
+                date_delta = 0
 
             curr_by = cols[4].text_input("Verified By", value=stored_by, key=f"by_{prefix_key}_{CURRENT_DATE}_{st.session_state['refresh_counter']}")
             curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=f"notes_{prefix_key}_{CURRENT_DATE}_{st.session_state['refresh_counter']}")
@@ -866,7 +847,6 @@ with st.container(border=True):
                 "by": curr_by, "notes": curr_notes, "is_red": is_red, "delta": date_delta
             }
 
-        # Render rows sequentially safely
         render_checklist_row("14 Day Return Queue Checked", "return_fourteen_queue", "ret_14")
         render_checklist_row("AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
         render_checklist_row("Billing Queue Checked", "billing", "bill")
@@ -883,41 +863,26 @@ with st.container(border=True):
 
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # --- BATCH REPORT SAVE & COMPILATION TRIGGER BUTTON ---
         if st.button("💾 Submit Daily Verification Report", type="primary", use_container_width=True, key=f"submit_daily_report_btn_{st.session_state['refresh_counter']}"):
-            up_cursor = conn.cursor()
             deficiency_list = []
             
-            for db_field, data in form_states.items():
-                up_cursor.execute(f"""
-                    UPDATE daily_checklist 
-                    SET {db_field}=?, {db_field}_date=?, {db_field}_target=?, {db_field}_by=?, {db_field}_notes=? 
-                    WHERE log_date=?
-                """, (data["status"], data["odt"], data["tdt"], data["by"], data["notes"], CURRENT_DATE))
+            with db_conn.session as session:
+                for db_field, data in form_states.items():
+                    session.execute(f"""
+                        UPDATE daily_checklist 
+                        SET {db_field}=:status, {db_field}_date=:odt, {db_field}_target=:tdt, {db_field}_by=:by, {db_field}_notes=:notes 
+                        WHERE log_date=:c_date
+                    """, {"status": data["status"], "odt": data["odt"], "tdt": data["tdt"], "by": data["by"], "notes": data["notes"], "c_date": CURRENT_DATE})
+                    
+                    if data["status"] == "No" or data["is_red"]:
+                        deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {'⚠️ STATUS: NO' if data['status'] == 'No' else '🚨 CRITICAL AGING'} | Backlog: {data['delta']} Days" + (f" (Notes: {data['by']} - {data['notes']})" if data['by'] or data['notes'] else ""))
                 
-                if data["status"] == "No" or data["is_red"]:
-                    flag_reason = "⚠️ STATUS: NO" if data["status"] == "No" else "🚨 CRITICAL AGING"
-                    notes_str = f" (Notes: {data['by']} - {data['notes']})" if data['by'] or data['notes'] else ""
-                    deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {flag_reason} | Backlog: {data['delta']} Days{notes_str}")
-            
-            # Ensure submission locks out further automated notifications for today
-            up_cursor.execute("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1 WHERE log_date=?", (CURRENT_DATE,))
-            conn.commit()
+                session.execute("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1 WHERE log_date=:c_date", {"c_date": CURRENT_DATE})
+                session.commit()
             
             if deficiency_list:
-                compiled_violations = "\n\n".join(deficiency_list)
-                if EASTERN_TZ:
-                    ts_str = datetime.now(EASTERN_TZ).strftime('%H:%M:%S')
-                else:
-                    ts_str = datetime.now().strftime('%H:%M:%S')
-                    
-                unified_chat_payload = (
-                    f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n"
-                    f"⏰ **Timestamp:** {ts_str} EST\n"
-                    f"⚠️ *The following operational tracking points require attention:* \n\n"
-                    f"{compiled_violations}"
-                )
-                dispatch_real_time_alert(unified_chat_payload)
+                ts_str = datetime.now(EASTERN_TZ).strftime('%H:%M:%S') if EASTERN_TZ else datetime.now().strftime('%H:%M:%S')
+                dispatch_real_time_alert(f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n⏰ **Timestamp:** {ts_str} EST\n⚠️ *The following operational tracking points require attention:* \n\n" + "\n\n".join(deficiency_list))
                 st.success("Verification data saved. Deficiency summary report compiled and pushed to Google Chat!")
             else:
                 st.success("Verification metrics logged successfully! All operational channels are current.")
