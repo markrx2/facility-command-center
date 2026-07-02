@@ -23,24 +23,44 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 # --- 2. ANTI-FADE & ANTI-BLUR UI OVERRIDE CORE ---
-# This styles the DOM before the heartbeat loop executes, preventing screen dimming.
+# Hardened structural style injectors to completely lock element states during heartbeat intervals.
 st.markdown(
     """
     <style>
-    /* Completely freeze element opacity during auto-refresh rerun cycles */
+    /* 1. Global Opacity Preservation Matrix */
     div[data-testid="stMain"], 
     div[data-testid="stMain"] *, 
     div[data-testid="stBlock"], 
     div[data-testid="stBlock"] *,
+    div[data-testid="element-container"],
+    div[data-testid="element-container"] *,
+    div[data-testid="stVerticalBlock"],
+    div[data-testid="stVerticalBlock"] *,
     [data-baseweb="tab-panel"],
     [data-baseweb="tab-panel"] * {
         opacity: 1 !important;
         transition: none !important;
+        animation: none !important;
+        filter: none !important;
     }
-    /* Stop main background canvas overlay transparency shifts */
-    .stApp, .stAppHeader, .stMainContainer {
+
+    /* 2. Neutralize Streamlit's Default Rerun Transition Overlays */
+    div[data-testid="stAppViewBlockContainer"] {
         opacity: 1 !important;
-        background-color: transparent !important;
+        transition: none !important;
+    }
+
+    /* 3. Freeze App Canvas & Block Structural Changes */
+    .stApp, .stAppHeader, .stMainContainer, .stAppViewContainer {
+        opacity: 1 !important;
+        transition: none !important;
+        animation: none !important;
+    }
+
+    /* 4. Suppress the Dynamic Top-Right Spinning Status Indicators */
+    div[data-testid="stStatusWidget"] {
+        display: none !important;
+        visibility: hidden !important;
     }
     </style>
     """,
