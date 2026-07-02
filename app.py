@@ -22,23 +22,25 @@ st.set_page_config(
     layout="wide", 
     initial_sidebar_state="expanded"
 )
-# --- DISABLE STREAMLIT AUTOREFRESH BLUR & FADE EFFECT (Pasted here!) ---
+# --- 2. ANTI-FADE & ANTI-BLUR UI OVERRIDE CORE ---
+# This styles the DOM before the heartbeat loop executes, preventing screen dimming.
 st.markdown(
     """
     <style>
-    /* Block the main container from fading during rerun events */
-    div[data-testid="stMain"], div[data-testid="stMain" ] * {
+    /* Completely freeze element opacity during auto-refresh rerun cycles */
+    div[data-testid="stMain"], 
+    div[data-testid="stMain"] *, 
+    div[data-testid="stBlock"], 
+    div[data-testid="stBlock"] *,
+    [data-baseweb="tab-panel"],
+    [data-baseweb="tab-panel"] * {
         opacity: 1 !important;
         transition: none !important;
     }
-    /* Stop specific internal block sections from blurring */
-    div[data-testid="stBlock"] {
+    /* Stop main background canvas overlay transparency shifts */
+    .stApp, .stAppHeader, .stMainContainer {
         opacity: 1 !important;
-        transition: none !important;
-    }
-    /* Prevent overall app canvas dimming during background actions */
-    .stApp, .stAppHeader {
-        opacity: 1 !important;
+        background-color: transparent !important;
     }
     </style>
     """,
