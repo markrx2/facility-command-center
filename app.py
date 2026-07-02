@@ -24,7 +24,6 @@ st.set_page_config(
 )
 
 # --- 2. ANTI-FADE & ANTI-BLUR UI OVERRIDE CORE ---
-# This styles the DOM before the heartbeat loop executes, preventing screen dimming.
 st.markdown(
     """
     <style>
@@ -64,6 +63,16 @@ def get_current_eastern_date():
 
 CURRENT_DATE = get_current_eastern_date()
 
+
+# Define the helper wrapper out in the open to prevent scoping/indentation traps
+class StreamlitSessionContextWrapper:
+    def __init__(self, engine):
+        self.Session = sessionmaker(bind=engine)
+    @property
+    def session(self):
+        return self.Session()
+
+
 # Dynamic Supabase Database Matrix Initializer Engine passing clean parameters straight to the driver
 def initialize_system_database():
     db_config = st.secrets["supabase_db"]
@@ -82,14 +91,6 @@ def initialize_system_database():
     # Instantiate custom engine configuration with clean structural pooling parameters
     engine = create_engine(url_object, pool_pre_ping=True, pool_recycle=300)
     
-    # Map a standard context sessionmaker instance onto the connection engine
-    class StreamlitSessionContextWrapper:
-        def __init__(self, engine):
-            self.Session = sessionmaker(bind=engine)
-        @property
-        def session(self):
-            return self.Session()
-
     return StreamlitSessionContextWrapper(engine)
 
 # --- START OF DATABASE INVOCATION & RUNTIME LOGIC ---
