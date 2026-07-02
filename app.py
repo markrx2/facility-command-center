@@ -22,7 +22,27 @@ st.set_page_config(
     layout="wide", 
     initial_sidebar_state="expanded"
 )
-
+# --- DISABLE STREAMLIT AUTOREFRESH BLUR & FADE EFFECT ---
+st.markdown(
+    """
+    <style>
+    /* Prevent the main container from fading out during rerun events */
+    div[data-testid="stMain"] {
+        opacity: 1 !important;
+        transition: none !important;
+    }
+    /* Stop elements from blurring out while background processing is active */
+    div[data-testid="stBlock"] {
+        opacity: 1 !important;
+    }
+    /* Disable the generic connection overlay dimming */
+    .stAppDeployButton, .stApp {
+        opacity: 1 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 # Global browser heartbeat. Keeps the container awake and forces a script check cycle every 10 seconds.
 st_autorefresh(interval=10000, key="global_system_heartbeat")
 
