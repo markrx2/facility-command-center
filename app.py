@@ -22,27 +22,32 @@ st.set_page_config(
     layout="wide", 
     initial_sidebar_state="expanded"
 )
-# --- DISABLE STREAMLIT AUTOREFRESH BLUR & FADE EFFECT ---
+
+# --- 2. ANTI-FADE & ANTI-BLUR UI OVERRIDE CORE ---
+# This styles the DOM before the heartbeat loop executes, preventing screen dimming.
 st.markdown(
     """
     <style>
-    /* Prevent the main container from fading out during rerun events */
-    div[data-testid="stMain"] {
+    /* Completely freeze element opacity during auto-refresh rerun cycles */
+    div[data-testid="stMain"], 
+    div[data-testid="stMain"] *, 
+    div[data-testid="stBlock"], 
+    div[data-testid="stBlock"] *,
+    [data-baseweb="tab-panel"],
+    [data-baseweb="tab-panel"] * {
         opacity: 1 !important;
         transition: none !important;
     }
-    /* Stop elements from blurring out while background processing is active */
-    div[data-testid="stBlock"] {
+    /* Stop main background canvas overlay transparency shifts */
+    .stApp, .stAppHeader, .stMainContainer {
         opacity: 1 !important;
-    }
-    /* Disable the generic connection overlay dimming */
-    .stAppDeployButton, .stApp {
-        opacity: 1 !important;
+        background-color: transparent !important;
     }
     </style>
     """,
     unsafe_allow_html=True
 )
+
 # Global browser heartbeat. Keeps the container awake and forces a script check cycle every 10 seconds.
 st_autorefresh(interval=10000, key="global_system_heartbeat")
 
@@ -84,6 +89,11 @@ def initialize_system_database():
         @property
         def session(self):
             return self.Session()
+
+    return StreamlitSessionContextWrapper(engine)
+
+# --- START OF DATABASE INVOCATION & RUNTIME LOGIC ---
+db_conn = initialize_system_database()
             
     db_conn = StreamlitSessionContextWrapper(engine)
     
