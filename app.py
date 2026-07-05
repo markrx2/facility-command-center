@@ -96,6 +96,19 @@ def now_eastern_naive():
 
 CURRENT_DATE = get_current_eastern_date()
 
+def fragment_rerun():
+    """
+    st.rerun(scope="fragment") requires Streamlit >= 1.37. If the deployed
+    environment is on an older version, that call raises a TypeError -- which,
+    combined with our try/except around DB writes, could make a successful
+    submit look like it silently failed. This falls back to a normal full
+    rerun so a version mismatch never eats a button click.
+    """
+    try:
+        st.rerun(scope="fragment")
+    except TypeError:
+        st.rerun()
+
 # Dynamic Supabase Database Matrix Initializer Engine passing clean parameters straight to the driver
 # Cached as a resource: without this, every autorefresh/fragment tick (i.e. every few seconds, per
 # open session) was re-running every CREATE TABLE statement and spinning up a brand-new SQLAlchemy
@@ -446,7 +459,7 @@ def execution_global_background_automation_engine():
         # page (other department tabs, analytics, backlog ribbon) has its own refresh
         # cadence (their own fragments, or the 10s global heartbeat), so we don't need
         # to force a full-page rerun just because one technician's timer fired.
-        st.rerun(scope="fragment")
+        fragment_rerun()
 
 execution_global_background_automation_engine()
 
@@ -624,7 +637,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     # This branch also deletes the roster row -> sidebar dropdown needs a full refresh.
                                     st.rerun()
                                 else:
-                                    st.rerun(scope="fragment")
+                                    fragment_rerun()
                             except Exception as e:
                                 st.error(f"⚠️ Couldn't reset this slot right now: {str(e)}")
                             
@@ -635,7 +648,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     with db_conn.session as session:
                                         session.execute(text(f"UPDATE {db_table} SET start_time=:st, tech_notified=0, supervisor_notified=0, submitted=0 WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": now_reset_str, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
                                         session.commit()
-                                    st.rerun(scope="fragment")
+                                    fragment_rerun()
                                 except Exception as e:
                                     st.error(f"⚠️ Couldn't reset this clock right now: {str(e)}")
                     
@@ -672,7 +685,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                         """), {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num, "queue": chosen_q, "goal": base_goal_str, "st": now_str, "dur": chosen_dur_min})
                                         session.commit()
                                     # Local to this slot/fragment -- no need to force a full-page rerun.
-                                    st.rerun(scope="fragment")
+                                    fragment_rerun()
                                 except Exception as e:
                                     st.error(f"⚠️ Couldn't start this clock right now: {str(e)}")
                         else:
@@ -749,7 +762,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                         session.commit()
                                     # Local to this slot -- the Analytics tab will pick up the new
                                     # metrics_history row on the next full-page heartbeat (every 10s).
-                                    st.rerun(scope="fragment")
+                                    fragment_rerun()
                                 except Exception as e:
                                     st.error(f"⚠️ Couldn't save these metrics right now: {str(e)}")
                         else:
@@ -1033,8 +1046,10 @@ with st.container(border=True):
                     st.success("Verification data saved. Deficiency summary report compiled and pushed to Google Chat!")
                 else:
                     st.success("Verification metrics logged successfully! All operational channels are current.")
-                    
-                time.sleep(0.5)
-                st.rerun()
+                # No immediate st.rerun() here: this section isn't inside a fragment, so a
+                # rerun means a full-page reload (sidebar, all 4 dept tabs, analytics, etc.),
+                # which is heavy enough that it was likely wiping this success message before
+                # it could be seen. The existing 10s global heartbeat will refresh everything
+                # else naturally without us forcing it.
             except Exception as e:
                 st.error(f"⚠️ Couldn't save the verification report right now: {str(e)}")
