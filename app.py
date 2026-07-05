@@ -454,12 +454,14 @@ def execution_global_background_automation_engine():
         print(f"Background Automation Engine DB Error: {str(e)}")
         return
 
-    if state_changed:
-        # scope="fragment" -- this only needs to refresh itself. Anything else on the
-        # page (other department tabs, analytics, backlog ribbon) has its own refresh
-        # cadence (their own fragments, or the 10s global heartbeat), so we don't need
-        # to force a full-page rerun just because one technician's timer fired.
-        fragment_rerun()
+    # Deliberately NOT calling a rerun here, even when state_changed is True. This fragment
+    # already re-executes every 5s on its own via run_every="5s", so an immediate rerun only
+    # saves a few seconds of display lag -- but if scope="fragment" isn't supported by the
+    # deployed Streamlit version, fragment_rerun()'s fallback becomes a FULL PAGE rerun firing
+    # from a background loop (not a user click). That can land at any moment and wipe out
+    # whatever a user was just doing elsewhere (e.g. a just-shown success message on the daily
+    # checklist submit, or a mid-click on an unrelated button). Letting the next scheduled
+    # 5s tick pick up the change avoids that risk entirely.
 
 execution_global_background_automation_engine()
 
