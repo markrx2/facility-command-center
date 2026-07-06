@@ -925,133 +925,153 @@ with tab_analytics:
             k3.metric("🚨 True Pro-Rata Deficits Flagged", f"{true_missed_count} Incidents")
         else:
             st.warning("Please select at least one technician profile.")
+            # display_df is intentionally set to an empty frame with the expected columns here.
+            # Previously this branch left display_df undefined, and the trend chart below
+            # referenced it unconditionally -- if a user deselected every technician, that threw
+            # an uncaught NameError which halted the ENTIRE script at that point in the run,
+            # silently skipping everything rendered after it (including the daily checklist
+            # section further down the page).
+            display_df = pd.DataFrame(columns=["Date", "Technician Name", "Department", "Assigned Queue", "Logged Units"])
             
         st.markdown("---")
         st.subheader("📈 Operational Velocity Trend Analysis")
         trend_view_option = st.radio("Group Trend Visualization By:", ["Individual Technician Trends", "Queue Volume Trends"], horizontal=True)
-        if trend_view_option == "Individual Technician Trends":
+        if display_df.empty:
+            st.caption("No data to chart for the current technician selection.")
+        elif trend_view_option == "Individual Technician Trends":
             st.line_chart(display_df.groupby(["Date", "Technician Name"])["Logged Units"].sum().unstack(fill_value=0))
         else:
             st.line_chart(display_df.groupby(["Date", "Assigned Queue"])["Logged Units"].sum().unstack(fill_value=0))
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
-with st.container(border=True):
-    st.header("📋 Global Facility Daily Queue Verification Log")
+def render_daily_verification_section():
+    with st.container(border=True):
+        st.header("📋 Global Facility Daily Queue Verification Log")
     
-    with db_conn.session as session:
-        chk = session.execute(text("SELECT * FROM daily_checklist WHERE log_date = :c_date"), {"c_date": CURRENT_DATE}).fetchone()
-        if not chk:
-            session.execute(text("INSERT INTO daily_checklist (log_date, reminder_sent, supervisor_escaped, reminder_time) VALUES (:c_date, 0, 0, '17:00') ON CONFLICT (log_date) DO NOTHING"), {"c_date": CURRENT_DATE})
-            session.commit()
+        with db_conn.session as session:
             chk = session.execute(text("SELECT * FROM daily_checklist WHERE log_date = :c_date"), {"c_date": CURRENT_DATE}).fetchone()
+            if not chk:
+                session.execute(text("INSERT INTO daily_checklist (log_date, reminder_sent, supervisor_escaped, reminder_time) VALUES (:c_date, 0, 0, '17:00') ON CONFLICT (log_date) DO NOTHING"), {"c_date": CURRENT_DATE})
+                session.commit()
+                chk = session.execute(text("SELECT * FROM daily_checklist WHERE log_date = :c_date"), {"c_date": CURRENT_DATE}).fetchone()
         
-    c_col, f_col = st.columns([3.2, 1])
+        c_col, f_col = st.columns([3.2, 1])
     
-    with f_col:
-        with st.container(border=True):
-            t_obj = datetime.strptime(chk.reminder_time, "%H:%M").time()
-            new_target_time = st.time_input("Set Verification Deadline (EST):", value=t_obj, key="checklist_deadline_widget")
-            if new_target_time.strftime("%H:%M") != chk.reminder_time:
+        with f_col:
+            with st.container(border=True):
+                t_obj = datetime.strptime(chk.reminder_time, "%H:%M").time()
+                new_target_time = st.time_input("Set Verification Deadline (EST):", value=t_obj, key="checklist_deadline_widget")
+                if new_target_time.strftime("%H:%M") != chk.reminder_time:
+                    try:
+                        with db_conn.session as session:
+                            session.execute(text("UPDATE daily_checklist SET reminder_time=:rt, reminder_sent=0, supervisor_escaped=0 WHERE log_date=:c_date"), {"rt": new_target_time.strftime("%H:%M"), "c_date": CURRENT_DATE})
+                            session.commit()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"⚠️ Couldn't update the deadline right now: {str(e)}")
+            
+        with c_col:
+            opt = ["Pending", "Yes", "No"]
+        
+            def parse_stored_date(val):
+                if not val or str(val).strip() == "": return datetime.now().date()
+                try: return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
+                except: return datetime.now().date()
+
+            form_states = {}
+
+            def render_checklist_row(label, db_prefix, prefix_key):
+                st.markdown(f"##### {label}")
+                cols = st.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
+            
+                stored_status = getattr(chk, db_prefix, "Pending") if chk else "Pending"
+                stored_odt = getattr(chk, f"{db_prefix}_date", "") if chk else ""
+                stored_tdt = getattr(chk, f"{db_prefix}_target", "") if chk else ""
+                stored_by = getattr(chk, f"{db_prefix}_by", "") if chk else ""
+                stored_notes = getattr(chk, f"{db_prefix}_notes", "") if chk else ""
+
+                curr_status = cols[0].selectbox("Status", options=opt, index=opt.index(stored_status) if stored_status in opt else 0, key=f"status_{prefix_key}_{CURRENT_DATE}")
+                curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}_{CURRENT_DATE}")
+                curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}")
+            
+                try:
+                    date_delta = (datetime.now().date() - curr_odt).days if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"] else (curr_tdt - curr_odt).days
+                    is_red = False
+                    if date_delta > 0:
+                        if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims"]: is_red = True
+                        elif db_prefix in ["ai_tech_check", "rejection_queue"] and date_delta > 4: is_red = True
+                        elif db_prefix == "return_fourteen_queue" and date_delta >= 14: is_red = True
+                        elif db_prefix not in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims", "ai_tech_check", "rejection_queue", "return_fourteen_queue"] and date_delta >= 7: is_red = True
+
+                    badge_html = f"<div style='text-align:center;'><span style='background-color:#f8d7da; color:#842029; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>🚨 {date_delta} Days</span></div>" if is_red else (f"<div style='text-align:center;'><span style='background-color:#fff3cd; color:#664d03; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>⚠️ {date_delta} Days</span></div>" if date_delta > 0 else f"<div style='text-align:center;'><span style='background-color:#d1e7dd; color:#0f5132; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>✅ Current</span></div>")
+                    cols[3].markdown(f"<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div>{badge_html}", unsafe_allow_html=True)
+                except Exception:
+                    cols[3].markdown("<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div><div style='text-align:center;'><span style='background-color:#cbd5e1; color:#1e293b; padding:6px 10px; border-radius:4px; font-size:12px;'>-</span></div>", unsafe_allow_html=True)
+                    is_red = False
+                    date_delta = 0
+
+                curr_by = cols[4].text_input("Verified By", value=stored_by, key=f"by_{prefix_key}_{CURRENT_DATE}")
+                curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=f"notes_{prefix_key}_{CURRENT_DATE}")
+            
+                form_states[db_prefix] = {
+                    "label": label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
+                    "by": curr_by, "notes": curr_notes, "is_red": is_red, "delta": date_delta
+                }
+
+            render_checklist_row("14 Day Return Queue Checked", "return_fourteen_queue", "ret_14")
+            render_checklist_row("AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
+            render_checklist_row("Billing Queue Checked", "billing", "bill")
+            render_checklist_row("Central Fill Queue Checked", "central_fill_queue", "c_fill")
+            render_checklist_row("Data Re-Entry Checked", "data_re_entry", "re_ent")
+            render_checklist_row("Dispense Queue Checked", "dispense", "disp")
+            render_checklist_row("ERx Queue Checked-Any Rx from previous day?", "erx_queue", "erx_chk")
+            render_checklist_row("Future Bill Queue Checked", "future_bill", "fut")
+            render_checklist_row("On Hold Queue Checked", "on_hold_queue", "on_hld")
+            render_checklist_row("Ordering Queue Checked", "ordering", "ord")
+            render_checklist_row("Prior Authorization Queue", "pa_queue", "pa")
+            render_checklist_row("Rejection Queue Checked", "rejection_queue", "rej")
+            render_checklist_row("Untransmitted Claims Completed", "untransmitted_claims", "untrans")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+        
+            if st.button("💾 Submit Daily Verification Report", type="primary", use_container_width=True, key="submit_daily_report_btn"):
+                deficiency_list = []
+            
                 try:
                     with db_conn.session as session:
-                        session.execute(text("UPDATE daily_checklist SET reminder_time=:rt, reminder_sent=0, supervisor_escaped=0 WHERE log_date=:c_date"), {"rt": new_target_time.strftime("%H:%M"), "c_date": CURRENT_DATE})
-                        session.commit()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"⚠️ Couldn't update the deadline right now: {str(e)}")
-            
-    with c_col:
-        opt = ["Pending", "Yes", "No"]
-        
-        def parse_stored_date(val):
-            if not val or str(val).strip() == "": return datetime.now().date()
-            try: return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
-            except: return datetime.now().date()
-
-        form_states = {}
-
-        def render_checklist_row(label, db_prefix, prefix_key):
-            st.markdown(f"##### {label}")
-            cols = st.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
-            
-            stored_status = getattr(chk, db_prefix, "Pending") if chk else "Pending"
-            stored_odt = getattr(chk, f"{db_prefix}_date", "") if chk else ""
-            stored_tdt = getattr(chk, f"{db_prefix}_target", "") if chk else ""
-            stored_by = getattr(chk, f"{db_prefix}_by", "") if chk else ""
-            stored_notes = getattr(chk, f"{db_prefix}_notes", "") if chk else ""
-
-            curr_status = cols[0].selectbox("Status", options=opt, index=opt.index(stored_status) if stored_status in opt else 0, key=f"status_{prefix_key}_{CURRENT_DATE}")
-            curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}_{CURRENT_DATE}")
-            curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}")
-            
-            try:
-                date_delta = (datetime.now().date() - curr_odt).days if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"] else (curr_tdt - curr_odt).days
-                is_red = False
-                if date_delta > 0:
-                    if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims"]: is_red = True
-                    elif db_prefix in ["ai_tech_check", "rejection_queue"] and date_delta > 4: is_red = True
-                    elif db_prefix == "return_fourteen_queue" and date_delta >= 14: is_red = True
-                    elif db_prefix not in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims", "ai_tech_check", "rejection_queue", "return_fourteen_queue"] and date_delta >= 7: is_red = True
-
-                badge_html = f"<div style='text-align:center;'><span style='background-color:#f8d7da; color:#842029; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>🚨 {date_delta} Days</span></div>" if is_red else (f"<div style='text-align:center;'><span style='background-color:#fff3cd; color:#664d03; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>⚠️ {date_delta} Days</span></div>" if date_delta > 0 else f"<div style='text-align:center;'><span style='background-color:#d1e7dd; color:#0f5132; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>✅ Current</span></div>")
-                cols[3].markdown(f"<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div>{badge_html}", unsafe_allow_html=True)
-            except Exception:
-                cols[3].markdown("<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div><div style='text-align:center;'><span style='background-color:#cbd5e1; color:#1e293b; padding:6px 10px; border-radius:4px; font-size:12px;'>-</span></div>", unsafe_allow_html=True)
-                is_red = False
-                date_delta = 0
-
-            curr_by = cols[4].text_input("Verified By", value=stored_by, key=f"by_{prefix_key}_{CURRENT_DATE}")
-            curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=f"notes_{prefix_key}_{CURRENT_DATE}")
-            
-            form_states[db_prefix] = {
-                "label": label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
-                "by": curr_by, "notes": curr_notes, "is_red": is_red, "delta": date_delta
-            }
-
-        render_checklist_row("14 Day Return Queue Checked", "return_fourteen_queue", "ret_14")
-        render_checklist_row("AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
-        render_checklist_row("Billing Queue Checked", "billing", "bill")
-        render_checklist_row("Central Fill Queue Checked", "central_fill_queue", "c_fill")
-        render_checklist_row("Data Re-Entry Checked", "data_re_entry", "re_ent")
-        render_checklist_row("Dispense Queue Checked", "dispense", "disp")
-        render_checklist_row("ERx Queue Checked-Any Rx from previous day?", "erx_queue", "erx_chk")
-        render_checklist_row("Future Bill Queue Checked", "future_bill", "fut")
-        render_checklist_row("On Hold Queue Checked", "on_hold_queue", "on_hld")
-        render_checklist_row("Ordering Queue Checked", "ordering", "ord")
-        render_checklist_row("Prior Authorization Queue", "pa_queue", "pa")
-        render_checklist_row("Rejection Queue Checked", "rejection_queue", "rej")
-        render_checklist_row("Untransmitted Claims Completed", "untransmitted_claims", "untrans")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        if st.button("💾 Submit Daily Verification Report", type="primary", use_container_width=True, key="submit_daily_report_btn"):
-            deficiency_list = []
-            
-            try:
-                with db_conn.session as session:
-                    for db_field, data in form_states.items():
-                        session.execute(text(f"""
-                            UPDATE daily_checklist 
-                            SET {db_field}=:status, {db_field}_date=:odt, {db_field}_target=:tdt, {db_field}_by=:by, {db_field}_notes=:notes 
-                            WHERE log_date=:c_date
-                        """), {"status": data["status"], "odt": data["odt"], "tdt": data["tdt"], "by": data["by"], "notes": data["notes"], "c_date": CURRENT_DATE})
+                        for db_field, data in form_states.items():
+                            session.execute(text(f"""
+                                UPDATE daily_checklist 
+                                SET {db_field}=:status, {db_field}_date=:odt, {db_field}_target=:tdt, {db_field}_by=:by, {db_field}_notes=:notes 
+                                WHERE log_date=:c_date
+                            """), {"status": data["status"], "odt": data["odt"], "tdt": data["tdt"], "by": data["by"], "notes": data["notes"], "c_date": CURRENT_DATE})
                         
-                        if data["status"] == "No" or data["is_red"]:
-                            deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {'⚠️ STATUS: NO' if data['status'] == 'No' else '🚨 CRITICAL AGING'} | Backlog: {data['delta']} Days" + (f" (Notes: {data['by']} - {data['notes']})" if data['by'] or data['notes'] else ""))
+                            if data["status"] == "No" or data["is_red"]:
+                                deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {'⚠️ STATUS: NO' if data['status'] == 'No' else '🚨 CRITICAL AGING'} | Backlog: {data['delta']} Days" + (f" (Notes: {data['by']} - {data['notes']})" if data['by'] or data['notes'] else ""))
                     
-                    session.execute(text("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1 WHERE log_date=:c_date"), {"c_date": CURRENT_DATE})
-                    session.commit()
+                        session.execute(text("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1 WHERE log_date=:c_date"), {"c_date": CURRENT_DATE})
+                        session.commit()
                 
-                if deficiency_list:
-                    ts_str = datetime.now(EASTERN_TZ).strftime('%H:%M:%S') if EASTERN_TZ else datetime.now().strftime('%H:%M:%S')
-                    dispatch_real_time_alert(f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n⏰ **Timestamp:** {ts_str} EST\n⚠️ *The following operational tracking points require attention:* \n\n" + "\n\n".join(deficiency_list))
-                    st.success("Verification data saved. Deficiency summary report compiled and pushed to Google Chat!")
-                else:
-                    st.success("Verification metrics logged successfully! All operational channels are current.")
-                # No immediate st.rerun() here: this section isn't inside a fragment, so a
-                # rerun means a full-page reload (sidebar, all 4 dept tabs, analytics, etc.),
-                # which is heavy enough that it was likely wiping this success message before
-                # it could be seen. The existing 10s global heartbeat will refresh everything
-                # else naturally without us forcing it.
-            except Exception as e:
-                st.error(f"⚠️ Couldn't save the verification report right now: {str(e)}")
+                    if deficiency_list:
+                        ts_str = datetime.now(EASTERN_TZ).strftime('%H:%M:%S') if EASTERN_TZ else datetime.now().strftime('%H:%M:%S')
+                        dispatch_real_time_alert(f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n⏰ **Timestamp:** {ts_str} EST\n⚠️ *The following operational tracking points require attention:* \n\n" + "\n\n".join(deficiency_list))
+                        st.success("Verification data saved. Deficiency summary report compiled and pushed to Google Chat!")
+                    else:
+                        st.success("Verification metrics logged successfully! All operational channels are current.")
+                    # No immediate st.rerun() here: this section isn't inside a fragment, so a
+                    # rerun means a full-page reload (sidebar, all 4 dept tabs, analytics, etc.),
+                    # which is heavy enough that it was likely wiping this success message before
+                    # it could be seen. The existing 10s global heartbeat will refresh everything
+                    # else naturally without us forcing it.
+                except Exception as e:
+                    st.error(f"⚠️ Couldn't save the verification report right now: {str(e)}")
+
+try:
+    render_daily_verification_section()
+except Exception as e:
+    # Temporary diagnostic net: surfaces the FULL traceback in the UI so any failure
+    # here is visible immediately, regardless of how error-detail display is configured
+    # on this deployment. Safe to narrow back down to a plain st.error(...) once the
+    # daily verification submit is confirmed working end-to-end.
+    st.error("⚠️ The Daily Verification section hit an unexpected error:")
+    st.exception(e)
