@@ -801,86 +801,90 @@ with tab_sh: render_synchronized_matrix("shipping_slots", "sh", "Shipping")
 with tab_fi: render_synchronized_matrix("fill_slots", "fi", "Fill")
 
 # --- 8. DYNAMIC QUEUE & ROSTER MANAGEMENT CONFIGURATION TAB ---
-with tab_mgmt:
-    st.header("⚙️ System Queue & Target Goal Adjustments")
-    st.markdown("---")
+@st.fragment
+def render_queue_management_tab():
+        st.header("⚙️ System Queue & Target Goal Adjustments")
+        st.markdown("---")
     
-    if not is_manager:
-        st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to unlock modifications.")
-    else:
-        m_col1, m_col2 = st.columns(2)
+        if not is_manager:
+            st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to unlock modifications.")
+        else:
+            m_col1, m_col2 = st.columns(2)
         
-        with m_col1:
-            st.subheader("➕ Create Custom Queue Trackers")
-            target_dept = st.selectbox("Select Department Destination:", [("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")], key="mgmt_dept_selector")
-            new_q_name = st.text_input("New Queue Name:", placeholder="e.g., Priority Tier 3 Verification", key="mgmt_q_name_input").strip()
-            new_q_goal = st.text_input("Production Unit Goal Target (PER 1 HOUR):", placeholder="e.g., 50 rxs", key="mgmt_goal_input").strip()
+            with m_col1:
+                st.subheader("➕ Create Custom Queue Trackers")
+                target_dept = st.selectbox("Select Department Destination:", [("Data Entry", "de"), ("Call Center", "cc"), ("Shipping", "sh"), ("Fill", "fi")], key="mgmt_dept_selector")
+                new_q_name = st.text_input("New Queue Name:", placeholder="e.g., Priority Tier 3 Verification", key="mgmt_q_name_input").strip()
+                new_q_goal = st.text_input("Production Unit Goal Target (PER 1 HOUR):", placeholder="e.g., 50 rxs", key="mgmt_goal_input").strip()
             
-            if st.button("Save New Queue Component", type="primary", use_container_width=True, key="mgmt_save_btn"):
-                if new_q_name and new_q_goal:
-                    try:
-                        with db_conn.session as session:
-                            session.execute(text("""
-                                INSERT INTO dynamic_queues (dept_prefix, queue_name, goal_target) VALUES (:prefix, :name, :target)
-                                ON CONFLICT (dept_prefix, queue_name) DO UPDATE SET goal_target = EXCLUDED.goal_target
-                            """), {"prefix": target_dept[1], "name": new_q_name, "target": new_q_goal})
-                            session.commit()
-                        st.success(f"Added baseline operational tracking line: {new_q_name} at {new_q_goal}/hr")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"⚠️ Couldn't save this queue right now: {str(e)}")
-            
-            st.markdown("<br><br>", unsafe_allow_html=True)
-            st.subheader("🗑 ... Decommission Employee Profiles")
-            with db_conn.session as session:
-                all_staff = session.execute(text("SELECT dept_prefix, tech_name FROM global_roster ORDER BY tech_name ASC")).fetchall()
-            
-            if not all_staff:
-                st.info("No saved technician profiles found.")
-            else:
-                for staff in all_staff:
-                    s_prefix, s_name = staff.dept_prefix, staff.tech_name
-                    s_id = hashlib.md5(s_name.encode('utf-8')).hexdigest()[:8]
-                    d_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[s_prefix]
-                    s_col1, s_col2 = st.columns([2.5, 1])
-                    s_col1.markdown(f"👤 **{s_name}** `({d_lbl})`")
-                    if s_col2.button("Remove Profile", key=f"del_staff_{s_prefix}_{s_id}", type="secondary", use_container_width=True):
+                if st.button("Save New Queue Component", type="primary", use_container_width=True, key="mgmt_save_btn"):
+                    if new_q_name and new_q_goal:
                         try:
                             with db_conn.session as session:
-                                session.execute(text("DELETE FROM global_roster WHERE dept_prefix=:prefix AND tech_name=:name"), {"prefix": s_prefix, "name": s_name})
-                                for t in ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]:
-                                    session.execute(text(f"DELETE FROM {t} WHERE log_date=:c_date AND tech_name=:name"), {"c_date": CURRENT_DATE, "name": s_name})
+                                session.execute(text("""
+                                    INSERT INTO dynamic_queues (dept_prefix, queue_name, goal_target) VALUES (:prefix, :name, :target)
+                                    ON CONFLICT (dept_prefix, queue_name) DO UPDATE SET goal_target = EXCLUDED.goal_target
+                                """), {"prefix": target_dept[1], "name": new_q_name, "target": new_q_goal})
                                 session.commit()
-                            st.session_state["selected_profile_state"] = "-- Create New Profile --"
-                            st.success(f"Decommissioned {s_name} from system.")
-                            st.rerun()
+                            st.success(f"Added baseline operational tracking line: {new_q_name} at {new_q_goal}/hr")
+                            fragment_rerun()
                         except Exception as e:
-                            st.error(f"⚠️ Couldn't remove this profile right now: {str(e)}")
-                    st.markdown("<hr style='margin:2px 0px !important;'>", unsafe_allow_html=True)
-                    
-        with m_col2:
-            st.subheader("📋 Current Active Queue Database Matrix")
-            with db_conn.session as session:
-                all_qs = session.execute(text("SELECT dept_prefix, queue_name, goal_target FROM dynamic_queues")).fetchall()
+                            st.error(f"⚠️ Couldn't save this queue right now: {str(e)}")
             
-            if not all_qs:
-                st.info("No customized tracking queues available.")
-            else:
-                for q_row in all_qs:
-                    q_prefix, q_name, q_goal = q_row.dept_prefix, q_row.queue_name, q_row.goal_target
-                    q_id = hashlib.md5(q_name.encode('utf-8')).hexdigest()[:8]
-                    dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
-                    with st.container(border=True):
-                        st.markdown(f"**[{dept_lbl}]** `{q_name}`")
-                        st.caption(f"Base Hourly Vector: {q_goal} per hour")
-                        if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{q_id}", use_container_width=True):
+                st.markdown("<br><br>", unsafe_allow_html=True)
+                st.subheader("🗑 ... Decommission Employee Profiles")
+                with db_conn.session as session:
+                    all_staff = session.execute(text("SELECT dept_prefix, tech_name FROM global_roster ORDER BY tech_name ASC")).fetchall()
+            
+                if not all_staff:
+                    st.info("No saved technician profiles found.")
+                else:
+                    for staff in all_staff:
+                        s_prefix, s_name = staff.dept_prefix, staff.tech_name
+                        s_id = hashlib.md5(s_name.encode('utf-8')).hexdigest()[:8]
+                        d_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[s_prefix]
+                        s_col1, s_col2 = st.columns([2.5, 1])
+                        s_col1.markdown(f"👤 **{s_name}** `({d_lbl})`")
+                        if s_col2.button("Remove Profile", key=f"del_staff_{s_prefix}_{s_id}", type="secondary", use_container_width=True):
                             try:
                                 with db_conn.session as session:
-                                    session.execute(text("DELETE FROM dynamic_queues WHERE dept_prefix=:prefix AND queue_name=:name"), {"prefix": q_prefix, "name": q_name})
+                                    session.execute(text("DELETE FROM global_roster WHERE dept_prefix=:prefix AND tech_name=:name"), {"prefix": s_prefix, "name": s_name})
+                                    for t in ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]:
+                                        session.execute(text(f"DELETE FROM {t} WHERE log_date=:c_date AND tech_name=:name"), {"c_date": CURRENT_DATE, "name": s_name})
                                     session.commit()
+                                st.session_state["selected_profile_state"] = "-- Create New Profile --"
+                                st.success(f"Decommissioned {s_name} from system.")
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"⚠️ Couldn't delete this queue right now: {str(e)}")
+                                st.error(f"⚠️ Couldn't remove this profile right now: {str(e)}")
+                        st.markdown("<hr style='margin:2px 0px !important;'>", unsafe_allow_html=True)
+                    
+            with m_col2:
+                st.subheader("📋 Current Active Queue Database Matrix")
+                with db_conn.session as session:
+                    all_qs = session.execute(text("SELECT dept_prefix, queue_name, goal_target FROM dynamic_queues")).fetchall()
+            
+                if not all_qs:
+                    st.info("No customized tracking queues available.")
+                else:
+                    for q_row in all_qs:
+                        q_prefix, q_name, q_goal = q_row.dept_prefix, q_row.queue_name, q_row.goal_target
+                        q_id = hashlib.md5(q_name.encode('utf-8')).hexdigest()[:8]
+                        dept_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[q_prefix]
+                        with st.container(border=True):
+                            st.markdown(f"**[{dept_lbl}]** `{q_name}`")
+                            st.caption(f"Base Hourly Vector: {q_goal} per hour")
+                            if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{q_id}", use_container_width=True):
+                                try:
+                                    with db_conn.session as session:
+                                        session.execute(text("DELETE FROM dynamic_queues WHERE dept_prefix=:prefix AND queue_name=:name"), {"prefix": q_prefix, "name": q_name})
+                                        session.commit()
+                                    fragment_rerun()
+                                except Exception as e:
+                                    st.error(f"⚠️ Couldn't delete this queue right now: {str(e)}")
+
+with tab_mgmt:
+    render_queue_management_tab()
 
 # --- 9. ADVANCED HISTORICAL & TRENDS ANALYTICS TAB ---
 with tab_analytics:
