@@ -235,6 +235,13 @@ def initialize_system_database():
         """))
         session.commit()
 
+        # Existing deployments already have this table without this column -- CREATE TABLE IF
+        # NOT EXISTS above won't add it to a table that already exists, so add it explicitly.
+        # Tracks when the daily verification was last submitted, so the submit button can warn
+        # (and require explicit confirmation) before re-sending Chat alerts for the same day.
+        session.execute(text("ALTER TABLE daily_checklist ADD COLUMN IF NOT EXISTS last_submitted_at TEXT DEFAULT ''"))
+        session.commit()
+
         # SELF-HEALING AUTOMATIC QUEUE RECOVERY SEEDER 
         res = session.execute(text("SELECT COUNT(*) as cnt FROM dynamic_queues")).fetchone()
         if res[0] == 0:
@@ -575,7 +582,14 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
     with db_conn.session as session:
         goals_dict = {r.queue_name: r.goal_target for r in session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix = :pfx"), {"pfx": prefix}).fetchall()}
         roster_rows = session.execute(text("SELECT tech_name, tech_email, tech_webhook FROM global_roster WHERE dept_prefix = :pfx"), {"pfx": prefix}).fetchall()
-    
+        # Batched: one query for every slot in this department/day, instead of a separate
+        # round trip per worker per slot below. With N workers x 4 slots, the old per-slot
+        # query pattern meant N*4 sequential DB calls on every single render of this fragment
+        # -- which fires on every button click inside it, plus automatically every 5s. This
+        # was very likely the dominant source of the "lag on every submit" you were seeing.
+        all_slot_rows = session.execute(text(f"SELECT * FROM {db_table} WHERE log_date=:c_date"), {"c_date": CURRENT_DATE}).fetchall()
+
+    slot_lookup = {(r.tech_name, r.slot_id): r for r in all_slot_rows}
     active_roster = {row.tech_name: {"email": row.tech_email, "webhook": row.tech_webhook} for row in roster_rows}
 
     if not active_roster:
@@ -611,8 +625,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                 with st.container(border=True):
                     st.markdown(f"**🕒 Slot {slot_num}**")
                     
-                    with db_conn.session as session:
-                        slot_row = session.execute(text(f"SELECT * FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num}).fetchone()
+                    slot_row = slot_lookup.get((worker, slot_num))
                     
                     if is_mgr_active:
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
@@ -1024,7 +1037,7 @@ def render_daily_verification_section():
             render_checklist_row("Central Fill Queue Checked", "central_fill_queue", "c_fill")
             render_checklist_row("Data Re-Entry Checked", "data_re_entry", "re_ent")
             render_checklist_row("Dispense Queue Checked", "dispense", "disp")
-            render_checklist_row("ERx Queue Checked", "erx_queue", "erx_chk")
+            render_checklist_row("ERx Queue Checked-Any Rx from previous day?", "erx_queue", "erx_chk")
             render_checklist_row("Future Bill Queue Checked", "future_bill", "fut")
             render_checklist_row("On Hold Queue Checked", "on_hold_queue", "on_hld")
             render_checklist_row("Ordering Queue Checked", "ordering", "ord")
@@ -1033,28 +1046,62 @@ def render_daily_verification_section():
             render_checklist_row("Untransmitted Claims Completed", "untransmitted_claims", "untrans")
 
             st.markdown("<br>", unsafe_allow_html=True)
-        
-            if st.button("💾 Submit Daily Verification Report", type="primary", use_container_width=True, key="submit_daily_report_btn"):
+
+            already_submitted_today = bool(chk.last_submitted_at) if chk else False
+            resubmit_armed_key = "checklist_resubmit_armed"
+
+            if already_submitted_today:
+                st.info(f"✅ Already submitted today at **{chk.last_submitted_at} EST**. Submitting again will re-send Chat alerts for anything still flagged below.")
+
+            # Two-step guard: once already submitted today, the first click only "arms" a
+            # resubmit and asks for explicit confirmation, so a stray click can't silently
+            # re-fire duplicate Chat alerts for the same deficiencies.
+            if already_submitted_today and not st.session_state.get(resubmit_armed_key, False):
+                submit_clicked = False
+                if st.button("🔁 Resubmit Anyway", key="checklist_resubmit_arm_btn", use_container_width=True):
+                    st.session_state[resubmit_armed_key] = True
+                    st.rerun()
+            else:
+                button_label = "⚠️ Confirm Resubmit (will re-send Chat alerts for flagged items)" if already_submitted_today else "💾 Submit Daily Verification Report"
+                submit_clicked = st.button(button_label, type="primary", use_container_width=True, key="submit_daily_report_btn")
+
+            if submit_clicked:
                 deficiency_list = []
             
                 try:
+                    # Single batched UPDATE covering all 13 checklist rows plus the tracking
+                    # flags, instead of 13+ separate sequential round trips to the DB. Each
+                    # round trip has its own network latency, so this was a real contributor
+                    # to the "lag on submit" -- now it's one statement, one round trip.
+                    set_parts = []
+                    params = {"c_date": CURRENT_DATE}
+                    for db_field, data in form_states.items():
+                        set_parts.append(f"{db_field}=:{db_field}__status")
+                        set_parts.append(f"{db_field}_date=:{db_field}__odt")
+                        set_parts.append(f"{db_field}_target=:{db_field}__tdt")
+                        set_parts.append(f"{db_field}_by=:{db_field}__by")
+                        set_parts.append(f"{db_field}_notes=:{db_field}__notes")
+                        params[f"{db_field}__status"] = data["status"]
+                        params[f"{db_field}__odt"] = data["odt"]
+                        params[f"{db_field}__tdt"] = data["tdt"]
+                        params[f"{db_field}__by"] = data["by"]
+                        params[f"{db_field}__notes"] = data["notes"]
+
+                        if data["status"] == "No" or data["is_red"]:
+                            deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {'⚠️ STATUS: NO' if data['status'] == 'No' else '🚨 CRITICAL AGING'} | Backlog: {data['delta']} Days" + (f" (Notes: {data['by']} - {data['notes']})" if data['by'] or data['notes'] else ""))
+
+                    submitted_at_str = now_eastern_naive().strftime("%H:%M:%S")
+                    set_parts.append("reminder_sent=1")
+                    set_parts.append("supervisor_escaped=1")
+                    set_parts.append("last_submitted_at=:last_submitted_at")
+                    params["last_submitted_at"] = submitted_at_str
+
                     with db_conn.session as session:
-                        for db_field, data in form_states.items():
-                            session.execute(text(f"""
-                                UPDATE daily_checklist 
-                                SET {db_field}=:status, {db_field}_date=:odt, {db_field}_target=:tdt, {db_field}_by=:by, {db_field}_notes=:notes 
-                                WHERE log_date=:c_date
-                            """), {"status": data["status"], "odt": data["odt"], "tdt": data["tdt"], "by": data["by"], "notes": data["notes"], "c_date": CURRENT_DATE})
-                        
-                            if data["status"] == "No" or data["is_red"]:
-                                deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {'⚠️ STATUS: NO' if data['status'] == 'No' else '🚨 CRITICAL AGING'} | Backlog: {data['delta']} Days" + (f" (Notes: {data['by']} - {data['notes']})" if data['by'] or data['notes'] else ""))
-                    
-                        session.execute(text("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1 WHERE log_date=:c_date"), {"c_date": CURRENT_DATE})
+                        session.execute(text(f"UPDATE daily_checklist SET {', '.join(set_parts)} WHERE log_date=:c_date"), params)
                         session.commit()
                 
                     if deficiency_list:
-                        ts_str = datetime.now(EASTERN_TZ).strftime('%H:%M:%S') if EASTERN_TZ else datetime.now().strftime('%H:%M:%S')
-                        chat_sent_ok = dispatch_real_time_alert(f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n⏰ **Timestamp:** {ts_str} EST\n⚠️ *The following operational tracking points require attention:* \n\n" + "\n\n".join(deficiency_list))
+                        chat_sent_ok = dispatch_real_time_alert(f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n⏰ **Timestamp:** {submitted_at_str} EST\n⚠️ *The following operational tracking points require attention:* \n\n" + "\n\n".join(deficiency_list))
                         st.success("Verification data saved.")
                         if chat_sent_ok:
                             st.success("Deficiency summary report compiled and pushed to Google Chat!")
@@ -1065,6 +1112,8 @@ def render_daily_verification_section():
                             st.warning("⚠️ The verification data saved, but the Google Chat notification failed to send. Check the webhook configuration/connectivity.")
                     else:
                         st.success("Verification metrics logged successfully! All operational channels are current.")
+
+                    st.session_state[resubmit_armed_key] = False
                     # No immediate st.rerun() here: this section isn't inside a fragment, so a
                     # rerun means a full-page reload (sidebar, all 4 dept tabs, analytics, etc.),
                     # which is heavy enough that it was likely wiping this success message before
