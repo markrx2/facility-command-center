@@ -1054,8 +1054,15 @@ def render_daily_verification_section():
                 
                     if deficiency_list:
                         ts_str = datetime.now(EASTERN_TZ).strftime('%H:%M:%S') if EASTERN_TZ else datetime.now().strftime('%H:%M:%S')
-                        dispatch_real_time_alert(f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n⏰ **Timestamp:** {ts_str} EST\n⚠️ *The following operational tracking points require attention:* \n\n" + "\n\n".join(deficiency_list))
-                        st.success("Verification data saved. Deficiency summary report compiled and pushed to Google Chat!")
+                        chat_sent_ok = dispatch_real_time_alert(f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n⏰ **Timestamp:** {ts_str} EST\n⚠️ *The following operational tracking points require attention:* \n\n" + "\n\n".join(deficiency_list))
+                        st.success("Verification data saved.")
+                        if chat_sent_ok:
+                            st.success("Deficiency summary report compiled and pushed to Google Chat!")
+                        else:
+                            # dispatch_real_time_alert() previously failed completely silently here --
+                            # the DB save succeeded (that part is confirmed above) but the webhook POST
+                            # did not, and nothing told the user that. Surfacing it now.
+                            st.warning("⚠️ The verification data saved, but the Google Chat notification failed to send. Check the webhook configuration/connectivity.")
                     else:
                         st.success("Verification metrics logged successfully! All operational channels are current.")
                     # No immediate st.rerun() here: this section isn't inside a fragment, so a
