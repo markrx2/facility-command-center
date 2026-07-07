@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 import time
 from zoneinfo import ZoneInfo
 import smtplib
@@ -242,6 +242,52 @@ def initialize_system_database():
         session.execute(text("ALTER TABLE daily_checklist ADD COLUMN IF NOT EXISTS last_submitted_at TEXT DEFAULT ''"))
         session.commit()
 
+        # --- AUTO-SCHEDULER SUPPORT TABLES ---
+        # queue_volumes replaces the old fixed-9-field floor_backlogs ribbon going forward.
+        # One row per (day, department, queue) so the ribbon can grow automatically as queues
+        # are added/removed in Queue Management, instead of needing fixed columns per category.
+        # floor_backlogs itself is intentionally left untouched (not dropped) in case that
+        # historical data is still wanted -- this app just stops writing to it.
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS queue_volumes (
+                log_date TEXT,
+                dept_prefix TEXT,
+                queue_name TEXT,
+                volume INTEGER DEFAULT 0,
+                PRIMARY KEY (log_date, dept_prefix, queue_name)
+            )
+        """))
+
+        # One row per tech who is actually working today, with their shift window. Presence
+        # in this table IS the "on shift today" signal -- a tech not listed here is treated
+        # as not working today, regardless of whether they're in the permanent roster.
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS tech_shifts (
+                log_date TEXT,
+                dept_prefix TEXT,
+                tech_name TEXT,
+                shift_start TEXT,
+                shift_end TEXT,
+                PRIMARY KEY (log_date, dept_prefix, tech_name)
+            )
+        """))
+
+        # Staging area for a generated schedule proposal, cleared and regenerated each time
+        # "Generate/Recalculate Proposal" is clicked, and cleared again once approved & applied
+        # to the real slot tables. Nothing here ever starts a real timer on its own.
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS schedule_proposals (
+                log_date TEXT,
+                dept_prefix TEXT,
+                tech_name TEXT,
+                proposal_slot INTEGER,
+                queue_name TEXT,
+                duration_minutes INTEGER,
+                PRIMARY KEY (log_date, dept_prefix, tech_name, proposal_slot)
+            )
+        """))
+        session.commit()
+
         # SELF-HEALING AUTOMATIC QUEUE RECOVERY SEEDER 
         res = session.execute(text("SELECT COUNT(*) as cnt FROM dynamic_queues")).fetchone()
         if res[0] == 0:
@@ -280,6 +326,15 @@ GOOGLE_CHAT_GLOBAL_OPERATIONS_WEBHOOK = st.secrets["google_chat"]["webhook_url"]
 # To change it: edit the [admin] password value in your secrets.toml (or the Secrets panel
 # on Streamlit Community Cloud) and reboot the app -- no code change needed.
 ADMIN_PASSWORD = st.secrets["admin"]["password"]
+
+# Homebase sync is optional, so a missing [homebase] secrets block doesn't crash the whole
+# app -- it just leaves HOMEBASE_API_KEY as None, and the Sync button will say so instead.
+try:
+    HOMEBASE_API_KEY = st.secrets["homebase"]["api_key"]
+    HOMEBASE_LOCATION_UUIDS = [u.strip() for u in str(st.secrets["homebase"].get("location_uuids", "")).split(",") if u.strip()]
+except Exception:
+    HOMEBASE_API_KEY = None
+    HOMEBASE_LOCATION_UUIDS = []
 
 def dispatch_real_time_alert(message_body):
     payload = {"text": message_body}
@@ -543,42 +598,58 @@ if submit_deployment:
         except Exception as e:
             st.sidebar.error(f"⚠️ Couldn't save this profile right now: {str(e)}")
 
-# --- 5. TOP-LEVEL BACKLOG MATRIX INPUT INJECTOR ---
-def render_global_backlog_ribbon():
-    with db_conn.session as session:
-        row = session.execute(text("SELECT * FROM floor_backlogs WHERE log_date = :c_date"), {"c_date": CURRENT_DATE}).fetchone()
-        if not row:
-            session.execute(text("INSERT INTO floor_backlogs (log_date) VALUES (:c_date) ON CONFLICT (log_date) DO NOTHING"), {"c_date": CURRENT_DATE})
-            session.commit()
-            row = session.execute(text("SELECT * FROM floor_backlogs WHERE log_date = :c_date"), {"c_date": CURRENT_DATE}).fetchone()
+# --- 5. DYNAMIC QUEUE VOLUME RIBBON (auto-scheduler input) ---
+# Replaces the old fixed-9-field ribbon. Instead of hardcoded categories, this mirrors
+# whatever queues currently exist in Queue Management, grouped by department -- so adding
+# a new queue (or a whole new department's queues) there automatically gives it a volume
+# field here too, with no code changes needed. This is also the volume feed the
+# auto-scheduler reads from. The old floor_backlogs table is left alone in the DB
+# (still there if historical data is wanted) but nothing writes to it anymore.
+DEPT_LABELS = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}
 
-    st.markdown("<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Global Real-Time Operational Queue Volume Snapshots</h4>", unsafe_allow_html=True)
-    b_cols = st.columns(9)
-    
-    fields = [
-        ("ERx", "erx"), ("Central Fill", "central_fill"), ("Rejected Queue", "rejected"),
-        ("On Hold Queue", "on_hold"), ("PA Queue", "pa"), ("Dispense Queue", "dispense"),
-        ("AI/Tech Check", "ai_tech"), ("Ordering Queue", "ordering"), ("Billing Queue", "billing")
-    ]
-    
+def render_dynamic_volume_ribbon():
+    with db_conn.session as session:
+        all_queues = session.execute(text("SELECT dept_prefix, queue_name, goal_target FROM dynamic_queues ORDER BY dept_prefix, queue_name")).fetchall()
+        vol_rows = session.execute(text("SELECT dept_prefix, queue_name, volume FROM queue_volumes WHERE log_date=:c_date"), {"c_date": CURRENT_DATE}).fetchall()
+
+    if not all_queues:
+        st.info("💡 No queues configured yet. Add queues in the Queue Management tab to start tracking daily volume here.")
+        return
+
+    volume_lookup = {(r.dept_prefix, r.queue_name): r.volume for r in vol_rows}
+
+    st.markdown("<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Today's Queue Volume (start-of-day counts, editable anytime)</h4>", unsafe_allow_html=True)
+
+    queues_by_dept = {}
+    for q in all_queues:
+        queues_by_dept.setdefault(q.dept_prefix, []).append(q)
+
     updates = {}
-    for i, (label, db_field) in enumerate(fields):
-        with b_cols[i]:
-            current_value = getattr(row, db_field) if row else 0
-            new_val = st.number_input(label, min_value=0, step=1, value=int(current_value), key=f"top_bl_{db_field}_{CURRENT_DATE}")
-            if new_val != current_value:
-                updates[db_field] = new_val
+    for dept_prefix, dept_queues in queues_by_dept.items():
+        dept_label = DEPT_LABELS.get(dept_prefix, dept_prefix)
+        st.caption(f"**{dept_label}**")
+        num_cols = min(len(dept_queues), 6) or 1
+        cols = st.columns(num_cols)
+        for i, q in enumerate(dept_queues):
+            with cols[i % num_cols]:
+                current_value = volume_lookup.get((dept_prefix, q.queue_name), 0)
+                new_val = st.number_input(q.queue_name, min_value=0, step=1, value=int(current_value), key=f"vol_{dept_prefix}_{q.queue_name}_{CURRENT_DATE}")
+                if new_val != current_value:
+                    updates[(dept_prefix, q.queue_name)] = new_val
 
     if updates:
-        set_clause = ", ".join([f"{k}=:{k}" for k in updates.keys()])
-        updates["c_date"] = CURRENT_DATE
         try:
             with db_conn.session as session:
-                session.execute(text(f"UPDATE floor_backlogs SET {set_clause} WHERE log_date=:c_date"), updates)
+                for (dept_prefix, queue_name), val in updates.items():
+                    session.execute(text("""
+                        INSERT INTO queue_volumes (log_date, dept_prefix, queue_name, volume)
+                        VALUES (:c_date, :pfx, :qname, :vol)
+                        ON CONFLICT (log_date, dept_prefix, queue_name) DO UPDATE SET volume = EXCLUDED.volume
+                    """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "qname": queue_name, "vol": val})
                 session.commit()
             st.rerun()
         except Exception as e:
-            st.error(f"⚠️ Couldn't save backlog numbers right now: {str(e)}")
+            st.error(f"⚠️ Couldn't save volume numbers right now: {str(e)}")
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
 
 # --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
@@ -789,16 +860,386 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             st.success(f"✅ Logged Units: **{db_input}**")
 
 # --- 7. CORE APP ROUTING INTERFACE ---
-render_global_backlog_ribbon()
+render_dynamic_volume_ribbon()
 
-tab_de, tab_cc, tab_sh, tab_fi, tab_analytics, tab_mgmt = st.tabs([
-    "💻 Data Entry Line", "📞 Call Center Desk", "📦 Shipping Floor", "🧪 Fill Department", "📊 Cumulative Analytics", "⚙️ Queue Management"
+tab_de, tab_cc, tab_sh, tab_fi, tab_sched, tab_analytics, tab_mgmt = st.tabs([
+    "💻 Data Entry Line", "📞 Call Center Desk", "📦 Shipping Floor", "🧪 Fill Department", "🗓️ Auto-Scheduler", "📊 Cumulative Analytics", "⚙️ Queue Management"
 ])
 
 with tab_de: render_synchronized_matrix("data_entry_slots", "de", "Data Entry")
 with tab_cc: render_synchronized_matrix("call_center_slots", "cc", "Call Center")
 with tab_sh: render_synchronized_matrix("shipping_slots", "sh", "Shipping")
 with tab_fi: render_synchronized_matrix("fill_slots", "fi", "Fill")
+
+# --- 7.5 AUTO-SCHEDULER TAB ---
+# Scoped to Data Entry only for now (AUTOSCHEDULER_DEPTS below), but every function here is
+# parameterized by dept_prefix/db_table so extending to another department later is just
+# adding its prefix to this list -- no rewrite needed.
+AUTOSCHEDULER_DEPTS = [("de", "data_entry_slots", "Data Entry")]
+
+SHIFT_PRESETS = {
+    "7:00 AM - 3:00 PM": (dtime(7, 0), dtime(15, 0)),
+    "9:00 AM - 5:00 PM": (dtime(9, 0), dtime(17, 0)),
+    "10:00 AM - 6:00 PM": (dtime(10, 0), dtime(18, 0)),
+}
+
+def parse_hourly_rate(goal_str):
+    m = re.search(r'\d+', str(goal_str))
+    return int(m.group()) if m else 0
+
+def normalize_name(s):
+    return re.sub(r'\s+', ' ', str(s)).strip().lower()
+
+def fetch_homebase_shifts(location_uuid, date_str):
+    """
+    GET /locations/{location_uuid}/shifts for a single day. Handles pagination via the
+    RFC-5988 Link header. Assumes the list endpoint returns a bare JSON array (per standard
+    REST/Swagger convention when pagination metadata lives in headers rather than a wrapper
+    object) but defensively unwraps a {"shifts": [...]}-style response if that's what comes
+    back instead -- unverified against a live response as of writing this.
+    """
+    headers = {
+        "Authorization": f"Bearer {HOMEBASE_API_KEY}",
+        "Accept": "application/vnd.homebase-v1+json",
+    }
+    all_shifts = []
+    url = f"https://api.joinhomebase.com/locations/{location_uuid}/shifts"
+    params = {"start_date": date_str, "end_date": date_str, "date_filter": "start_at", "per_page": 100, "page": 1}
+
+    while url:
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list):
+            all_shifts.extend(data)
+        elif isinstance(data, dict) and isinstance(data.get("shifts"), list):
+            all_shifts.extend(data["shifts"])
+        else:
+            all_shifts.append(data)
+
+        next_url = None
+        for part in resp.headers.get("Link", "").split(","):
+            if 'rel="next"' in part:
+                next_url = part.split(";")[0].strip().strip("<>")
+        url = next_url
+        params = None  # the next_url from the Link header already has its own query string
+
+    return all_shifts
+
+def sync_homebase_shifts(dept_prefix):
+    """
+    Pulls today's shifts from every configured Homebase location, matches each shift to an
+    existing roster tech by normalized name (not by trusting Homebase's department/role
+    field, which we haven't verified matches our department taxonomy), and upserts matches
+    into tech_shifts. Returns (result_dict, error_string) -- exactly one will be None.
+    """
+    if not HOMEBASE_API_KEY or not HOMEBASE_LOCATION_UUIDS:
+        return None, "Homebase isn't configured yet. Add [homebase] api_key and location_uuids to your secrets file."
+
+    with db_conn.session as session:
+        roster_rows = session.execute(text("SELECT tech_name FROM global_roster WHERE dept_prefix=:pfx"), {"pfx": dept_prefix}).fetchall()
+    roster_lookup = {normalize_name(r.tech_name): r.tech_name for r in roster_rows}
+
+    all_shifts = []
+    try:
+        for loc_uuid in HOMEBASE_LOCATION_UUIDS:
+            all_shifts.extend(fetch_homebase_shifts(loc_uuid, CURRENT_DATE))
+    except Exception as e:
+        return None, f"Homebase API request failed: {str(e)}"
+
+    matched = {}
+    for shift in all_shifts:
+        full_name = normalize_name(f"{shift.get('first_name', '')} {shift.get('last_name', '')}")
+        if full_name in roster_lookup and shift.get("start_at") and shift.get("end_at"):
+            try:
+                start_dt_utc = datetime.fromisoformat(str(shift["start_at"]).replace("Z", "+00:00"))
+                end_dt_utc = datetime.fromisoformat(str(shift["end_at"]).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if EASTERN_TZ:
+                start_local = start_dt_utc.astimezone(EASTERN_TZ)
+                end_local = end_dt_utc.astimezone(EASTERN_TZ)
+            else:
+                start_local, end_local = start_dt_utc, end_dt_utc
+            matched[roster_lookup[full_name]] = (start_local.strftime("%H:%M"), end_local.strftime("%H:%M"))
+
+    unmatched_names = sorted(set(
+        f"{s.get('first_name', '')} {s.get('last_name', '')}".strip()
+        for s in all_shifts
+        if normalize_name(f"{s.get('first_name', '')} {s.get('last_name', '')}") not in roster_lookup
+    ))
+
+    if matched:
+        try:
+            with db_conn.session as session:
+                for tech_name, (s_str, e_str) in matched.items():
+                    session.execute(text("""
+                        INSERT INTO tech_shifts (log_date, dept_prefix, tech_name, shift_start, shift_end)
+                        VALUES (:c_date, :pfx, :t_name, :s_start, :s_end)
+                        ON CONFLICT (log_date, dept_prefix, tech_name) DO UPDATE SET shift_start=EXCLUDED.shift_start, shift_end=EXCLUDED.shift_end
+                    """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name, "s_start": s_str, "s_end": e_str})
+                session.commit()
+        except Exception as e:
+            return None, f"Fetched from Homebase but couldn't save the results: {str(e)}"
+
+    return {"matched": matched, "unmatched_names": unmatched_names, "total_fetched": len(all_shifts)}, None
+
+def generate_schedule_proposal(dept_prefix, reference_dt):
+    """
+    Computes a proposed schedule for `dept_prefix` as of `reference_dt` (a naive Eastern
+    datetime -- either today's 1:00 PM anchor on the standard run, or "now" on a manual
+    recalculation) and saves it to schedule_proposals. Returns a summary dict for display;
+    nothing here touches the real slot tables.
+    """
+    with db_conn.session as session:
+        shift_rows = session.execute(text("SELECT tech_name, shift_start, shift_end FROM tech_shifts WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
+        queue_rows = session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=:pfx"), {"pfx": dept_prefix}).fetchall()
+        volume_rows = session.execute(text("SELECT queue_name, volume FROM queue_volumes WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
+
+    volumes = {r.queue_name: r.volume for r in volume_rows}
+    rates = {r.queue_name: parse_hourly_rate(r.goal_target) for r in queue_rows}
+
+    required_minutes = {}
+    for queue_name, rate in rates.items():
+        vol = volumes.get(queue_name, 0)
+        if rate > 0 and vol > 0:
+            required_minutes[queue_name] = (vol / rate) * 60.0
+
+    tech_capacity = []
+    for row in shift_rows:
+        shift_start_dt = datetime.combine(reference_dt.date(), datetime.strptime(row.shift_start, "%H:%M").time())
+        shift_end_dt = datetime.combine(reference_dt.date(), datetime.strptime(row.shift_end, "%H:%M").time())
+        effective_start = max(shift_start_dt, reference_dt)
+        remaining = (shift_end_dt - effective_start).total_seconds() / 60.0
+        if remaining > 0:
+            tech_capacity.append({"tech": row.tech_name, "remaining": remaining, "slots_used": 0})
+
+    total_capacity = sum(t["remaining"] for t in tech_capacity)
+    total_required = sum(required_minutes.values())
+
+    summary = {"total_capacity": total_capacity, "total_required": total_required, "unmet": {}, "no_shift_data": len(tech_capacity) == 0, "no_volume_data": len(required_minutes) == 0}
+
+    with db_conn.session as session:
+        session.execute(text("DELETE FROM schedule_proposals WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix})
+
+        if total_required > 0 and total_capacity > 0:
+            scale = min(1.0, total_capacity / total_required)
+            allocations = sorted(
+                [[name, req * scale] for name, req in required_minutes.items()],
+                key=lambda x: x[1], reverse=True
+            )
+            for name, req in required_minutes.items():
+                unmet_amt = req - (req * scale)
+                if unmet_amt > 0.5:
+                    summary["unmet"][name] = round(unmet_amt)
+
+            for queue_name, alloc_minutes in allocations:
+                remaining_alloc = alloc_minutes
+                while remaining_alloc > 0.5:
+                    eligible = [t for t in tech_capacity if t["remaining"] > 0.5 and t["slots_used"] < 4]
+                    if not eligible:
+                        summary["unmet"][queue_name] = summary["unmet"].get(queue_name, 0) + round(remaining_alloc)
+                        break
+                    pick = max(eligible, key=lambda t: t["remaining"])
+                    chunk = min(remaining_alloc, pick["remaining"])
+                    chunk_rounded = max(5, round(chunk / 5.0) * 5)
+                    chunk_rounded = min(chunk_rounded, pick["remaining"])
+                    pick["slots_used"] += 1
+                    session.execute(text("""
+                        INSERT INTO schedule_proposals (log_date, dept_prefix, tech_name, proposal_slot, queue_name, duration_minutes)
+                        VALUES (:c_date, :pfx, :t_name, :slot, :queue, :dur)
+                    """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": pick["tech"], "slot": pick["slots_used"], "queue": queue_name, "dur": int(chunk_rounded)})
+                    pick["remaining"] -= chunk_rounded
+                    remaining_alloc -= chunk_rounded
+        session.commit()
+
+    summary["unused_capacity"] = round(sum(t["remaining"] for t in tech_capacity))
+    return summary
+
+def apply_schedule_proposal(dept_prefix, db_table):
+    """Writes an approved proposal into the real slot table -- starts real timers. Skips
+    slots that are already occupied by an active (non-submitted) assignment rather than
+    clobbering a tech's in-progress work, and reports anything it had to skip."""
+    skipped = []
+    with db_conn.session as session:
+        queue_rows = session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=:pfx"), {"pfx": dept_prefix}).fetchall()
+        rate_strings = {r.queue_name: r.goal_target for r in queue_rows}
+        proposal_rows = session.execute(text("SELECT tech_name, proposal_slot, queue_name, duration_minutes FROM schedule_proposals WHERE log_date=:c_date AND dept_prefix=:pfx ORDER BY tech_name, proposal_slot"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
+
+        by_tech = {}
+        for r in proposal_rows:
+            by_tech.setdefault(r.tech_name, []).append(r)
+
+        now_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
+
+        for tech_name, rows in by_tech.items():
+            existing = session.execute(text(f"SELECT slot_id, queue, submitted FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name"), {"c_date": CURRENT_DATE, "t_name": tech_name}).fetchall()
+            occupied = {e.slot_id for e in existing if e.queue is not None and e.submitted == 0}
+            free_slots = [s for s in range(1, 5) if s not in occupied]
+
+            for row in rows:
+                if not free_slots:
+                    skipped.append(f"{tech_name}: no free slot left for {row.queue_name}")
+                    continue
+                target_slot = free_slots.pop(0)
+                goal_str = rate_strings.get(row.queue_name, "")
+                session.execute(text(f"""
+                    INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes, input_number, tech_notified, supervisor_notified, submitted)
+                    VALUES (:c_date, :t_name, :s_id, :queue, :goal, :st, :dur, NULL, 0, 0, 0)
+                    ON CONFLICT (log_date, tech_name, slot_id) DO UPDATE
+                    SET queue=EXCLUDED.queue, goal=EXCLUDED.goal, start_time=EXCLUDED.start_time, duration_minutes=EXCLUDED.duration_minutes, submitted=0, input_number=NULL
+                """), {"c_date": CURRENT_DATE, "t_name": tech_name, "s_id": target_slot, "queue": row.queue_name, "goal": goal_str, "st": now_str, "dur": row.duration_minutes})
+
+        session.execute(text("DELETE FROM schedule_proposals WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix})
+        session.commit()
+    return skipped
+
+@st.fragment
+def render_autoscheduler_tab():
+    if not is_manager:
+        st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to use the auto-scheduler.")
+        return
+
+    for dept_prefix, db_table, dept_label in AUTOSCHEDULER_DEPTS:
+        st.subheader(f"🗓️ {dept_label} — Today's Shift Schedule")
+
+        if HOMEBASE_API_KEY:
+            if st.button(f"🔄 Sync Shifts from Homebase", key=f"hb_sync_{dept_prefix}", use_container_width=True):
+                result, error = sync_homebase_shifts(dept_prefix)
+                if error:
+                    st.error(f"⚠️ {error}")
+                else:
+                    if result["matched"]:
+                        st.success(f"Synced {len(result['matched'])} shift(s): " + ", ".join(f"{name} ({s}–{e})" for name, (s, e) in result["matched"].items()))
+                    else:
+                        st.warning(f"Homebase returned {result['total_fetched']} shift(s) today, but none matched a name in your {dept_label} roster.")
+                    if result["unmatched_names"]:
+                        st.caption(f"Not matched to anyone in your roster (name mismatch?): {', '.join(result['unmatched_names'])}")
+                    fragment_rerun()
+        else:
+            st.caption("💡 Homebase sync available once `[homebase]` credentials are added to secrets — manual entry below works either way.")
+
+        with db_conn.session as session:
+            roster_rows = session.execute(text("SELECT tech_name FROM global_roster WHERE dept_prefix=:pfx ORDER BY tech_name"), {"pfx": dept_prefix}).fetchall()
+            shift_rows = session.execute(text("SELECT tech_name, shift_start, shift_end FROM tech_shifts WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
+        existing_shifts = {r.tech_name: (r.shift_start, r.shift_end) for r in shift_rows}
+
+        if not roster_rows:
+            st.info(f"No technicians assigned to {dept_label} yet. Add them from the sidebar first.")
+            continue
+
+        shift_form_state = {}
+        for r in roster_rows:
+            tech_name = r.tech_name
+            t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
+            cols = st.columns([2, 2, 1, 1])
+            cols[0].markdown(f"**{tech_name}**")
+
+            preset_options = ["Not Working Today"] + list(SHIFT_PRESETS.keys()) + ["Custom"]
+            default_index = 0
+            custom_start, custom_end = dtime(9, 0), dtime(17, 0)
+            if tech_name in existing_shifts:
+                s_str, e_str = existing_shifts[tech_name]
+                matched_preset = next((label for label, (ps, pe) in SHIFT_PRESETS.items() if ps.strftime("%H:%M") == s_str and pe.strftime("%H:%M") == e_str), None)
+                if matched_preset:
+                    default_index = preset_options.index(matched_preset)
+                else:
+                    default_index = preset_options.index("Custom")
+                    custom_start = datetime.strptime(s_str, "%H:%M").time()
+                    custom_end = datetime.strptime(e_str, "%H:%M").time()
+
+            chosen = cols[1].selectbox("Shift", options=preset_options, index=default_index, key=f"shift_choice_{dept_prefix}_{t_id}_{CURRENT_DATE}", label_visibility="collapsed")
+
+            if chosen == "Custom":
+                c_start = cols[2].time_input("Start", value=custom_start, key=f"shift_start_{dept_prefix}_{t_id}_{CURRENT_DATE}", label_visibility="collapsed")
+                c_end = cols[3].time_input("End", value=custom_end, key=f"shift_end_{dept_prefix}_{t_id}_{CURRENT_DATE}", label_visibility="collapsed")
+                shift_form_state[tech_name] = (chosen, c_start, c_end)
+            elif chosen == "Not Working Today":
+                shift_form_state[tech_name] = (chosen, None, None)
+            else:
+                p_start, p_end = SHIFT_PRESETS[chosen]
+                shift_form_state[tech_name] = (chosen, p_start, p_end)
+
+        if st.button(f"💾 Save {dept_label} Shift Schedule", key=f"save_shifts_{dept_prefix}", use_container_width=True):
+            try:
+                with db_conn.session as session:
+                    for tech_name, (chosen, s_time, e_time) in shift_form_state.items():
+                        if chosen == "Not Working Today":
+                            session.execute(text("DELETE FROM tech_shifts WHERE log_date=:c_date AND dept_prefix=:pfx AND tech_name=:t_name"), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name})
+                        else:
+                            session.execute(text("""
+                                INSERT INTO tech_shifts (log_date, dept_prefix, tech_name, shift_start, shift_end)
+                                VALUES (:c_date, :pfx, :t_name, :s_start, :s_end)
+                                ON CONFLICT (log_date, dept_prefix, tech_name) DO UPDATE SET shift_start=EXCLUDED.shift_start, shift_end=EXCLUDED.shift_end
+                            """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name, "s_start": s_time.strftime("%H:%M"), "s_end": e_time.strftime("%H:%M")})
+                    session.commit()
+                st.success("Shift schedule saved.")
+                fragment_rerun()
+            except Exception as e:
+                st.error(f"⚠️ Couldn't save the shift schedule right now: {str(e)}")
+
+        st.markdown("---")
+        st.subheader(f"⚙️ {dept_label} — Generate Proposal")
+        st.caption("Standard run anchors to 1:00 PM EST vs. each tech's shift end. Recalculating later uses the actual current time instead.")
+
+        gen_col1, gen_col2 = st.columns(2)
+        one_pm_today = datetime.combine(now_eastern_naive().date(), dtime(13, 0))
+        if gen_col1.button(f"▶️ Generate Standard Proposal (1:00 PM anchor)", key=f"gen_std_{dept_prefix}", use_container_width=True):
+            summary = generate_schedule_proposal(dept_prefix, one_pm_today)
+            st.session_state[f"last_proposal_summary_{dept_prefix}"] = summary
+            fragment_rerun()
+        if gen_col2.button(f"🔁 Recalculate Now (current time anchor)", key=f"gen_now_{dept_prefix}", use_container_width=True):
+            summary = generate_schedule_proposal(dept_prefix, now_eastern_naive())
+            st.session_state[f"last_proposal_summary_{dept_prefix}"] = summary
+            fragment_rerun()
+
+        with db_conn.session as session:
+            proposal_rows = session.execute(text("SELECT tech_name, proposal_slot, queue_name, duration_minutes FROM schedule_proposals WHERE log_date=:c_date AND dept_prefix=:pfx ORDER BY tech_name, proposal_slot"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
+
+        if not proposal_rows:
+            st.info("No proposal generated yet for today. Enter shifts and volume, then click Generate.")
+        else:
+            summary = st.session_state.get(f"last_proposal_summary_{dept_prefix}")
+            if summary:
+                s1, s2, s3 = st.columns(3)
+                s1.metric("Total Tech-Minutes Available", f"{round(summary['total_capacity'])} min")
+                s2.metric("Total Tech-Minutes Needed", f"{round(summary['total_required'])} min")
+                s3.metric("Unused Capacity", f"{summary['unused_capacity']} min")
+                if summary["unmet"]:
+                    st.warning("⚠️ Not enough capacity to fully clear today's volume for: " + ", ".join(f"{k} (~{v} min short)" for k, v in summary["unmet"].items()))
+
+            st.markdown("**Proposed Assignments (review before approving):**")
+            by_tech_display = {}
+            for r in proposal_rows:
+                by_tech_display.setdefault(r.tech_name, []).append(r)
+            for tech_name, rows in by_tech_display.items():
+                line = f"👤 **{tech_name}**: " + " → ".join(f"{r.queue_name} ({r.duration_minutes} min)" for r in rows)
+                st.markdown(line)
+
+            approve_col1, approve_col2 = st.columns(2)
+            if approve_col1.button(f"✅ Approve & Apply {dept_label} Schedule", key=f"approve_{dept_prefix}", type="primary", use_container_width=True):
+                try:
+                    skipped = apply_schedule_proposal(dept_prefix, db_table)
+                    if skipped:
+                        st.warning("Applied with some exceptions (existing active slots were not overwritten):\n\n" + "\n".join(f"- {s}" for s in skipped))
+                    else:
+                        st.success(f"{dept_label} schedule applied — timers started for all assigned slots.")
+                    st.session_state.pop(f"last_proposal_summary_{dept_prefix}", None)
+                    fragment_rerun()
+                except Exception as e:
+                    st.error(f"⚠️ Couldn't apply this schedule right now: {str(e)}")
+            if approve_col2.button(f"🗑️ Discard Proposal", key=f"discard_{dept_prefix}", use_container_width=True):
+                try:
+                    with db_conn.session as session:
+                        session.execute(text("DELETE FROM schedule_proposals WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix})
+                        session.commit()
+                    st.session_state.pop(f"last_proposal_summary_{dept_prefix}", None)
+                    fragment_rerun()
+                except Exception as e:
+                    st.error(f"⚠️ Couldn't discard this proposal right now: {str(e)}")
+
+with tab_sched:
+    render_autoscheduler_tab()
 
 # --- 8. DYNAMIC QUEUE & ROSTER MANAGEMENT CONFIGURATION TAB ---
 @st.fragment
