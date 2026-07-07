@@ -879,82 +879,85 @@ with tab_mgmt:
 
 # --- 9. ADVANCED HISTORICAL & TRENDS ANALYTICS TAB ---
 with tab_analytics:
-    st.header("📊 Cumulative Corporate Analytics Ledger")
-    
-    date_cols = st.columns(2)
-    start_filt = date_cols[0].date_input("Start History Date", value=datetime.now() - timedelta(days=30))
-    end_filt = date_cols[1].date_input("End History Date", value=datetime.now())
-    
-    query = text("""
-        SELECT log_date, department, tech_name, queue, goal, input_number, duration_minutes 
-        FROM metrics_history 
-        WHERE log_date >= :start AND log_date <= :end
-    """)
-    
-    with db_conn.session as session:
-        res_analytics = session.execute(query, {"start": start_filt.strftime("%Y-%m-%d"), "end": end_filt.strftime("%Y-%m-%d")}).fetchall()
-    
-    if not res_analytics:
-        st.info("💡 No production records logged during this timeframe configuration.")
+    if not is_manager:
+        st.warning("🔒 Access Locked: Enter the valid password (`admin123`) in the left sidebar to view analytics.")
     else:
-        df_analytics = pd.DataFrame(res_analytics)
-        total_blocks = len(df_analytics)
-        total_units = df_analytics["input_number"].sum()
+        st.header("📊 Cumulative Corporate Analytics Ledger")
+    
+        date_cols = st.columns(2)
+        start_filt = date_cols[0].date_input("Start History Date", value=datetime.now() - timedelta(days=30))
+        end_filt = date_cols[1].date_input("End History Date", value=datetime.now())
+    
+        query = text("""
+            SELECT log_date, department, tech_name, queue, goal, input_number, duration_minutes 
+            FROM metrics_history 
+            WHERE log_date >= :start AND log_date <= :end
+        """)
+    
+        with db_conn.session as session:
+            res_analytics = session.execute(query, {"start": start_filt.strftime("%Y-%m-%d"), "end": end_filt.strftime("%Y-%m-%d")}).fetchall()
+    
+        if not res_analytics:
+            st.info("💡 No production records logged during this timeframe configuration.")
+        else:
+            df_analytics = pd.DataFrame(res_analytics)
+            total_blocks = len(df_analytics)
+            total_units = df_analytics["input_number"].sum()
         
-        st.markdown("---")
-        st.subheader("👤 Technician Production Log Matrix (By Date & Queue)")
-        st.markdown("📋 **Calculations evaluate goals using the precise time used by the technician.**")
+            st.markdown("---")
+            st.subheader("👤 Technician Production Log Matrix (By Date & Queue)")
+            st.markdown("📋 **Calculations evaluate goals using the precise time used by the technician.**")
         
-        selected_techs = st.multiselect("Filter by Technicians:", options=df_analytics["tech_name"].unique(), default=df_analytics["tech_name"].unique())
-        df_filtered = df_analytics[df_analytics["tech_name"].isin(selected_techs)].copy()
+            selected_techs = st.multiselect("Filter by Technicians:", options=df_analytics["tech_name"].unique(), default=df_analytics["tech_name"].unique())
+            df_filtered = df_analytics[df_analytics["tech_name"].isin(selected_techs)].copy()
         
-        if not df_filtered.empty:
-            def recalculate_pro_rata_metrics(row):
-                raw_goal_str = str(row["goal"])
-                match = re.search(r'\d+', raw_goal_str)
-                if not match: return pd.Series([0, "✅ Met Goal"])
-                base_hourly_target = int(match.group())
-                actual_min = max(1, int(row["duration_minutes"]))
-                pro_rated_calculated_goal = max(1, int(float(base_hourly_target) * (float(actual_min) / 60.0)))
-                status_label = "✅ Met Goal" if int(row["input_number"]) >= pro_rated_calculated_goal else "❌ Missed Goal"
-                return pd.Series([pro_rated_calculated_goal, status_label])
+            if not df_filtered.empty:
+                def recalculate_pro_rata_metrics(row):
+                    raw_goal_str = str(row["goal"])
+                    match = re.search(r'\d+', raw_goal_str)
+                    if not match: return pd.Series([0, "✅ Met Goal"])
+                    base_hourly_target = int(match.group())
+                    actual_min = max(1, int(row["duration_minutes"]))
+                    pro_rated_calculated_goal = max(1, int(float(base_hourly_target) * (float(actual_min) / 60.0)))
+                    status_label = "✅ Met Goal" if int(row["input_number"]) >= pro_rated_calculated_goal else "❌ Missed Goal"
+                    return pd.Series([pro_rated_calculated_goal, status_label])
 
-            df_filtered[["Pro-Rated Goal", "True Performance Status"]] = df_filtered.apply(recalculate_pro_rata_metrics, axis=1)
-            df_filtered["Actual Time Used"] = df_filtered["duration_minutes"].apply(lambda x: f"{x} Min")
+                df_filtered[["Pro-Rated Goal", "True Performance Status"]] = df_filtered.apply(recalculate_pro_rata_metrics, axis=1)
+                df_filtered["Actual Time Used"] = df_filtered["duration_minutes"].apply(lambda x: f"{x} Min")
             
-            display_df = df_filtered[[
-                "log_date", "tech_name", "department", "queue", "Actual Time Used", "Pro-Rated Goal", "input_number", "True Performance Status"
-            ]].rename(columns={
-                "log_date": "Date", "tech_name": "Technician Name", "department": "Department", "queue": "Assigned Queue", "input_number": "Logged Units"
-            })
+                display_df = df_filtered[[
+                    "log_date", "tech_name", "department", "queue", "Actual Time Used", "Pro-Rated Goal", "input_number", "True Performance Status"
+                ]].rename(columns={
+                    "log_date": "Date", "tech_name": "Technician Name", "department": "Department", "queue": "Assigned Queue", "input_number": "Logged Units"
+                })
             
-            st.dataframe(display_df.style.map(lambda val: 'background-color: #ffccd5' if val == '❌ Missed Goal' else 'background-color: #d1e7dd', subset=['True Performance Status']), use_container_width=True, hide_index=True)
+                st.dataframe(display_df.style.map(lambda val: 'background-color: #ffccd5' if val == '❌ Missed Goal' else 'background-color: #d1e7dd', subset=['True Performance Status']), use_container_width=True, hide_index=True)
             
-            true_missed_count = (df_filtered["True Performance Status"] == "❌ Missed Goal").sum()
+                true_missed_count = (df_filtered["True Performance Status"] == "❌ Missed Goal").sum()
             
-            k1, k2, k3 = st.columns(3)
-            k1.metric("⏱️ Shift Blocks Evaluated", f"{total_blocks} Blocks")
-            k2.metric("📦 Volume Processed", f"{total_units:,} Units")
-            k3.metric("🚨 True Pro-Rata Deficits Flagged", f"{true_missed_count} Incidents")
-        else:
-            st.warning("Please select at least one technician profile.")
-            # display_df is intentionally set to an empty frame with the expected columns here.
-            # Previously this branch left display_df undefined, and the trend chart below
-            # referenced it unconditionally -- if a user deselected every technician, that threw
-            # an uncaught NameError which halted the ENTIRE script at that point in the run,
-            # silently skipping everything rendered after it (including the daily checklist
-            # section further down the page).
-            display_df = pd.DataFrame(columns=["Date", "Technician Name", "Department", "Assigned Queue", "Logged Units"])
+                k1, k2, k3 = st.columns(3)
+                k1.metric("⏱️ Shift Blocks Evaluated", f"{total_blocks} Blocks")
+                k2.metric("📦 Volume Processed", f"{total_units:,} Units")
+                k3.metric("🚨 True Pro-Rata Deficits Flagged", f"{true_missed_count} Incidents")
+            else:
+                st.warning("Please select at least one technician profile.")
+                # display_df is intentionally set to an empty frame with the expected columns here.
+                # Previously this branch left display_df undefined, and the trend chart below
+                # referenced it unconditionally -- if a user deselected every technician, that threw
+                # an uncaught NameError which halted the ENTIRE script at that point in the run,
+                # silently skipping everything rendered after it (including the daily checklist
+                # section further down the page).
+                display_df = pd.DataFrame(columns=["Date", "Technician Name", "Department", "Assigned Queue", "Logged Units"])
             
-        st.markdown("---")
-        st.subheader("📈 Operational Velocity Trend Analysis")
-        trend_view_option = st.radio("Group Trend Visualization By:", ["Individual Technician Trends", "Queue Volume Trends"], horizontal=True)
-        if display_df.empty:
-            st.caption("No data to chart for the current technician selection.")
-        elif trend_view_option == "Individual Technician Trends":
-            st.line_chart(display_df.groupby(["Date", "Technician Name"])["Logged Units"].sum().unstack(fill_value=0))
-        else:
-            st.line_chart(display_df.groupby(["Date", "Assigned Queue"])["Logged Units"].sum().unstack(fill_value=0))
+            st.markdown("---")
+            st.subheader("📈 Operational Velocity Trend Analysis")
+            trend_view_option = st.radio("Group Trend Visualization By:", ["Individual Technician Trends", "Queue Volume Trends"], horizontal=True)
+            if display_df.empty:
+                st.caption("No data to chart for the current technician selection.")
+            elif trend_view_option == "Individual Technician Trends":
+                st.line_chart(display_df.groupby(["Date", "Technician Name"])["Logged Units"].sum().unstack(fill_value=0))
+            else:
+                st.line_chart(display_df.groupby(["Date", "Assigned Queue"])["Logged Units"].sum().unstack(fill_value=0))
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
 def render_daily_verification_section():
@@ -1037,7 +1040,7 @@ def render_daily_verification_section():
             render_checklist_row("Central Fill Queue Checked", "central_fill_queue", "c_fill")
             render_checklist_row("Data Re-Entry Checked", "data_re_entry", "re_ent")
             render_checklist_row("Dispense Queue Checked", "dispense", "disp")
-            render_checklist_row("ERx Queue Checked", "erx_queue", "erx_chk")
+            render_checklist_row("ERx Queue Checked-Any Rx from previous day?", "erx_queue", "erx_chk")
             render_checklist_row("Future Bill Queue Checked", "future_bill", "fut")
             render_checklist_row("On Hold Queue Checked", "on_hold_queue", "on_hld")
             render_checklist_row("Ordering Queue Checked", "ordering", "ord")
