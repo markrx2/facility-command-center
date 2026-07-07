@@ -1024,7 +1024,7 @@ def render_daily_verification_section():
             render_checklist_row("Central Fill Queue Checked", "central_fill_queue", "c_fill")
             render_checklist_row("Data Re-Entry Checked", "data_re_entry", "re_ent")
             render_checklist_row("Dispense Queue Checked", "dispense", "disp")
-            render_checklist_row("ERx Queue Checked-Any Rx from previous day?", "erx_queue", "erx_chk")
+            render_checklist_row("ERx Queue Checked", "erx_queue", "erx_chk")
             render_checklist_row("Future Bill Queue Checked", "future_bill", "fut")
             render_checklist_row("On Hold Queue Checked", "on_hold_queue", "on_hld")
             render_checklist_row("Ordering Queue Checked", "ordering", "ord")
