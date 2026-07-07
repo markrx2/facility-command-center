@@ -276,6 +276,11 @@ db_conn = initialize_system_database()
 # --- 2. MULTI-CHANNEL REAL-TIME NOTIFICATION MATRIX ENGINE ---
 GOOGLE_CHAT_GLOBAL_OPERATIONS_WEBHOOK = st.secrets["google_chat"]["webhook_url"]
 
+# Manager/admin password now comes from st.secrets rather than being hardcoded in source.
+# To change it: edit the [admin] password value in your secrets.toml (or the Secrets panel
+# on Streamlit Community Cloud) and reboot the app -- no code change needed.
+ADMIN_PASSWORD = st.secrets["admin"]["password"]
+
 def dispatch_real_time_alert(message_body):
     payload = {"text": message_body}
     headers = {"Content-Type": "application/json; charset=UTF-8"}
@@ -475,7 +480,7 @@ execution_global_background_automation_engine()
 # --- 4. GLOBAL SIDEBAR MANAGEMENT CONTROL HUB ---
 st.sidebar.header("🔐 Global System Control Deck")
 pwd_input = st.sidebar.text_input("Enter Manager Override Password:", type="password", key="mgr_pwd_input_field")
-is_manager = pwd_input == "admin123"
+is_manager = pwd_input == ADMIN_PASSWORD
 
 if is_manager:
     st.sidebar.success("🔑 Admin Privileges Active")
@@ -596,7 +601,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         st.info(f"💡 No personnel assigned to {dept_label} currently. Use the left sidebar panel to assign employees to this department.")
         return
 
-    is_mgr_active = st.session_state.get("mgr_pwd_input_field") == "admin123"
+    is_mgr_active = st.session_state.get("mgr_pwd_input_field") == ADMIN_PASSWORD
 
     for worker, tech_profiles in active_roster.items():
         w_id = hashlib.md5(worker.encode('utf-8')).hexdigest()[:8]
@@ -801,7 +806,7 @@ with tab_mgmt:
     st.markdown("---")
     
     if not is_manager:
-        st.warning("🔒 Access Locked: Enter the valid password (`admin123`) in the left sidebar to unlock modifications.")
+        st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to unlock modifications.")
     else:
         m_col1, m_col2 = st.columns(2)
         
@@ -880,7 +885,7 @@ with tab_mgmt:
 # --- 9. ADVANCED HISTORICAL & TRENDS ANALYTICS TAB ---
 with tab_analytics:
     if not is_manager:
-        st.warning("🔒 Access Locked: Enter the valid password (`admin123`) in the left sidebar to view analytics.")
+        st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to view analytics.")
     else:
         st.header("📊 Cumulative Corporate Analytics Ledger")
     
@@ -1040,7 +1045,7 @@ def render_daily_verification_section():
             render_checklist_row("Central Fill Queue Checked", "central_fill_queue", "c_fill")
             render_checklist_row("Data Re-Entry Checked", "data_re_entry", "re_ent")
             render_checklist_row("Dispense Queue Checked", "dispense", "disp")
-            render_checklist_row("ERx Queue Checked-Any Rx from previous day?", "erx_queue", "erx_chk")
+            render_checklist_row("ERx Queue Checked", "erx_queue", "erx_chk")
             render_checklist_row("Future Bill Queue Checked", "future_bill", "fut")
             render_checklist_row("On Hold Queue Checked", "on_hold_queue", "on_hld")
             render_checklist_row("Ordering Queue Checked", "ordering", "ord")
