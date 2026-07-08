@@ -925,6 +925,13 @@ SHIFT_PRESETS = {
     "10:00 AM - 6:00 PM": (dtime(10, 0), dtime(18, 0)),
 }
 
+# Scheduling preferences: try to give someone a full TARGET_BLOCK_MINUTES (or more) on one
+# queue rather than fragmenting their day into many small pieces, but never go below
+# MIN_ASSIGNMENT_MINUTES -- if volume/availability can't support the target, fall back to
+# the largest block that's still reasonable rather than forcing something tiny.
+MIN_ASSIGNMENT_MINUTES = 30
+TARGET_BLOCK_MINUTES = 120
+
 def parse_hourly_rate(goal_str):
     m = re.search(r'\d+', str(goal_str))
     return int(m.group()) if m else 0
@@ -1083,13 +1090,28 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
             for queue_name, alloc_minutes in allocations:
                 remaining_alloc = alloc_minutes
                 while remaining_alloc > 0.5:
-                    eligible = [t for t in tech_capacity if t["remaining"] >= 5 and t["slots_used"] < 4 and queue_name not in exclusions.get(t["tech"], set())]
+                    eligible = [t for t in tech_capacity if t["remaining"] >= MIN_ASSIGNMENT_MINUTES and t["slots_used"] < 4 and queue_name not in exclusions.get(t["tech"], set())]
                     if not eligible:
                         summary["unmet"][queue_name] = summary["unmet"].get(queue_name, 0) + round(remaining_alloc)
                         break
-                    pick = max(eligible, key=lambda t: t["remaining"])
+
+                    # Prefer a tech who can cover a full target-sized (or bigger) block of
+                    # what's still needed here, rather than immediately reaching for whoever
+                    # happens to have the single largest amount of time left. Among those,
+                    # pick the one with the SMALLEST qualifying remaining capacity, since that
+                    # uses up their day efficiently without hoarding a very-available tech's
+                    # extra time that another queue might need more.
+                    desired_block = min(remaining_alloc, TARGET_BLOCK_MINUTES)
+                    strong_candidates = [t for t in eligible if t["remaining"] >= desired_block]
+                    if strong_candidates:
+                        pick = min(strong_candidates, key=lambda t: t["remaining"])
+                    else:
+                        # Nobody can hit the target -- fall back to whoever has the most time
+                        # left, which at least keeps the block as large as availability allows.
+                        pick = max(eligible, key=lambda t: t["remaining"])
+
                     chunk = min(remaining_alloc, pick["remaining"])
-                    chunk_rounded = max(5, round(chunk / 5.0) * 5)
+                    chunk_rounded = max(MIN_ASSIGNMENT_MINUTES, round(chunk / 15.0) * 15)
                     chunk_rounded = min(chunk_rounded, pick["remaining"])
                     pick["slots_used"] += 1
                     session.execute(text("""
