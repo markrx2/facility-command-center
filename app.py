@@ -1083,7 +1083,7 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
             for queue_name, alloc_minutes in allocations:
                 remaining_alloc = alloc_minutes
                 while remaining_alloc > 0.5:
-                    eligible = [t for t in tech_capacity if t["remaining"] > 0.5 and t["slots_used"] < 4 and queue_name not in exclusions.get(t["tech"], set())]
+                    eligible = [t for t in tech_capacity if t["remaining"] >= 5 and t["slots_used"] < 4 and queue_name not in exclusions.get(t["tech"], set())]
                     if not eligible:
                         summary["unmet"][queue_name] = summary["unmet"].get(queue_name, 0) + round(remaining_alloc)
                         break
@@ -1158,6 +1158,17 @@ def render_autoscheduler_tab():
         if HOMEBASE_API_KEY:
             if st.button(f"🔄 Sync Shifts from Homebase", key=f"hb_sync_{dept_prefix}", use_container_width=True):
                 result, error = sync_homebase_shifts(dept_prefix)
+                st.session_state[f"hb_sync_outcome_{dept_prefix}"] = {"result": result, "error": error}
+                # Rerun so the shift dropdowns below immediately reflect the freshly-synced
+                # data (they were previously stale on this same render since we skipped the
+                # rerun to preserve the message -- this way we get both: the message is
+                # persisted in session_state below instead of a one-off st.success() call,
+                # so it survives this rerun instead of needing the rerun to be skipped.
+                fragment_rerun()
+
+            outcome = st.session_state.get(f"hb_sync_outcome_{dept_prefix}")
+            if outcome:
+                result, error = outcome["result"], outcome["error"]
                 if error:
                     st.error(f"⚠️ {error}")
                 else:
@@ -1167,10 +1178,9 @@ def render_autoscheduler_tab():
                         st.warning(f"Homebase returned {result['total_fetched']} shift(s) today, but none matched a name in your {dept_label} roster.")
                     if result["unmatched_names"]:
                         st.caption(f"Not matched to anyone in your roster (name mismatch?): {', '.join(result['unmatched_names'])}")
-                    st.info("💡 The shift rows below will reflect this sync the next time you interact with this tab (e.g. clicking Generate Proposal already reads the freshly-synced data regardless of what's shown below).")
-                    # Deliberately NOT calling fragment_rerun() here -- it was firing immediately
-                    # after the message above, which wiped it out before it could be read (the
-                    # same "flash and vanish" bug fixed earlier for the daily checklist submit).
+                if st.button("✕ Dismiss", key=f"hb_dismiss_{dept_prefix}"):
+                    st.session_state.pop(f"hb_sync_outcome_{dept_prefix}", None)
+                    fragment_rerun()
         else:
             st.caption("💡 Homebase sync available once `[homebase]` credentials are added to secrets — manual entry below works either way.")
 
@@ -1322,7 +1332,7 @@ def render_autoscheduler_tab():
                     rc1, rc2, rc3 = st.columns([2.5, 1, 0.8])
                     q_options = dept_queue_names if r.queue_name in dept_queue_names else dept_queue_names + [r.queue_name]
                     new_q = rc1.selectbox("Queue", options=q_options, index=q_options.index(r.queue_name), key=f"padj_q_{dept_prefix}_{t_id}_{r.proposal_slot}", label_visibility="collapsed")
-                    new_dur = rc2.number_input("Min", min_value=5, step=5, value=int(r.duration_minutes), key=f"padj_d_{dept_prefix}_{t_id}_{r.proposal_slot}", label_visibility="collapsed")
+                    new_dur = rc2.number_input("Min", min_value=5, step=5, value=max(5, int(r.duration_minutes)), key=f"padj_d_{dept_prefix}_{t_id}_{r.proposal_slot}", label_visibility="collapsed")
                     remove = rc3.checkbox("Remove", key=f"padj_rm_{dept_prefix}_{t_id}_{r.proposal_slot}")
                     if remove:
                         edited_deletes.append((tech_name, r.proposal_slot))
