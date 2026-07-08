@@ -288,6 +288,19 @@ def initialize_system_database():
         """))
         session.commit()
 
+        # Permanent (not per-day) list of queues a given tech should never be auto-assigned
+        # to, e.g. a tech who isn't trained/authorized for a particular queue. Read by the
+        # scheduler when allocating; has no effect on manual "Start Clock" assignments.
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS tech_queue_exclusions (
+                dept_prefix TEXT,
+                tech_name TEXT,
+                queue_name TEXT,
+                PRIMARY KEY (dept_prefix, tech_name, queue_name)
+            )
+        """))
+        session.commit()
+
         # SELF-HEALING AUTOMATIC QUEUE RECOVERY SEEDER 
         res = session.execute(text("SELECT COUNT(*) as cnt FROM dynamic_queues")).fetchone()
         if res[0] == 0:
@@ -781,6 +794,22 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     st.error(f"⚠️ Couldn't start this clock right now: {str(e)}")
                         else:
                             st.warning("Configure queues in Management panel.")
+                    elif slot_row.start_time is None:
+                        # Auto-scheduler queued this slot to start automatically once an earlier
+                        # slot for this tech is submitted. It's not running yet -- no timer, no
+                        # display target -- but a manual override is available if someone wants
+                        # to jump ahead rather than wait for the sequence.
+                        st.markdown(f"Queue: `{slot_row.queue}`")
+                        st.info("⏳ Queued — will start automatically once your current slot is submitted.")
+                        if st.button("▶️ Start Now Anyway", key=f"queued_start_now_{prefix}_{w_id}_{slot_num}", use_container_width=True):
+                            now_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
+                            try:
+                                with db_conn.session as session:
+                                    session.execute(text(f"UPDATE {db_table} SET start_time=:st WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": now_str, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                    session.commit()
+                                fragment_rerun()
+                            except Exception as e:
+                                st.error(f"⚠️ Couldn't start this slot right now: {str(e)}")
                     else:
                         db_queue, db_goal, db_start, db_input = slot_row.queue, slot_row.goal, slot_row.start_time, slot_row.input_number
                         db_t_not, db_s_not, db_sub, db_dur_min = slot_row.tech_notified, slot_row.supervisor_notified, slot_row.submitted, slot_row.duration_minutes
@@ -850,6 +879,19 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                             UPDATE {db_table} SET input_number=:val, submitted=1 
                                             WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id
                                         """), {"val": val, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+
+                                        # Auto-advance: this tech may have another queue queued up by
+                                        # the auto-scheduler (assigned but not yet started, since only
+                                        # one slot at a time should be actively running). Start the
+                                        # earliest such slot now that this one is done.
+                                        next_queued = session.execute(text(f"""
+                                            SELECT slot_id FROM {db_table}
+                                            WHERE log_date=:c_date AND tech_name=:t_name AND queue IS NOT NULL AND start_time IS NULL
+                                            ORDER BY slot_id ASC LIMIT 1
+                                        """), {"c_date": CURRENT_DATE, "t_name": worker}).fetchone()
+                                        if next_queued:
+                                            session.execute(text(f"UPDATE {db_table} SET start_time=:st WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), "c_date": CURRENT_DATE, "t_name": worker, "s_id": next_queued.slot_id})
+
                                         session.commit()
                                     # Local to this slot -- the Analytics tab will pick up the new
                                     # metrics_history row on the next full-page heartbeat (every 10s).
@@ -904,7 +946,7 @@ def fetch_homebase_shifts(location_uuid, date_str):
     }
     all_shifts = []
     url = f"https://api.joinhomebase.com/locations/{location_uuid}/shifts"
-    params = {"start_date": date_str, "end_date": date_str, "date_filter": "start_at", "per_page": 100, "page": 1}
+    params = {"start_date": f"{date_str}T00:00:00Z", "end_date": f"{date_str}T23:59:59Z", "date_filter": "start_at", "per_page": 100, "page": 1}
 
     while url:
         resp = requests.get(url, headers=headers, params=params, timeout=10)
@@ -995,6 +1037,11 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
         shift_rows = session.execute(text("SELECT tech_name, shift_start, shift_end FROM tech_shifts WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
         queue_rows = session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=:pfx"), {"pfx": dept_prefix}).fetchall()
         volume_rows = session.execute(text("SELECT queue_name, volume FROM queue_volumes WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
+        exclusion_rows = session.execute(text("SELECT tech_name, queue_name FROM tech_queue_exclusions WHERE dept_prefix=:pfx"), {"pfx": dept_prefix}).fetchall()
+
+    exclusions = {}
+    for r in exclusion_rows:
+        exclusions.setdefault(r.tech_name, set()).add(r.queue_name)
 
     volumes = {r.queue_name: r.volume for r in volume_rows}
     rates = {r.queue_name: parse_hourly_rate(r.goal_target) for r in queue_rows}
@@ -1036,7 +1083,7 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
             for queue_name, alloc_minutes in allocations:
                 remaining_alloc = alloc_minutes
                 while remaining_alloc > 0.5:
-                    eligible = [t for t in tech_capacity if t["remaining"] > 0.5 and t["slots_used"] < 4]
+                    eligible = [t for t in tech_capacity if t["remaining"] > 0.5 and t["slots_used"] < 4 and queue_name not in exclusions.get(t["tech"], set())]
                     if not eligible:
                         summary["unmet"][queue_name] = summary["unmet"].get(queue_name, 0) + round(remaining_alloc)
                         break
@@ -1077,18 +1124,23 @@ def apply_schedule_proposal(dept_prefix, db_table):
             occupied = {e.slot_id for e in existing if e.queue is not None and e.submitted == 0}
             free_slots = [s for s in range(1, 5) if s not in occupied]
 
-            for row in rows:
+            for i, row in enumerate(rows):
                 if not free_slots:
                     skipped.append(f"{tech_name}: no free slot left for {row.queue_name}")
                     continue
                 target_slot = free_slots.pop(0)
                 goal_str = rate_strings.get(row.queue_name, "")
+                # Only the first assignment in the sequence starts immediately (a real
+                # start_time). The rest are inserted as "queued" (start_time NULL, goal/queue
+                # already set) and get auto-started one at a time as each prior one is
+                # submitted -- see the auto-advance logic in the Submit Metrics handler.
+                slot_start = now_str if i == 0 else None
                 session.execute(text(f"""
                     INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes, input_number, tech_notified, supervisor_notified, submitted)
                     VALUES (:c_date, :t_name, :s_id, :queue, :goal, :st, :dur, NULL, 0, 0, 0)
                     ON CONFLICT (log_date, tech_name, slot_id) DO UPDATE
                     SET queue=EXCLUDED.queue, goal=EXCLUDED.goal, start_time=EXCLUDED.start_time, duration_minutes=EXCLUDED.duration_minutes, submitted=0, input_number=NULL
-                """), {"c_date": CURRENT_DATE, "t_name": tech_name, "s_id": target_slot, "queue": row.queue_name, "goal": goal_str, "st": now_str, "dur": row.duration_minutes})
+                """), {"c_date": CURRENT_DATE, "t_name": tech_name, "s_id": target_slot, "queue": row.queue_name, "goal": goal_str, "st": slot_start, "dur": row.duration_minutes})
 
         session.execute(text("DELETE FROM schedule_proposals WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix})
         session.commit()
@@ -1115,7 +1167,10 @@ def render_autoscheduler_tab():
                         st.warning(f"Homebase returned {result['total_fetched']} shift(s) today, but none matched a name in your {dept_label} roster.")
                     if result["unmatched_names"]:
                         st.caption(f"Not matched to anyone in your roster (name mismatch?): {', '.join(result['unmatched_names'])}")
-                    fragment_rerun()
+                    st.info("💡 The shift rows below will reflect this sync the next time you interact with this tab (e.g. clicking Generate Proposal already reads the freshly-synced data regardless of what's shown below).")
+                    # Deliberately NOT calling fragment_rerun() here -- it was firing immediately
+                    # after the message above, which wiped it out before it could be read (the
+                    # same "flash and vanish" bug fixed earlier for the daily checklist submit).
         else:
             st.caption("💡 Homebase sync available once `[homebase]` credentials are added to secrets — manual entry below works either way.")
 
@@ -1179,6 +1234,50 @@ def render_autoscheduler_tab():
                 st.error(f"⚠️ Couldn't save the shift schedule right now: {str(e)}")
 
         st.markdown("---")
+        st.subheader(f"🚫 {dept_label} — Queue Exclusions")
+        st.caption("Queues a tech should never be auto-assigned to (e.g. not trained/authorized for it). Doesn't affect manual Start Clock assignments.")
+
+        with db_conn.session as session:
+            dept_queue_rows = session.execute(text("SELECT queue_name FROM dynamic_queues WHERE dept_prefix=:pfx ORDER BY queue_name"), {"pfx": dept_prefix}).fetchall()
+            existing_exclusion_rows = session.execute(text("SELECT tech_name, queue_name FROM tech_queue_exclusions WHERE dept_prefix=:pfx"), {"pfx": dept_prefix}).fetchall()
+        dept_queue_names = [q.queue_name for q in dept_queue_rows]
+        existing_exclusions = {}
+        for r in existing_exclusion_rows:
+            existing_exclusions.setdefault(r.tech_name, []).append(r.queue_name)
+
+        if not dept_queue_names:
+            st.caption("No queues configured yet for this department.")
+        else:
+            exclusion_form_state = {}
+            for r in roster_rows:
+                tech_name = r.tech_name
+                t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
+                chosen_exclusions = st.multiselect(
+                    f"{tech_name}",
+                    options=dept_queue_names,
+                    default=[q for q in existing_exclusions.get(tech_name, []) if q in dept_queue_names],
+                    key=f"excl_{dept_prefix}_{t_id}"
+                )
+                exclusion_form_state[tech_name] = chosen_exclusions
+
+            if st.button(f"💾 Save {dept_label} Exclusions", key=f"save_excl_{dept_prefix}", use_container_width=True):
+                try:
+                    with db_conn.session as session:
+                        session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx"), {"pfx": dept_prefix})
+                        for tech_name, excluded_queues in exclusion_form_state.items():
+                            for q in excluded_queues:
+                                session.execute(text("""
+                                    INSERT INTO tech_queue_exclusions (dept_prefix, tech_name, queue_name)
+                                    VALUES (:pfx, :t_name, :q)
+                                    ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
+                                """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
+                        session.commit()
+                    st.success("Exclusions saved.")
+                    fragment_rerun()
+                except Exception as e:
+                    st.error(f"⚠️ Couldn't save exclusions right now: {str(e)}")
+
+        st.markdown("---")
         st.subheader(f"⚙️ {dept_label} — Generate Proposal")
         st.caption("Standard run anchors to 1:00 PM EST vs. each tech's shift end. Recalculating later uses the actual current time instead.")
 
@@ -1208,13 +1307,64 @@ def render_autoscheduler_tab():
                 if summary["unmet"]:
                     st.warning("⚠️ Not enough capacity to fully clear today's volume for: " + ", ".join(f"{k} (~{v} min short)" for k, v in summary["unmet"].items()))
 
-            st.markdown("**Proposed Assignments (review before approving):**")
+            st.markdown("**Proposed Assignments (adjust as needed, then save and approve):**")
             by_tech_display = {}
             for r in proposal_rows:
                 by_tech_display.setdefault(r.tech_name, []).append(r)
+
+            edited_updates = []   # (tech_name, proposal_slot, queue_name, duration_minutes)
+            edited_deletes = []   # (tech_name, proposal_slot)
+
             for tech_name, rows in by_tech_display.items():
-                line = f"👤 **{tech_name}**: " + " → ".join(f"{r.queue_name} ({r.duration_minutes} min)" for r in rows)
-                st.markdown(line)
+                t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
+                st.markdown(f"👤 **{tech_name}**")
+                for r in rows:
+                    rc1, rc2, rc3 = st.columns([2.5, 1, 0.8])
+                    q_options = dept_queue_names if r.queue_name in dept_queue_names else dept_queue_names + [r.queue_name]
+                    new_q = rc1.selectbox("Queue", options=q_options, index=q_options.index(r.queue_name), key=f"padj_q_{dept_prefix}_{t_id}_{r.proposal_slot}", label_visibility="collapsed")
+                    new_dur = rc2.number_input("Min", min_value=5, step=5, value=int(r.duration_minutes), key=f"padj_d_{dept_prefix}_{t_id}_{r.proposal_slot}", label_visibility="collapsed")
+                    remove = rc3.checkbox("Remove", key=f"padj_rm_{dept_prefix}_{t_id}_{r.proposal_slot}")
+                    if remove:
+                        edited_deletes.append((tech_name, r.proposal_slot))
+                    else:
+                        edited_updates.append((tech_name, r.proposal_slot, new_q, int(new_dur)))
+
+                if dept_queue_names:
+                    with st.expander(f"+ Add another assignment for {tech_name}"):
+                        add_c1, add_c2, add_c3 = st.columns([2.5, 1, 1])
+                        add_q = add_c1.selectbox("Queue", options=dept_queue_names, key=f"padj_new_q_{dept_prefix}_{t_id}", label_visibility="collapsed")
+                        add_dur = add_c2.number_input("Min", min_value=5, step=5, value=30, key=f"padj_new_d_{dept_prefix}_{t_id}", label_visibility="collapsed")
+                        if add_c3.button("Add", key=f"padj_add_{dept_prefix}_{t_id}"):
+                            try:
+                                next_slot = max([r.proposal_slot for r in rows], default=0) + 1
+                                with db_conn.session as session:
+                                    session.execute(text("""
+                                        INSERT INTO schedule_proposals (log_date, dept_prefix, tech_name, proposal_slot, queue_name, duration_minutes)
+                                        VALUES (:c_date, :pfx, :t_name, :slot, :queue, :dur)
+                                    """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name, "slot": next_slot, "queue": add_q, "dur": int(add_dur)})
+                                    session.commit()
+                                fragment_rerun()
+                            except Exception as e:
+                                st.error(f"⚠️ Couldn't add this assignment right now: {str(e)}")
+
+            if st.button(f"💾 Save Adjustments", key=f"save_adj_{dept_prefix}", use_container_width=True):
+                try:
+                    with db_conn.session as session:
+                        for tech_name, slot, q, dur in edited_updates:
+                            session.execute(text("""
+                                UPDATE schedule_proposals SET queue_name=:q, duration_minutes=:dur
+                                WHERE log_date=:c_date AND dept_prefix=:pfx AND tech_name=:t_name AND proposal_slot=:slot
+                            """), {"q": q, "dur": dur, "c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name, "slot": slot})
+                        for tech_name, slot in edited_deletes:
+                            session.execute(text("""
+                                DELETE FROM schedule_proposals
+                                WHERE log_date=:c_date AND dept_prefix=:pfx AND tech_name=:t_name AND proposal_slot=:slot
+                            """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name, "slot": slot})
+                        session.commit()
+                    st.success("Adjustments saved.")
+                    fragment_rerun()
+                except Exception as e:
+                    st.error(f"⚠️ Couldn't save adjustments right now: {str(e)}")
 
             approve_col1, approve_col2 = st.columns(2)
             if approve_col1.button(f"✅ Approve & Apply {dept_label} Schedule", key=f"approve_{dept_prefix}", type="primary", use_container_width=True):
@@ -1223,7 +1373,7 @@ def render_autoscheduler_tab():
                     if skipped:
                         st.warning("Applied with some exceptions (existing active slots were not overwritten):\n\n" + "\n".join(f"- {s}" for s in skipped))
                     else:
-                        st.success(f"{dept_label} schedule applied — timers started for all assigned slots.")
+                        st.success(f"{dept_label} schedule applied — first assignment started for each tech; the rest will auto-start in sequence as each is submitted.")
                     st.session_state.pop(f"last_proposal_summary_{dept_prefix}", None)
                     fragment_rerun()
                 except Exception as e:
