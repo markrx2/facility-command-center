@@ -719,7 +719,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     if is_mgr_active:
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
                         
-                        if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
+                        if admin_btn_col1.button("🔴 Remove From Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             try:
                                 with db_conn.session as session:
                                     if slot_num == 1:
