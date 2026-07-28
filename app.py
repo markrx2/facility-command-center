@@ -694,18 +694,30 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         
         if is_mgr_active:
-            if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
-                try:
-                    with db_conn.session as session:
-                        session.execute(text(f"DELETE FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name"), {"c_date": CURRENT_DATE, "t_name": worker})
-                        session.execute(text("DELETE FROM global_roster WHERE dept_prefix=:pfx AND tech_name=:t_name"), {"pfx": prefix, "t_name": worker})
-                        session.commit()
-                    st.session_state["selected_profile_state"] = "-- Create New Profile --"
-                    # Full rerun (not fragment-scoped): this changes global_roster, which the
-                    # sidebar's profile dropdown reads from, and the sidebar lives outside this fragment.
+            wipe_armed_key = f"wipe_armed_{prefix}_{w_id}"
+            if not st.session_state.get(wipe_armed_key, False):
+                if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
+                    st.session_state[wipe_armed_key] = True
                     st.rerun()
-                except Exception as e:
-                    st.error(f"⚠️ Couldn't wipe this profile right now: {str(e)}")
+            else:
+                st.warning(f"⚠️ This permanently deletes {worker}'s profile and all of today's timer data for {dept_label}. This cannot be undone.")
+                confirm_col1, confirm_col2 = st.columns(2)
+                if confirm_col1.button(f"✅ Confirm Wipe {worker}", key=f"mgr_wipe_confirm_{prefix}_{w_id}", type="primary", use_container_width=True):
+                    try:
+                        with db_conn.session as session:
+                            session.execute(text(f"DELETE FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name"), {"c_date": CURRENT_DATE, "t_name": worker})
+                            session.execute(text("DELETE FROM global_roster WHERE dept_prefix=:pfx AND tech_name=:t_name"), {"pfx": prefix, "t_name": worker})
+                            session.commit()
+                        st.session_state["selected_profile_state"] = "-- Create New Profile --"
+                        st.session_state.pop(wipe_armed_key, None)
+                        # Full rerun (not fragment-scoped): this changes global_roster, which the
+                        # sidebar's profile dropdown reads from, and the sidebar lives outside this fragment.
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"⚠️ Couldn't wipe this profile right now: {str(e)}")
+                if confirm_col2.button("Cancel", key=f"mgr_wipe_cancel_{prefix}_{w_id}", use_container_width=True):
+                    st.session_state.pop(wipe_armed_key, None)
+                    st.rerun()
 
         cols = st.columns(4)
         
