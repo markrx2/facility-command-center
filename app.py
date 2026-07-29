@@ -1652,47 +1652,51 @@ def render_daily_verification_section():
                 try: return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
                 except: return datetime.now().date()
 
-            def sync_widget_from_db(widget_key, db_value):
-                """
-                Same fix applied to the volume ribbon: a widget with a fixed key only uses
-                its initial value the first time it's ever rendered in this browser session --
-                on every later rerun Streamlit keeps whatever's already in session_state and
-                silently ignores the passed-in value, even though we're re-fetching the DB
-                every time. Without this, another user's saved change would never visibly
-                appear. This forces the widget to catch up whenever the DB value has changed
-                since this session last synced it. Crucially, this assignment happens BEFORE
-                the widget is created and is never mistaken for a user edit, since it doesn't
-                go through on_change.
-                """
-                shadow_key = f"{widget_key}__last_synced"
-                if st.session_state.get(shadow_key) != db_value:
-                    st.session_state[widget_key] = db_value
-                    st.session_state[shadow_key] = db_value
-
-            def _autosave_one_field(db_column, widget_key, is_date=False):
-                """
-                on_change callback -- Streamlit only fires this when a user directly interacts
-                with THIS specific widget, never as a side effect of some other widget/session
-                triggering a rerun. That's what makes this safe: the earlier approach detected
-                "changed" by comparing the rendered value against the database, which couldn't
-                tell a genuine edit apart from a different browser session simply not having
-                caught up to the DB yet (e.g. the very first time it renders that day) -- and
-                that ambiguity is exactly what caused one person's real entries to occasionally
-                get overwritten by another session's stale defaults.
-                """
-                new_value = st.session_state.get(widget_key)
-                val_to_store = str(new_value) if is_date else new_value
-                try:
-                    with db_conn.session as session:
-                        session.execute(text(f"UPDATE daily_checklist SET {db_column}=:val WHERE log_date=:c_date"), {"val": val_to_store, "c_date": CURRENT_DATE})
-                        session.commit()
-                    st.session_state[f"{widget_key}__last_synced"] = new_value
-                except Exception as e:
-                    st.session_state["_checklist_autosave_error"] = str(e)
-
             autosave_error = st.session_state.pop("_checklist_autosave_error", None)
             if autosave_error:
                 st.error(f"⚠️ Autosave failed for a checklist field -- your last entry may not be saved: {autosave_error}")
+
+            def render_synced_field(kind, label, col, widget_key, db_value, db_column):
+                """
+                Tracks, in a session-local variable separate from the widget's own state, "the
+                last value we know for certain is correctly saved to the database" for this
+                field. Whenever the freshly-fetched DB value disagrees with that tracked value
+                (either because this is the very first time this session has ever rendered
+                this field, or because another user's session saved a change since we last
+                looked), the widget is explicitly deleted and recreated with the DB value as
+                its default -- rather than directly overwriting its session_state, which
+                turned out to interact unpredictably with on_change/selectbox internals on a
+                widget's first-ever creation (that combination is what caused a status field to
+                revert to its default a few seconds after being set). Any difference between
+                the widget's returned value and the tracked value on THIS render, once the two
+                are known to already agree going in, can only mean a real user edit just
+                happened -- that's the only case that gets persisted.
+                """
+                tracking_key = f"{widget_key}__tracked_saved_value"
+                if tracking_key not in st.session_state or st.session_state[tracking_key] != db_value:
+                    if widget_key in st.session_state:
+                        del st.session_state[widget_key]
+                    st.session_state[tracking_key] = db_value
+
+                if kind == "status":
+                    idx = opt.index(db_value) if db_value in opt else 0
+                    val = col.selectbox(label, options=opt, index=idx, key=widget_key)
+                elif kind == "date":
+                    val = col.date_input(label, value=db_value, key=widget_key)
+                else:
+                    val = col.text_input(label, value=db_value, key=widget_key)
+
+                if val != st.session_state[tracking_key]:
+                    val_to_store = str(val) if kind == "date" else val
+                    try:
+                        with db_conn.session as session:
+                            session.execute(text(f"UPDATE daily_checklist SET {db_column}=:val WHERE log_date=:c_date"), {"val": val_to_store, "c_date": CURRENT_DATE})
+                            session.commit()
+                        st.session_state[tracking_key] = val
+                    except Exception as e:
+                        st.session_state["_checklist_autosave_error"] = str(e)
+
+                return val
 
             form_states = {}
 
@@ -1706,21 +1710,9 @@ def render_daily_verification_section():
                 stored_by = getattr(chk, f"{db_prefix}_by", "") if chk else ""
                 stored_notes = getattr(chk, f"{db_prefix}_notes", "") if chk else ""
 
-                status_key = f"status_{prefix_key}_{CURRENT_DATE}"
-                odt_key = f"odt_{prefix_key}_{CURRENT_DATE}"
-                tdt_key = f"tdt_{prefix_key}_{CURRENT_DATE}"
-                by_key = f"by_{prefix_key}_{CURRENT_DATE}"
-                notes_key = f"notes_{prefix_key}_{CURRENT_DATE}"
-
-                sync_widget_from_db(status_key, stored_status)
-                sync_widget_from_db(odt_key, parse_stored_date(stored_odt))
-                sync_widget_from_db(tdt_key, parse_stored_date(stored_tdt))
-                sync_widget_from_db(by_key, stored_by)
-                sync_widget_from_db(notes_key, stored_notes)
-
-                curr_status = cols[0].selectbox("Status", options=opt, key=status_key, on_change=_autosave_one_field, args=(db_prefix, status_key))
-                curr_odt = cols[1].date_input("Oldest Date", key=odt_key, on_change=_autosave_one_field, args=(f"{db_prefix}_date", odt_key, True))
-                curr_tdt = cols[2].date_input("Target Date", key=tdt_key, on_change=_autosave_one_field, args=(f"{db_prefix}_target", tdt_key, True))
+                curr_status = render_synced_field("status", "Status", cols[0], f"status_{prefix_key}_{CURRENT_DATE}", stored_status, db_prefix)
+                curr_odt = render_synced_field("date", "Oldest Date", cols[1], f"odt_{prefix_key}_{CURRENT_DATE}", parse_stored_date(stored_odt), f"{db_prefix}_date")
+                curr_tdt = render_synced_field("date", "Target Date", cols[2], f"tdt_{prefix_key}_{CURRENT_DATE}", parse_stored_date(stored_tdt), f"{db_prefix}_target")
             
                 try:
                     date_delta = (datetime.now().date() - curr_odt).days if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"] else (curr_tdt - curr_odt).days
@@ -1738,8 +1730,8 @@ def render_daily_verification_section():
                     is_red = False
                     date_delta = 0
 
-                curr_by = cols[4].text_input("Verified By", key=by_key, on_change=_autosave_one_field, args=(f"{db_prefix}_by", by_key))
-                curr_notes = cols[5].text_input("Notes/Explanations", key=notes_key, on_change=_autosave_one_field, args=(f"{db_prefix}_notes", notes_key))
+                curr_by = render_synced_field("text", "Verified By", cols[4], f"by_{prefix_key}_{CURRENT_DATE}", stored_by, f"{db_prefix}_by")
+                curr_notes = render_synced_field("text", "Notes/Explanations", cols[5], f"notes_{prefix_key}_{CURRENT_DATE}", stored_notes, f"{db_prefix}_notes")
             
                 form_states[db_prefix] = {
                     "label": label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
