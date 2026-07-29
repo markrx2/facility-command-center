@@ -1658,17 +1658,43 @@ def render_daily_verification_section():
                 its initial value the first time it's ever rendered in this browser session --
                 on every later rerun Streamlit keeps whatever's already in session_state and
                 silently ignores the passed-in value, even though we're re-fetching the DB
-                every time. Without this, another user's saved change (or this session's own
-                autosave) would never visibly appear. This forces the widget to catch up
-                whenever the DB value has changed since this session last synced it.
+                every time. Without this, another user's saved change would never visibly
+                appear. This forces the widget to catch up whenever the DB value has changed
+                since this session last synced it. Crucially, this assignment happens BEFORE
+                the widget is created and is never mistaken for a user edit, since it doesn't
+                go through on_change.
                 """
                 shadow_key = f"{widget_key}__last_synced"
                 if st.session_state.get(shadow_key) != db_value:
                     st.session_state[widget_key] = db_value
                     st.session_state[shadow_key] = db_value
 
+            def _autosave_one_field(db_column, widget_key, is_date=False):
+                """
+                on_change callback -- Streamlit only fires this when a user directly interacts
+                with THIS specific widget, never as a side effect of some other widget/session
+                triggering a rerun. That's what makes this safe: the earlier approach detected
+                "changed" by comparing the rendered value against the database, which couldn't
+                tell a genuine edit apart from a different browser session simply not having
+                caught up to the DB yet (e.g. the very first time it renders that day) -- and
+                that ambiguity is exactly what caused one person's real entries to occasionally
+                get overwritten by another session's stale defaults.
+                """
+                new_value = st.session_state.get(widget_key)
+                val_to_store = str(new_value) if is_date else new_value
+                try:
+                    with db_conn.session as session:
+                        session.execute(text(f"UPDATE daily_checklist SET {db_column}=:val WHERE log_date=:c_date"), {"val": val_to_store, "c_date": CURRENT_DATE})
+                        session.commit()
+                    st.session_state[f"{widget_key}__last_synced"] = new_value
+                except Exception as e:
+                    st.session_state["_checklist_autosave_error"] = str(e)
+
+            autosave_error = st.session_state.pop("_checklist_autosave_error", None)
+            if autosave_error:
+                st.error(f"⚠️ Autosave failed for a checklist field -- your last entry may not be saved: {autosave_error}")
+
             form_states = {}
-            pending_autosave = {}  # db_prefix -> field dict, only for rows that actually changed
 
             def render_checklist_row(label, db_prefix, prefix_key):
                 st.markdown(f"##### {label}")
@@ -1692,9 +1718,9 @@ def render_daily_verification_section():
                 sync_widget_from_db(by_key, stored_by)
                 sync_widget_from_db(notes_key, stored_notes)
 
-                curr_status = cols[0].selectbox("Status", options=opt, key=status_key)
-                curr_odt = cols[1].date_input("Oldest Date", key=odt_key)
-                curr_tdt = cols[2].date_input("Target Date", key=tdt_key)
+                curr_status = cols[0].selectbox("Status", options=opt, key=status_key, on_change=_autosave_one_field, args=(db_prefix, status_key))
+                curr_odt = cols[1].date_input("Oldest Date", key=odt_key, on_change=_autosave_one_field, args=(f"{db_prefix}_date", odt_key, True))
+                curr_tdt = cols[2].date_input("Target Date", key=tdt_key, on_change=_autosave_one_field, args=(f"{db_prefix}_target", tdt_key, True))
             
                 try:
                     date_delta = (datetime.now().date() - curr_odt).days if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"] else (curr_tdt - curr_odt).days
@@ -1712,21 +1738,13 @@ def render_daily_verification_section():
                     is_red = False
                     date_delta = 0
 
-                curr_by = cols[4].text_input("Verified By", key=by_key)
-                curr_notes = cols[5].text_input("Notes/Explanations", key=notes_key)
+                curr_by = cols[4].text_input("Verified By", key=by_key, on_change=_autosave_one_field, args=(f"{db_prefix}_by", by_key))
+                curr_notes = cols[5].text_input("Notes/Explanations", key=notes_key, on_change=_autosave_one_field, args=(f"{db_prefix}_notes", notes_key))
             
                 form_states[db_prefix] = {
                     "label": label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
                     "by": curr_by, "notes": curr_notes, "is_red": is_red, "delta": date_delta
                 }
-
-                # Autosave: if this row differs from what's actually stored, queue it to be
-                # persisted immediately below -- so a browser refresh (which always starts a
-                # brand-new session with empty memory) can lose at most the last few seconds of
-                # typing, never an entire unsubmitted checklist's worth of work.
-                if (curr_status != stored_status or str(curr_odt) != str(parse_stored_date(stored_odt))
-                        or str(curr_tdt) != str(parse_stored_date(stored_tdt)) or curr_by != stored_by or curr_notes != stored_notes):
-                    pending_autosave[db_prefix] = form_states[db_prefix]
 
             render_checklist_row("14 Day Return Queue Checked", "return_fourteen_queue", "ret_14")
             render_checklist_row("AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
@@ -1741,24 +1759,6 @@ def render_daily_verification_section():
             render_checklist_row("Prior Authorization Queue", "pa_queue", "pa")
             render_checklist_row("Rejection Queue Checked", "rejection_queue", "rej")
             render_checklist_row("Untransmitted Claims Completed", "untransmitted_claims", "untrans")
-
-            if pending_autosave:
-                try:
-                    set_parts = []
-                    params = {"c_date": CURRENT_DATE}
-                    for db_field, data in pending_autosave.items():
-                        set_parts.extend([f"{db_field}=:{db_field}__status", f"{db_field}_date=:{db_field}__odt", f"{db_field}_target=:{db_field}__tdt", f"{db_field}_by=:{db_field}__by", f"{db_field}_notes=:{db_field}__notes"])
-                        params[f"{db_field}__status"] = data["status"]
-                        params[f"{db_field}__odt"] = data["odt"]
-                        params[f"{db_field}__tdt"] = data["tdt"]
-                        params[f"{db_field}__by"] = data["by"]
-                        params[f"{db_field}__notes"] = data["notes"]
-                    with db_conn.session as session:
-                        session.execute(text(f"UPDATE daily_checklist SET {', '.join(set_parts)} WHERE log_date=:c_date"), params)
-                        session.commit()
-                    fragment_rerun()
-                except Exception as e:
-                    st.error(f"⚠️ Autosave failed for this checklist -- your entries may not be saved: {str(e)}")
 
             st.markdown("<br>", unsafe_allow_html=True)
 
