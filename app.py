@@ -1656,6 +1656,29 @@ def render_daily_verification_section():
             if autosave_error:
                 st.error(f"⚠️ Autosave failed for a checklist field -- your last entry may not be saved: {autosave_error}")
 
+            def _save_field_on_change(widget_key, tracking_key, db_column, kind):
+                """
+                on_change callback: Streamlit runs this synchronously as part of handling the
+                user's interaction with THIS widget, strictly before any script rerun --
+                including a racing global auto-refresh -- gets processed. Doing the save here
+                (rather than by comparing values during the next render pass, which could be
+                superseded/abandoned by an overlapping rerun before it reached the write) is
+                what closes the "edit right before the 10s refresh boundary sometimes gets
+                dropped" race. This is safe now specifically because hydration/cross-session
+                sync (below) uses the delete-and-recreate pattern instead of ever writing
+                directly into the widget's own session_state -- that direct-write + on_change
+                combination was what caused the earlier revert-to-default bug.
+                """
+                new_value = st.session_state.get(widget_key)
+                val_to_store = str(new_value) if kind == "date" else new_value
+                try:
+                    with db_conn.session as session:
+                        session.execute(text(f"UPDATE daily_checklist SET {db_column}=:val WHERE log_date=:c_date"), {"val": val_to_store, "c_date": CURRENT_DATE})
+                        session.commit()
+                    st.session_state[tracking_key] = new_value
+                except Exception as e:
+                    st.session_state["_checklist_autosave_error"] = str(e)
+
             def render_synced_field(kind, label, col, widget_key, db_value, db_column):
                 """
                 Tracks, in a session-local variable separate from the widget's own state, "the
@@ -1667,10 +1690,7 @@ def render_daily_verification_section():
                 its default -- rather than directly overwriting its session_state, which
                 turned out to interact unpredictably with on_change/selectbox internals on a
                 widget's first-ever creation (that combination is what caused a status field to
-                revert to its default a few seconds after being set). Any difference between
-                the widget's returned value and the tracked value on THIS render, once the two
-                are known to already agree going in, can only mean a real user edit just
-                happened -- that's the only case that gets persisted.
+                revert to its default a few seconds after being set).
                 """
                 tracking_key = f"{widget_key}__tracked_saved_value"
                 if tracking_key not in st.session_state or st.session_state[tracking_key] != db_value:
@@ -1678,23 +1698,14 @@ def render_daily_verification_section():
                         del st.session_state[widget_key]
                     st.session_state[tracking_key] = db_value
 
+                on_change_args = (widget_key, tracking_key, db_column, kind)
                 if kind == "status":
                     idx = opt.index(db_value) if db_value in opt else 0
-                    val = col.selectbox(label, options=opt, index=idx, key=widget_key)
+                    val = col.selectbox(label, options=opt, index=idx, key=widget_key, on_change=_save_field_on_change, args=on_change_args)
                 elif kind == "date":
-                    val = col.date_input(label, value=db_value, key=widget_key)
+                    val = col.date_input(label, value=db_value, key=widget_key, on_change=_save_field_on_change, args=on_change_args)
                 else:
-                    val = col.text_input(label, value=db_value, key=widget_key)
-
-                if val != st.session_state[tracking_key]:
-                    val_to_store = str(val) if kind == "date" else val
-                    try:
-                        with db_conn.session as session:
-                            session.execute(text(f"UPDATE daily_checklist SET {db_column}=:val WHERE log_date=:c_date"), {"val": val_to_store, "c_date": CURRENT_DATE})
-                            session.commit()
-                        st.session_state[tracking_key] = val
-                    except Exception as e:
-                        st.session_state["_checklist_autosave_error"] = str(e)
+                    val = col.text_input(label, value=db_value, key=widget_key, on_change=_save_field_on_change, args=on_change_args)
 
                 return val
 
