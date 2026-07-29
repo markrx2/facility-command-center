@@ -645,8 +645,21 @@ def render_dynamic_volume_ribbon():
         cols = st.columns(num_cols)
         for i, q in enumerate(dept_queues):
             with cols[i % num_cols]:
-                current_value = volume_lookup.get((dept_prefix, q.queue_name), 0)
-                new_val = st.number_input(q.queue_name, min_value=0, step=1, value=int(current_value), key=f"vol_{dept_prefix}_{q.queue_name}_{CURRENT_DATE}")
+                current_value = int(volume_lookup.get((dept_prefix, q.queue_name), 0))
+                widget_key = f"vol_{dept_prefix}_{q.queue_name}_{CURRENT_DATE}"
+                shadow_key = f"{widget_key}__last_synced_db_value"
+                # A widget with a fixed key only uses `value=` as its INITIAL default the
+                # first time it's ever rendered in this browser session -- on every later
+                # rerun, Streamlit keeps whatever's already in session_state for that key and
+                # silently ignores `value=`, even though we're re-fetching fresh data from the
+                # DB every 10s. That's exactly why one person's edits never showed up on
+                # someone else's already-open screen. Fix: explicitly detect when the DB value
+                # has changed since we last synced it in THIS session, and force the widget's
+                # state to catch up before creating it.
+                if st.session_state.get(shadow_key) != current_value:
+                    st.session_state[widget_key] = current_value
+                    st.session_state[shadow_key] = current_value
+                new_val = st.number_input(q.queue_name, min_value=0, step=1, key=widget_key)
                 if new_val != current_value:
                     updates[(dept_prefix, q.queue_name)] = new_val
 
@@ -731,7 +744,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     if is_mgr_active:
                         admin_btn_col1, admin_btn_col2 = st.columns(2)
                         
-                        if admin_btn_col1.button("🔴 Remove From Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
+                        if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             try:
                                 with db_conn.session as session:
                                     if slot_num == 1:
@@ -1604,6 +1617,7 @@ with tab_analytics:
                 st.line_chart(display_df.groupby(["Date", "Assigned Queue"])["Logged Units"].sum().unstack(fill_value=0))
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
+@st.fragment
 def render_daily_verification_section():
     with st.container(border=True):
         st.header("📋 Global Facility Daily Queue Verification Log")
@@ -1626,7 +1640,7 @@ def render_daily_verification_section():
                         with db_conn.session as session:
                             session.execute(text("UPDATE daily_checklist SET reminder_time=:rt, reminder_sent=0, supervisor_escaped=0 WHERE log_date=:c_date"), {"rt": new_target_time.strftime("%H:%M"), "c_date": CURRENT_DATE})
                             session.commit()
-                        st.rerun()
+                        fragment_rerun()
                     except Exception as e:
                         st.error(f"⚠️ Couldn't update the deadline right now: {str(e)}")
             
@@ -1638,7 +1652,23 @@ def render_daily_verification_section():
                 try: return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
                 except: return datetime.now().date()
 
+            def sync_widget_from_db(widget_key, db_value):
+                """
+                Same fix applied to the volume ribbon: a widget with a fixed key only uses
+                its initial value the first time it's ever rendered in this browser session --
+                on every later rerun Streamlit keeps whatever's already in session_state and
+                silently ignores the passed-in value, even though we're re-fetching the DB
+                every time. Without this, another user's saved change (or this session's own
+                autosave) would never visibly appear. This forces the widget to catch up
+                whenever the DB value has changed since this session last synced it.
+                """
+                shadow_key = f"{widget_key}__last_synced"
+                if st.session_state.get(shadow_key) != db_value:
+                    st.session_state[widget_key] = db_value
+                    st.session_state[shadow_key] = db_value
+
             form_states = {}
+            pending_autosave = {}  # db_prefix -> field dict, only for rows that actually changed
 
             def render_checklist_row(label, db_prefix, prefix_key):
                 st.markdown(f"##### {label}")
@@ -1650,9 +1680,21 @@ def render_daily_verification_section():
                 stored_by = getattr(chk, f"{db_prefix}_by", "") if chk else ""
                 stored_notes = getattr(chk, f"{db_prefix}_notes", "") if chk else ""
 
-                curr_status = cols[0].selectbox("Status", options=opt, index=opt.index(stored_status) if stored_status in opt else 0, key=f"status_{prefix_key}_{CURRENT_DATE}")
-                curr_odt = cols[1].date_input("Oldest Date", value=parse_stored_date(stored_odt), key=f"odt_{prefix_key}_{CURRENT_DATE}")
-                curr_tdt = cols[2].date_input("Target Date", value=parse_stored_date(stored_tdt), key=f"tdt_{prefix_key}_{CURRENT_DATE}")
+                status_key = f"status_{prefix_key}_{CURRENT_DATE}"
+                odt_key = f"odt_{prefix_key}_{CURRENT_DATE}"
+                tdt_key = f"tdt_{prefix_key}_{CURRENT_DATE}"
+                by_key = f"by_{prefix_key}_{CURRENT_DATE}"
+                notes_key = f"notes_{prefix_key}_{CURRENT_DATE}"
+
+                sync_widget_from_db(status_key, stored_status)
+                sync_widget_from_db(odt_key, parse_stored_date(stored_odt))
+                sync_widget_from_db(tdt_key, parse_stored_date(stored_tdt))
+                sync_widget_from_db(by_key, stored_by)
+                sync_widget_from_db(notes_key, stored_notes)
+
+                curr_status = cols[0].selectbox("Status", options=opt, key=status_key)
+                curr_odt = cols[1].date_input("Oldest Date", key=odt_key)
+                curr_tdt = cols[2].date_input("Target Date", key=tdt_key)
             
                 try:
                     date_delta = (datetime.now().date() - curr_odt).days if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"] else (curr_tdt - curr_odt).days
@@ -1670,13 +1712,21 @@ def render_daily_verification_section():
                     is_red = False
                     date_delta = 0
 
-                curr_by = cols[4].text_input("Verified By", value=stored_by, key=f"by_{prefix_key}_{CURRENT_DATE}")
-                curr_notes = cols[5].text_input("Notes/Explanations", value=stored_notes, key=f"notes_{prefix_key}_{CURRENT_DATE}")
+                curr_by = cols[4].text_input("Verified By", key=by_key)
+                curr_notes = cols[5].text_input("Notes/Explanations", key=notes_key)
             
                 form_states[db_prefix] = {
                     "label": label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
                     "by": curr_by, "notes": curr_notes, "is_red": is_red, "delta": date_delta
                 }
+
+                # Autosave: if this row differs from what's actually stored, queue it to be
+                # persisted immediately below -- so a browser refresh (which always starts a
+                # brand-new session with empty memory) can lose at most the last few seconds of
+                # typing, never an entire unsubmitted checklist's worth of work.
+                if (curr_status != stored_status or str(curr_odt) != str(parse_stored_date(stored_odt))
+                        or str(curr_tdt) != str(parse_stored_date(stored_tdt)) or curr_by != stored_by or curr_notes != stored_notes):
+                    pending_autosave[db_prefix] = form_states[db_prefix]
 
             render_checklist_row("14 Day Return Queue Checked", "return_fourteen_queue", "ret_14")
             render_checklist_row("AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
@@ -1691,6 +1741,24 @@ def render_daily_verification_section():
             render_checklist_row("Prior Authorization Queue", "pa_queue", "pa")
             render_checklist_row("Rejection Queue Checked", "rejection_queue", "rej")
             render_checklist_row("Untransmitted Claims Completed", "untransmitted_claims", "untrans")
+
+            if pending_autosave:
+                try:
+                    set_parts = []
+                    params = {"c_date": CURRENT_DATE}
+                    for db_field, data in pending_autosave.items():
+                        set_parts.extend([f"{db_field}=:{db_field}__status", f"{db_field}_date=:{db_field}__odt", f"{db_field}_target=:{db_field}__tdt", f"{db_field}_by=:{db_field}__by", f"{db_field}_notes=:{db_field}__notes"])
+                        params[f"{db_field}__status"] = data["status"]
+                        params[f"{db_field}__odt"] = data["odt"]
+                        params[f"{db_field}__tdt"] = data["tdt"]
+                        params[f"{db_field}__by"] = data["by"]
+                        params[f"{db_field}__notes"] = data["notes"]
+                    with db_conn.session as session:
+                        session.execute(text(f"UPDATE daily_checklist SET {', '.join(set_parts)} WHERE log_date=:c_date"), params)
+                        session.commit()
+                    fragment_rerun()
+                except Exception as e:
+                    st.error(f"⚠️ Autosave failed for this checklist -- your entries may not be saved: {str(e)}")
 
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1707,7 +1775,7 @@ def render_daily_verification_section():
                 submit_clicked = False
                 if st.button("🔁 Resubmit Anyway", key="checklist_resubmit_arm_btn", use_container_width=True):
                     st.session_state[resubmit_armed_key] = True
-                    st.rerun()
+                    fragment_rerun()
             else:
                 button_label = "⚠️ Confirm Resubmit (will re-send Chat alerts for flagged items)" if already_submitted_today else "💾 Submit Daily Verification Report"
                 submit_clicked = st.button(button_label, type="primary", use_container_width=True, key="submit_daily_report_btn")
@@ -1761,11 +1829,10 @@ def render_daily_verification_section():
                         st.success("Verification metrics logged successfully! All operational channels are current.")
 
                     st.session_state[resubmit_armed_key] = False
-                    # No immediate st.rerun() here: this section isn't inside a fragment, so a
-                    # rerun means a full-page reload (sidebar, all 4 dept tabs, analytics, etc.),
-                    # which is heavy enough that it was likely wiping this success message before
-                    # it could be seen. The existing 10s global heartbeat will refresh everything
-                    # else naturally without us forcing it.
+                    # No immediate rerun here, same reasoning as elsewhere in this app: forcing
+                    # one right after showing a success/warning message risks wiping it before
+                    # it's readable. The autosave logic above and the global 10s heartbeat will
+                    # naturally reflect this submission on the next interaction regardless.
                 except Exception as e:
                     st.error(f"⚠️ Couldn't save the verification report right now: {str(e)}")
 
