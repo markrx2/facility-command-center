@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import re
 import hashlib
@@ -771,7 +772,7 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
 
 # --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
-@st.fragment(run_every="5s")
+@st.fragment
 def render_synchronized_matrix(db_table, prefix, dept_label):
     with db_conn.session as session:
         goals_dict = {r.queue_name: r.goal_target for r in session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix = :pfx"), {"pfx": prefix}).fetchall()}
@@ -950,10 +951,56 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         if current_now < end_time and not db_sub:
                             rem = end_time - current_now
                             total_rem_seconds = int(rem.total_seconds())
-                            h, r = divmod(total_rem_seconds, 3600)
-                            m, s = divmod(r, 60)
-                            st.metric(label="⏳ Time Remaining", value=f"{int(h):02d}:{int(m):02d}:{int(s):02d}")
-                            st.progress(1.0 - (float(total_rem_seconds) / (float(db_dur_min) * 60.0)))
+                            total_alloc_seconds = int(db_dur_min) * 60
+                            countdown_id = hashlib.md5(f"{db_table}_{worker}_{slot_num}_{db_start}".encode()).hexdigest()[:10]
+                            # Ticks down in the browser via JS, independent of any Streamlit
+                            # rerun -- so it can't race with Start Clock/Submit Metrics button
+                            # clicks the way a server-refreshed countdown could, and it updates
+                            # every second instead of only on the next rerun. Uses "seconds
+                            # remaining right now" rather than an absolute end-time string,
+                            # since a naive timestamp string would be parsed in the *viewer's*
+                            # browser timezone by JS, not necessarily Eastern -- this way there's
+                            # no timezone string to parse at all, just elapsed-time math.
+                            countdown_html = f"""
+                            <div style="font-family: 'Source Sans Pro', sans-serif;">
+                                <div style="font-size: 13px; color: #808495; margin-bottom: 2px;">⏳ Time Remaining</div>
+                                <div id="cd_time_{countdown_id}" style="font-size: 28px; font-weight: 600; color: #31333F;">--:--:--</div>
+                                <div style="background-color: #e6e9ef; border-radius: 4px; height: 6px; margin-top: 8px; overflow: hidden;">
+                                    <div id="cd_bar_{countdown_id}" style="background-color: #ff4b4b; height: 100%; width: 0%;"></div>
+                                </div>
+                            </div>
+                            <script>
+                            (function() {{
+                                var remainingAtLoad = {total_rem_seconds};
+                                var totalSeconds = {total_alloc_seconds};
+                                var loadTime = new Date().getTime();
+                                var timeEl = document.getElementById("cd_time_{countdown_id}");
+                                var barEl = document.getElementById("cd_bar_{countdown_id}");
+                                function pad(n) {{ return n < 10 ? "0" + n : "" + n; }}
+                                function update() {{
+                                    if (!timeEl) return;
+                                    var elapsed = (new Date().getTime() - loadTime) / 1000;
+                                    var distance = Math.max(0, remainingAtLoad - elapsed);
+                                    if (distance <= 0) {{
+                                        timeEl.innerHTML = "\\ud83d\\uded1 Expired";
+                                        timeEl.style.color = "#ff4b4b";
+                                        if (barEl) barEl.style.width = "100%";
+                                        clearInterval(timerHandle);
+                                        return;
+                                    }}
+                                    var h = Math.floor(distance / 3600);
+                                    var m = Math.floor((distance % 3600) / 60);
+                                    var s = Math.floor(distance % 60);
+                                    timeEl.innerHTML = pad(h) + ":" + pad(m) + ":" + pad(s);
+                                    var pct = totalSeconds > 0 ? Math.max(0, Math.min(100, (1 - distance / totalSeconds) * 100)) : 0;
+                                    if (barEl) barEl.style.width = pct + "%";
+                                }}
+                                update();
+                                var timerHandle = setInterval(update, 1000);
+                            }})();
+                            </script>
+                            """
+                            components.html(countdown_html, height=70)
                         elif not db_sub:
                             st.error("🛑 Timer Expired!")
                         
