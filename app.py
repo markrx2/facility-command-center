@@ -66,10 +66,10 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-# Global browser heartbeat. Keeps the container awake and forces a full-script check cycle every 10 seconds.
+# Global browser heartbeat. Keeps the container awake and forces a full-script check cycle every 15 seconds.
 # NOTE: this is what keeps things like the Analytics tab and backlog ribbon fresh, since those live
 # outside any @st.fragment and only update on a full rerun.
-st_autorefresh(interval=10000, key="global_system_heartbeat")
+st_autorefresh(interval=15000, key="global_system_heartbeat")
 
 # Timezone Lock Configuration 
 try:
@@ -241,6 +241,88 @@ def initialize_system_database():
         # (and require explicit confirmation) before re-sending Chat alerts for the same day.
         session.execute(text("ALTER TABLE daily_checklist ADD COLUMN IF NOT EXISTS last_submitted_at TEXT DEFAULT ''"))
         session.commit()
+
+        # --- CHECKLIST ITEM MANAGEMENT ---
+        # checklist_items is the manageable config (like dynamic_queues): add/rename/remove
+        # rows and tune their aging rules from the UI. checklist_entries holds the actual
+        # per-day data, one row per (day, item) instead of the old fixed-column design, which
+        # is what made the 13 rows hardcoded and unmanageable in the first place.
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS checklist_items (
+                item_key TEXT PRIMARY KEY,
+                label TEXT,
+                aging_basis TEXT DEFAULT 'target_minus_oldest',
+                red_threshold_days INTEGER DEFAULT 7,
+                sort_order INTEGER DEFAULT 0
+            )
+        """))
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS checklist_entries (
+                log_date TEXT,
+                item_key TEXT,
+                status TEXT DEFAULT 'Pending',
+                oldest_date TEXT DEFAULT '',
+                target_date TEXT DEFAULT '',
+                verified_by TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
+                PRIMARY KEY (log_date, item_key)
+            )
+        """))
+        session.commit()
+
+        res = session.execute(text("SELECT COUNT(*) as cnt FROM checklist_items")).fetchone()
+        if res[0] == 0:
+            # Seed with the original 13 items, preserving their exact prior behavior:
+            # aging_basis "today_minus_oldest" for the 3 that compared against today's date,
+            # "target_minus_oldest" for the rest, and red_threshold_days set so the red
+            # trigger point matches what was previously hardcoded per item (e.g. the old
+            # "any positive delta is red" items get threshold=1; "> 4 days" becomes
+            # threshold=5; the 14-day and default-7-day rules carry over directly).
+            default_items = [
+                ("return_fourteen_queue", "14 Day Return Queue Checked", "target_minus_oldest", 14, 1),
+                ("ai_tech_check", "AI /Tech Check Queue Checked", "target_minus_oldest", 5, 2),
+                ("billing", "Billing Queue Checked", "target_minus_oldest", 7, 3),
+                ("central_fill_queue", "Central Fill Queue Checked", "today_minus_oldest", 1, 4),
+                ("data_re_entry", "Data Re-Entry Checked", "target_minus_oldest", 1, 5),
+                ("dispense", "Dispense Queue Checked", "target_minus_oldest", 7, 6),
+                ("erx_queue", "ERx Queue Checked", "today_minus_oldest", 1, 7),
+                ("future_bill", "Future Bill Queue Checked", "target_minus_oldest", 7, 8),
+                ("on_hold_queue", "On Hold Queue Checked", "today_minus_oldest", 1, 9),
+                ("ordering", "Ordering Queue Checked", "target_minus_oldest", 7, 10),
+                ("pa_queue", "Prior Authorization Queue", "target_minus_oldest", 7, 11),
+                ("rejection_queue", "Rejection Queue Checked", "target_minus_oldest", 5, 12),
+                ("untransmitted_claims", "Untransmitted Claims Completed", "target_minus_oldest", 1, 13),
+            ]
+            for item_key, label, basis, threshold, order in default_items:
+                session.execute(
+                    text("INSERT INTO checklist_items (item_key, label, aging_basis, red_threshold_days, sort_order) VALUES (:k, :l, :b, :t, :o)"),
+                    {"k": item_key, "l": label, "b": basis, "t": threshold, "o": order}
+                )
+            session.commit()
+
+            # One-time migration: daily_checklist has one row per day with the 13 items baked
+            # into fixed columns. Convert every existing day's data into checklist_entries so
+            # nothing already entered (including today's in-progress checklist) is lost. Only
+            # runs once, guarded by checklist_items having just been empty (a fresh install
+            # would also have nothing to migrate, which is harmless).
+            old_rows = session.execute(text("SELECT * FROM daily_checklist")).fetchall()
+            for old_row in old_rows:
+                for item_key, _, _, _, _ in default_items:
+                    status = getattr(old_row, item_key, None)
+                    if status is None:
+                        continue
+                    session.execute(text("""
+                        INSERT INTO checklist_entries (log_date, item_key, status, oldest_date, target_date, verified_by, notes)
+                        VALUES (:log_date, :item_key, :status, :oldest_date, :target_date, :verified_by, :notes)
+                        ON CONFLICT (log_date, item_key) DO NOTHING
+                    """), {
+                        "log_date": old_row.log_date, "item_key": item_key, "status": status,
+                        "oldest_date": getattr(old_row, f"{item_key}_date", "") or "",
+                        "target_date": getattr(old_row, f"{item_key}_target", "") or "",
+                        "verified_by": getattr(old_row, f"{item_key}_by", "") or "",
+                        "notes": getattr(old_row, f"{item_key}_notes", "") or "",
+                    })
+            session.commit()
 
         # --- AUTO-SCHEDULER SUPPORT TABLES ---
         # queue_volumes replaces the old fixed-9-field floor_backlogs ribbon going forward.
@@ -637,7 +719,7 @@ def render_dynamic_volume_ribbon():
     def _save_volume_on_change(widget_key, tracking_key, dept_prefix, queue_name):
         """
         on_change callback -- runs synchronously the moment this specific field is edited,
-        before any other rerun (including the global 10s heartbeat) can be processed. This
+        before any other rerun (including the global 15s heartbeat) can be processed. This
         replaces the previous "detect a difference during render" approach, which relied on
         directly overwriting a widget's session_state to reflect external changes -- the same
         risky pattern that caused the checklist's revert-to-default bug. Doing it this way
@@ -890,16 +972,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 dynamic_target_threshold = max(1, int(float(base_hourly_rate) * (float(actual_minutes_used) / 60.0)))
                                 is_escalated = 1 if val < dynamic_target_threshold else 0
                                 
-                                if is_escalated:
-                                    dispatch_real_time_alert(
-                                        f"📉 **PRODUCTION ALERT: GOAL NOT MET (PRO-RATA)** 📉\n"
-                                        f"👤 **Technician:** {worker.upper()}\n"
-                                        f"🏢 **Department:** {dept_label}\n"
-                                        f"⏱️ **Active Time Spent:** {actual_minutes_used} minutes\n"
-                                        f"🎯 **Pro-Rata Target Expected:** {dynamic_target_threshold} units *(Based on {base_hourly_rate}/hr)*\n"
-                                        f"📥 **Logged Production:** **{val}** units"
-                                    )
-                                
                                 try:
                                     with db_conn.session as session:
                                         session.execute(text("""
@@ -925,8 +997,24 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                             session.execute(text(f"UPDATE {db_table} SET start_time=:st WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), "c_date": CURRENT_DATE, "t_name": worker, "s_id": next_queued.slot_id})
 
                                         session.commit()
+
+                                    # Notification fires AFTER the save, not before -- this is a
+                                    # network call (up to 5s timeout) and previously ran first,
+                                    # meaning a slow/unresponsive webhook delayed the numbers
+                                    # actually getting logged. Now the data is safely saved
+                                    # regardless of how long (or whether) this call takes.
+                                    if is_escalated:
+                                        dispatch_real_time_alert(
+                                            f"📉 **PRODUCTION ALERT: GOAL NOT MET (PRO-RATA)** 📉\n"
+                                            f"👤 **Technician:** {worker.upper()}\n"
+                                            f"🏢 **Department:** {dept_label}\n"
+                                            f"⏱️ **Active Time Spent:** {actual_minutes_used} minutes\n"
+                                            f"🎯 **Pro-Rata Target Expected:** {dynamic_target_threshold} units *(Based on {base_hourly_rate}/hr)*\n"
+                                            f"📥 **Logged Production:** **{val}** units"
+                                        )
+
                                     # Local to this slot -- the Analytics tab will pick up the new
-                                    # metrics_history row on the next full-page heartbeat (every 10s).
+                                    # metrics_history row on the next full-page heartbeat (every 15s).
                                     fragment_rerun()
                                 except Exception as e:
                                     st.error(f"⚠️ Couldn't save these metrics right now: {str(e)}")
@@ -1593,6 +1681,59 @@ def render_queue_management_tab():
                                 except Exception as e:
                                     st.error(f"⚠️ Couldn't delete this queue right now: {str(e)}")
 
+            st.markdown("---")
+            st.subheader("📋 Daily Verification Checklist Items")
+            st.caption("Add, remove, or adjust aging rules for rows shown in the Global Facility Daily Queue Verification Log.")
+            with db_conn.session as session:
+                current_checklist_items = session.execute(text("SELECT item_key, label, aging_basis, red_threshold_days FROM checklist_items ORDER BY sort_order, label")).fetchall()
+
+            if not current_checklist_items:
+                st.info("No checklist items configured yet.")
+            else:
+                for it in current_checklist_items:
+                    with st.container(border=True):
+                        ic1, ic2 = st.columns([3, 1])
+                        ic1.markdown(f"**{it.label}**")
+                        basis_label = "Target date vs Oldest date" if it.aging_basis == "target_minus_oldest" else "Today vs Oldest date"
+                        ic1.caption(f"Aging basis: {basis_label} | Turns red at {it.red_threshold_days}+ days")
+                        if ic2.button("🗑️ Remove", key=f"del_checklist_item_{it.item_key}", use_container_width=True):
+                            try:
+                                with db_conn.session as session:
+                                    session.execute(text("DELETE FROM checklist_items WHERE item_key=:k"), {"k": it.item_key})
+                                    session.commit()
+                                fragment_rerun()
+                            except Exception as e:
+                                st.error(f"⚠️ Couldn't remove this item right now: {str(e)}")
+
+            st.markdown("---")
+            st.caption("Add a new checklist row:")
+            add_c1, add_c2, add_c3, add_c4 = st.columns([2, 2, 1, 1])
+            new_checklist_label = add_c1.text_input("Label", key="new_checklist_item_label")
+            new_checklist_basis = add_c2.selectbox(
+                "Aging basis", options=["target_minus_oldest", "today_minus_oldest"],
+                format_func=lambda x: "Target date vs Oldest date" if x == "target_minus_oldest" else "Today vs Oldest date",
+                key="new_checklist_item_basis"
+            )
+            new_checklist_threshold = add_c3.number_input("Red threshold (days)", min_value=1, step=1, value=7, key="new_checklist_item_threshold")
+            if add_c4.button("➕ Add", key="add_checklist_item_btn", use_container_width=True):
+                if new_checklist_label.strip():
+                    try:
+                        item_key = re.sub(r'[^a-z0-9_]', '_', new_checklist_label.strip().lower())
+                        with db_conn.session as session:
+                            max_order_row = session.execute(text("SELECT COALESCE(MAX(sort_order), 0) as m FROM checklist_items")).fetchone()
+                            max_order = max_order_row.m if max_order_row else 0
+                            session.execute(text("""
+                                INSERT INTO checklist_items (item_key, label, aging_basis, red_threshold_days, sort_order)
+                                VALUES (:k, :l, :b, :t, :o)
+                                ON CONFLICT (item_key) DO UPDATE SET label=EXCLUDED.label, aging_basis=EXCLUDED.aging_basis, red_threshold_days=EXCLUDED.red_threshold_days
+                            """), {"k": item_key, "l": new_checklist_label.strip(), "b": new_checklist_basis, "t": int(new_checklist_threshold), "o": max_order + 1})
+                            session.commit()
+                        fragment_rerun()
+                    except Exception as e:
+                        st.error(f"⚠️ Couldn't add this item right now: {str(e)}")
+                else:
+                    st.warning("Enter a label first.")
+
 with tab_mgmt:
     render_queue_management_tab()
 
@@ -1683,16 +1824,16 @@ st.markdown("<br>", unsafe_allow_html=True)
 def render_daily_verification_section():
     with st.container(border=True):
         st.header("📋 Global Facility Daily Queue Verification Log")
-    
+
         with db_conn.session as session:
             chk = session.execute(text("SELECT * FROM daily_checklist WHERE log_date = :c_date"), {"c_date": CURRENT_DATE}).fetchone()
             if not chk:
                 session.execute(text("INSERT INTO daily_checklist (log_date, reminder_sent, supervisor_escaped, reminder_time) VALUES (:c_date, 0, 0, '17:00') ON CONFLICT (log_date) DO NOTHING"), {"c_date": CURRENT_DATE})
                 session.commit()
                 chk = session.execute(text("SELECT * FROM daily_checklist WHERE log_date = :c_date"), {"c_date": CURRENT_DATE}).fetchone()
-        
+
         c_col, f_col = st.columns([3.2, 1])
-    
+
         with f_col:
             with st.container(border=True):
                 t_obj = datetime.strptime(chk.reminder_time, "%H:%M").time()
@@ -1705,38 +1846,26 @@ def render_daily_verification_section():
                         fragment_rerun()
                     except Exception as e:
                         st.error(f"⚠️ Couldn't update the deadline right now: {str(e)}")
-            
+
         with c_col:
-            CHECKLIST_ROWS = [
-                ("14 Day Return Queue Checked", "return_fourteen_queue"),
-                ("AI /Tech Check Queue Checked", "ai_tech_check"),
-                ("Billing Queue Checked", "billing"),
-                ("Central Fill Queue Checked", "central_fill_queue"),
-                ("Data Re-Entry Checked", "data_re_entry"),
-                ("Dispense Queue Checked", "dispense"),
-                ("ERx Queue Checked", "erx_queue"),
-                ("Future Bill Queue Checked", "future_bill"),
-                ("On Hold Queue Checked", "on_hold_queue"),
-                ("Ordering Queue Checked", "ordering"),
-                ("Prior Authorization Queue", "pa_queue"),
-                ("Rejection Queue Checked", "rejection_queue"),
-                ("Untransmitted Claims Completed", "untransmitted_claims"),
-            ]
+            with db_conn.session as session:
+                checklist_items = session.execute(text("SELECT item_key, label, aging_basis, red_threshold_days FROM checklist_items ORDER BY sort_order, label")).fetchall()
+                entry_rows = session.execute(text("SELECT item_key, status, oldest_date, target_date, verified_by, notes FROM checklist_entries WHERE log_date=:c_date"), {"c_date": CURRENT_DATE}).fetchall()
+            entries_by_key = {r.item_key: r for r in entry_rows}
+
+            if not checklist_items:
+                st.info("No checklist items configured yet. Add some from ⚙️ Manage Checklist Items above.")
+                return
 
             def parse_stored_date(val):
                 if not val or str(val).strip() == "": return datetime.now().date()
                 try: return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
                 except: return datetime.now().date()
 
-            def compute_aging(db_prefix, odt, tdt):
+            def compute_aging(aging_basis, red_threshold, odt, tdt):
                 try:
-                    date_delta = (datetime.now().date() - odt).days if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"] else (tdt - odt).days
-                    is_red = False
-                    if date_delta > 0:
-                        if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims"]: is_red = True
-                        elif db_prefix in ["ai_tech_check", "rejection_queue"] and date_delta > 4: is_red = True
-                        elif db_prefix == "return_fourteen_queue" and date_delta >= 14: is_red = True
-                        elif db_prefix not in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims", "ai_tech_check", "rejection_queue", "return_fourteen_queue"] and date_delta >= 7: is_red = True
+                    date_delta = (datetime.now().date() - odt).days if aging_basis == "today_minus_oldest" else (tdt - odt).days
+                    is_red = date_delta >= red_threshold
                     badge = f"🚨 {date_delta} Days" if is_red else (f"⚠️ {date_delta} Days" if date_delta > 0 else "✅ Current")
                     return date_delta, is_red, badge
                 except Exception:
@@ -1747,30 +1876,24 @@ def render_daily_verification_section():
                 st.error(f"⚠️ Autosave failed for a checklist field -- your last entry may not be saved: {autosave_error}")
 
             table_rows = []
-            for label, db_prefix in CHECKLIST_ROWS:
-                status = getattr(chk, db_prefix, "Pending") if chk else "Pending"
-                odt = parse_stored_date(getattr(chk, f"{db_prefix}_date", "") if chk else "")
-                tdt = parse_stored_date(getattr(chk, f"{db_prefix}_target", "") if chk else "")
-                by = getattr(chk, f"{db_prefix}_by", "") if chk else ""
-                notes = getattr(chk, f"{db_prefix}_notes", "") if chk else ""
-                _, _, badge = compute_aging(db_prefix, odt, tdt)
+            for item in checklist_items:
+                entry = entries_by_key.get(item.item_key)
+                status = entry.status if entry else "Pending"
+                odt = parse_stored_date(entry.oldest_date if entry else "")
+                tdt = parse_stored_date(entry.target_date if entry else "")
+                by = entry.verified_by if entry else ""
+                notes = entry.notes if entry else ""
+                _, _, badge = compute_aging(item.aging_basis, item.red_threshold_days, odt, tdt)
                 table_rows.append({
-                    "Queue": label, "Status": status, "Oldest Date": odt, "Target Date": tdt,
+                    "Queue": item.label, "Status": status, "Oldest Date": odt, "Target Date": tdt,
                     "Aging": badge, "Verified By": by, "Notes/Explanations": notes,
                 })
             checklist_df = pd.DataFrame(table_rows)
 
             # st.data_editor tracks exactly which cells were touched via its own built-in
-            # edited_rows mechanism (session_state["checklist_data_editor"]["edited_rows"]),
-            # rather than us comparing values by hand across reruns to guess what changed --
-            # that guessing is what caused three successive bugs in the hand-rolled version
-            # (revert-to-default, cross-session overwrites, and the database itself
-            # oscillating between values). This also means cross-session sync is handled by
-            # Streamlit's own tested merge behavior: a cell THIS session hasn't locally edited
-            # always reflects the freshly-fetched data passed in below, while a cell this
-            # session HAS edited keeps showing that edit (which matches the DB anyway, since
-            # it's saved immediately below) -- no custom shadow-key/delete-recreate logic
-            # needed to achieve that.
+            # edited_rows mechanism, and checklist_items/checklist_entries (normalized, like
+            # dynamic_queues/queue_volumes) is what makes rows genuinely addable/removable --
+            # the old fixed-column daily_checklist design couldn't support that at all.
             edited_df = st.data_editor(
                 checklist_df,
                 key="checklist_data_editor",
@@ -1787,19 +1910,15 @@ def render_daily_verification_section():
                 },
             )
 
-            COLUMN_TO_DB_SUFFIX = {
-                "Status": "", "Oldest Date": "_date", "Target Date": "_target",
-                "Verified By": "_by", "Notes/Explanations": "_notes",
+            COLUMN_TO_ENTRY_FIELD = {
+                "Status": "status", "Oldest Date": "oldest_date", "Target Date": "target_date",
+                "Verified By": "verified_by", "Notes/Explanations": "notes",
             }
 
             edited_rows = st.session_state.get("checklist_data_editor", {}).get("edited_rows", {})
             last_processed_key = "_checklist_last_processed_edits"
             last_processed = st.session_state.get(last_processed_key, {})
 
-            # Only persist cells that are NEW or changed since the last time we processed
-            # edited_rows -- edited_rows accumulates every edit made this whole session, so
-            # blindly re-saving all of it on every rerun would risk re-overwriting a field
-            # another user changed more recently than our own earlier edit to it.
             new_edits_to_save = {}
             for row_idx, changes in edited_rows.items():
                 prev_changes = last_processed.get(row_idx, {})
@@ -1811,13 +1930,23 @@ def render_daily_verification_section():
                 try:
                     with db_conn.session as session:
                         for row_idx, changes in new_edits_to_save.items():
-                            _, db_prefix = CHECKLIST_ROWS[int(row_idx)]
+                            item_key = checklist_items[int(row_idx)].item_key
+                            set_parts = []
+                            params = {"c_date": CURRENT_DATE, "item_key": item_key}
                             for col_name, new_val in changes.items():
-                                if col_name not in COLUMN_TO_DB_SUFFIX:
+                                if col_name not in COLUMN_TO_ENTRY_FIELD:
                                     continue
-                                db_column = db_prefix + COLUMN_TO_DB_SUFFIX[col_name]
+                                field = COLUMN_TO_ENTRY_FIELD[col_name]
                                 val_to_store = str(new_val) if col_name in ("Oldest Date", "Target Date") else new_val
-                                session.execute(text(f"UPDATE daily_checklist SET {db_column}=:val WHERE log_date=:c_date"), {"val": val_to_store, "c_date": CURRENT_DATE})
+                                set_parts.append(f"{field}=:{field}")
+                                params[field] = val_to_store
+                            if set_parts:
+                                session.execute(text("""
+                                    INSERT INTO checklist_entries (log_date, item_key)
+                                    VALUES (:c_date, :item_key)
+                                    ON CONFLICT (log_date, item_key) DO NOTHING
+                                """), {"c_date": CURRENT_DATE, "item_key": item_key})
+                                session.execute(text(f"UPDATE checklist_entries SET {', '.join(set_parts)} WHERE log_date=:c_date AND item_key=:item_key"), params)
                         session.commit()
                     merged = dict(last_processed)
                     for row_idx, changes in edited_rows.items():
@@ -1828,17 +1957,14 @@ def render_daily_verification_section():
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            # Build the same form_states shape the Submit logic below expects, from the
-            # CURRENT edited dataframe -- so Submit always acts on exactly what's displayed,
-            # including anything just autosaved above in this same render pass.
             form_states = {}
-            for i, (label, db_prefix) in enumerate(CHECKLIST_ROWS):
+            for i, item in enumerate(checklist_items):
                 row = edited_df.iloc[i]
                 odt_val = row["Oldest Date"]
                 tdt_val = row["Target Date"]
-                delta, is_red, _ = compute_aging(db_prefix, odt_val, tdt_val)
-                form_states[db_prefix] = {
-                    "label": label, "status": row["Status"], "odt": str(odt_val), "tdt": str(tdt_val),
+                delta, is_red, _ = compute_aging(item.aging_basis, item.red_threshold_days, odt_val, tdt_val)
+                form_states[item.item_key] = {
+                    "label": item.label, "status": row["Status"], "odt": str(odt_val), "tdt": str(tdt_val),
                     "by": row["Verified By"], "notes": row["Notes/Explanations"], "is_red": is_red, "delta": delta
                 }
 
@@ -1859,35 +1985,24 @@ def render_daily_verification_section():
 
             if submit_clicked:
                 deficiency_list = []
-            
                 try:
-                    set_parts = []
-                    params = {"c_date": CURRENT_DATE}
-                    for db_field, data in form_states.items():
-                        set_parts.append(f"{db_field}=:{db_field}__status")
-                        set_parts.append(f"{db_field}_date=:{db_field}__odt")
-                        set_parts.append(f"{db_field}_target=:{db_field}__tdt")
-                        set_parts.append(f"{db_field}_by=:{db_field}__by")
-                        set_parts.append(f"{db_field}_notes=:{db_field}__notes")
-                        params[f"{db_field}__status"] = data["status"]
-                        params[f"{db_field}__odt"] = data["odt"]
-                        params[f"{db_field}__tdt"] = data["tdt"]
-                        params[f"{db_field}__by"] = data["by"]
-                        params[f"{db_field}__notes"] = data["notes"]
-
-                        if data["status"] == "No" or data["is_red"]:
-                            deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {'⚠️ STATUS: NO' if data['status'] == 'No' else '🚨 CRITICAL AGING'} | Backlog: {data['delta']} Days" + (f" (Notes: {data['by']} - {data['notes']})" if data['by'] or data['notes'] else ""))
-
-                    submitted_at_str = now_eastern_naive().strftime("%H:%M:%S")
-                    set_parts.append("reminder_sent=1")
-                    set_parts.append("supervisor_escaped=1")
-                    set_parts.append("last_submitted_at=:last_submitted_at")
-                    params["last_submitted_at"] = submitted_at_str
-
                     with db_conn.session as session:
-                        session.execute(text(f"UPDATE daily_checklist SET {', '.join(set_parts)} WHERE log_date=:c_date"), params)
+                        for item_key, data in form_states.items():
+                            session.execute(text("""
+                                INSERT INTO checklist_entries (log_date, item_key, status, oldest_date, target_date, verified_by, notes)
+                                VALUES (:c_date, :item_key, :status, :odt, :tdt, :by, :notes)
+                                ON CONFLICT (log_date, item_key) DO UPDATE
+                                SET status=EXCLUDED.status, oldest_date=EXCLUDED.oldest_date, target_date=EXCLUDED.target_date,
+                                    verified_by=EXCLUDED.verified_by, notes=EXCLUDED.notes
+                            """), {"c_date": CURRENT_DATE, "item_key": item_key, "status": data["status"], "odt": data["odt"], "tdt": data["tdt"], "by": data["by"], "notes": data["notes"]})
+
+                            if data["status"] == "No" or data["is_red"]:
+                                deficiency_list.append(f"• **{data['label']}**\n  ↳ Reason: {'⚠️ STATUS: NO' if data['status'] == 'No' else '🚨 CRITICAL AGING'} | Backlog: {data['delta']} Days" + (f" (Notes: {data['by']} - {data['notes']})" if data['by'] or data['notes'] else ""))
+
+                        submitted_at_str = now_eastern_naive().strftime("%H:%M:%S")
+                        session.execute(text("UPDATE daily_checklist SET reminder_sent=1, supervisor_escaped=1, last_submitted_at=:t WHERE log_date=:c_date"), {"t": submitted_at_str, "c_date": CURRENT_DATE})
                         session.commit()
-                
+
                     if deficiency_list:
                         chat_sent_ok = dispatch_real_time_alert(f"📋 **FACILITY OPERATIONS DAILY VERIFICATION REPORT**\n⏰ **Timestamp:** {submitted_at_str} EST\n⚠️ *The following operational tracking points require attention:* \n\n" + "\n\n".join(deficiency_list))
                         st.success("Verification data saved.")
