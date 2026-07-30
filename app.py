@@ -9,6 +9,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import requests
+import threading
 import json
 from streamlit_autorefresh import st_autorefresh
 from sqlalchemy import text, create_engine
@@ -441,6 +442,17 @@ def dispatch_real_time_alert(message_body):
         print(f"Global Live Broadcast Exception Linkage Failure: {str(e)}")
         return False
 
+def dispatch_real_time_alert_async(message_body):
+    """
+    Fire-and-forget version of dispatch_real_time_alert -- runs the network call on a
+    background thread instead of blocking the current script run. Use this anywhere the
+    notification is a side effect of a user action (like Submit Metrics) rather than
+    something the user needs a pass/fail result for on screen -- the webhook's own latency
+    (up to the 5s timeout, longer if it's failing slowly) previously delayed the UI from
+    showing success even after the actual data was already safely saved.
+    """
+    threading.Thread(target=dispatch_real_time_alert, args=(message_body,), daemon=True).start()
+
 def dispatch_individual_chat_alert(target_webhook_url, message_body):
     payload = {"text": message_body}
     headers = {"Content-Type": "application/json; charset=UTF-8"}
@@ -699,32 +711,29 @@ if submit_deployment:
 DEPT_LABELS = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}
 
 @st.fragment
-def render_dynamic_volume_ribbon():
+def render_dynamic_volume_ribbon(dept_prefix, dept_label):
     with db_conn.session as session:
-        all_queues = session.execute(text("SELECT dept_prefix, queue_name, goal_target FROM dynamic_queues ORDER BY dept_prefix, queue_name")).fetchall()
-        vol_rows = session.execute(text("SELECT dept_prefix, queue_name, volume FROM queue_volumes WHERE log_date=:c_date"), {"c_date": CURRENT_DATE}).fetchall()
+        dept_queues = session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=:pfx ORDER BY queue_name"), {"pfx": dept_prefix}).fetchall()
+        vol_rows = session.execute(text("SELECT queue_name, volume FROM queue_volumes WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
 
-    if not all_queues:
-        st.info("💡 No queues configured yet. Add queues in the Queue Management tab to start tracking daily volume here.")
+    if not dept_queues:
+        st.info(f"💡 No queues configured yet for {dept_label}. Add some in the Queue Management tab to start tracking daily volume here.")
         return
 
-    volume_lookup = {(r.dept_prefix, r.queue_name): r.volume for r in vol_rows}
+    volume_lookup = {r.queue_name: r.volume for r in vol_rows}
 
-    autosave_error = st.session_state.pop("_volume_autosave_error", None)
+    autosave_error = st.session_state.pop(f"_volume_autosave_error_{dept_prefix}", None)
     if autosave_error:
         st.error(f"⚠️ Couldn't save a volume number just now: {autosave_error}")
 
-    st.markdown("<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Today's Queue Volume (start-of-day counts, editable anytime)</h4>", unsafe_allow_html=True)
+    st.markdown(f"<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Today's {dept_label} Queue Volume (start-of-day counts, editable anytime)</h4>", unsafe_allow_html=True)
 
     def _save_volume_on_change(widget_key, tracking_key, dept_prefix, queue_name):
         """
         on_change callback -- runs synchronously the moment this specific field is edited,
-        before any other rerun (including the global 15s heartbeat) can be processed. This
-        replaces the previous "detect a difference during render" approach, which relied on
-        directly overwriting a widget's session_state to reflect external changes -- the same
-        risky pattern that caused the checklist's revert-to-default bug. Doing it this way
-        also means a stale screen can never accidentally re-save someone else's field, since
-        each field only ever saves itself, on its own genuine edit.
+        before any other rerun (including the global heartbeat) can be processed. This means
+        a stale screen can never accidentally re-save someone else's field, since each field
+        only ever saves itself, on its own genuine edit.
         """
         new_value = st.session_state.get(widget_key)
         try:
@@ -737,34 +746,27 @@ def render_dynamic_volume_ribbon():
                 session.commit()
             st.session_state[tracking_key] = new_value
         except Exception as e:
-            st.session_state["_volume_autosave_error"] = str(e)
+            st.session_state[f"_volume_autosave_error_{dept_prefix}"] = str(e)
 
-    queues_by_dept = {}
-    for q in all_queues:
-        queues_by_dept.setdefault(q.dept_prefix, []).append(q)
-
-    for dept_prefix, dept_queues in queues_by_dept.items():
-        dept_label = DEPT_LABELS.get(dept_prefix, dept_prefix)
-        st.caption(f"**{dept_label}**")
-        num_cols = min(len(dept_queues), 6) or 1
-        cols = st.columns(num_cols)
-        for i, q in enumerate(dept_queues):
-            with cols[i % num_cols]:
-                current_value = int(volume_lookup.get((dept_prefix, q.queue_name), 0))
-                widget_key = f"vol_{dept_prefix}_{q.queue_name}_{CURRENT_DATE}"
-                tracking_key = f"{widget_key}__tracked_saved_value"
-                # Whenever the DB disagrees with what this session last confirmed was saved
-                # (first-ever render, or another user's save landed since we last checked),
-                # delete and recreate the widget with the DB value as its explicit default,
-                # rather than writing directly into its session_state.
-                if tracking_key not in st.session_state or st.session_state[tracking_key] != current_value:
-                    if widget_key in st.session_state:
-                        del st.session_state[widget_key]
-                    st.session_state[tracking_key] = current_value
-                st.number_input(
-                    q.queue_name, min_value=0, step=1, value=current_value, key=widget_key,
-                    on_change=_save_volume_on_change, args=(widget_key, tracking_key, dept_prefix, q.queue_name)
-                )
+    num_cols = min(len(dept_queues), 6) or 1
+    cols = st.columns(num_cols)
+    for i, q in enumerate(dept_queues):
+        with cols[i % num_cols]:
+            current_value = int(volume_lookup.get(q.queue_name, 0))
+            widget_key = f"vol_{dept_prefix}_{q.queue_name}_{CURRENT_DATE}"
+            tracking_key = f"{widget_key}__tracked_saved_value"
+            # Whenever the DB disagrees with what this session last confirmed was saved
+            # (first-ever render, or another user's save landed since we last checked),
+            # delete and recreate the widget with the DB value as its explicit default,
+            # rather than writing directly into its session_state.
+            if tracking_key not in st.session_state or st.session_state[tracking_key] != current_value:
+                if widget_key in st.session_state:
+                    del st.session_state[widget_key]
+                st.session_state[tracking_key] = current_value
+            st.number_input(
+                q.queue_name, min_value=0, step=1, value=current_value, key=widget_key,
+                on_change=_save_volume_on_change, args=(widget_key, tracking_key, dept_prefix, q.queue_name)
+            )
 
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
 
@@ -998,13 +1000,15 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
 
                                         session.commit()
 
-                                    # Notification fires AFTER the save, not before -- this is a
-                                    # network call (up to 5s timeout) and previously ran first,
-                                    # meaning a slow/unresponsive webhook delayed the numbers
-                                    # actually getting logged. Now the data is safely saved
-                                    # regardless of how long (or whether) this call takes.
+                                    # Fire-and-forget: doesn't block the rerun below on the
+                                    # webhook's network latency (previously this could still
+                                    # take up to 5s+ even after the data-write reordering,
+                                    # since fragment_rerun() below only ran after this call
+                                    # returned -- meaning the screen wouldn't show "logged"
+                                    # until the notification finished, even though the data
+                                    # itself was already safely saved).
                                     if is_escalated:
-                                        dispatch_real_time_alert(
+                                        dispatch_real_time_alert_async(
                                             f"📉 **PRODUCTION ALERT: GOAL NOT MET (PRO-RATA)** 📉\n"
                                             f"👤 **Technician:** {worker.upper()}\n"
                                             f"🏢 **Department:** {dept_label}\n"
@@ -1022,16 +1026,22 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             st.success(f"✅ Logged Units: **{db_input}**")
 
 # --- 7. CORE APP ROUTING INTERFACE ---
-render_dynamic_volume_ribbon()
-
 tab_de, tab_cc, tab_sh, tab_fi, tab_sched, tab_analytics, tab_mgmt = st.tabs([
-    "💻 Data Entry Line", "📞 Call Center Desk", "📦 Shipping Floor", "🧪 Fill Department", "🗓️ Auto-Scheduler", "📊 Cumulative Analytics", "⚙️ Queue Management"
+    "💻 Data Entry", "📞 Call Center", "📦 Shipping", "🧪 Fill Department", "🗓️ Auto-Scheduler", "📊 Cumulative Analytics", "⚙️ Queue Management"
 ])
 
-with tab_de: render_synchronized_matrix("data_entry_slots", "de", "Data Entry")
-with tab_cc: render_synchronized_matrix("call_center_slots", "cc", "Call Center")
-with tab_sh: render_synchronized_matrix("shipping_slots", "sh", "Shipping")
-with tab_fi: render_synchronized_matrix("fill_slots", "fi", "Fill")
+with tab_de:
+    render_dynamic_volume_ribbon("de", "Data Entry")
+    render_synchronized_matrix("data_entry_slots", "de", "Data Entry")
+with tab_cc:
+    render_dynamic_volume_ribbon("cc", "Call Center")
+    render_synchronized_matrix("call_center_slots", "cc", "Call Center")
+with tab_sh:
+    render_dynamic_volume_ribbon("sh", "Shipping")
+    render_synchronized_matrix("shipping_slots", "sh", "Shipping")
+with tab_fi:
+    render_dynamic_volume_ribbon("fi", "Fill")
+    render_synchronized_matrix("fill_slots", "fi", "Fill")
 
 # --- 7.5 AUTO-SCHEDULER TAB ---
 # Scoped to Data Entry only for now (AUTOSCHEDULER_DEPTS below), but every function here is
