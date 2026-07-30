@@ -2012,33 +2012,51 @@ def render_daily_verification_section():
                     new_edits_to_save[row_idx] = diff_changes
 
             if new_edits_to_save:
-                try:
-                    with db_conn.session as session:
-                        for row_idx, changes in new_edits_to_save.items():
-                            item_key = checklist_items[int(row_idx)].item_key
-                            set_parts = []
-                            params = {"c_date": CURRENT_DATE, "item_key": item_key}
-                            for col_name, new_val in changes.items():
-                                if col_name not in COLUMN_TO_ENTRY_FIELD:
-                                    continue
-                                field = COLUMN_TO_ENTRY_FIELD[col_name]
-                                val_to_store = str(new_val) if col_name in ("Oldest Date", "Target Date") else new_val
-                                set_parts.append(f"{field}=:{field}")
-                                params[field] = val_to_store
-                            if set_parts:
+                def _save_checklist_row_async(item_key, set_parts_dict):
+                    """
+                    Fire-and-forget: runs the actual DB write on a background thread so this
+                    script's rerun finishes and control returns to the browser almost
+                    immediately, instead of waiting on a full DB round trip in the middle of
+                    it. That round trip was the window during which a rapid follow-up edit
+                    (e.g. clicking a second cell right after the first) could arrive back from
+                    the server and clobber the second edit before it was ever saved -- shrinking
+                    this window is what should fix "the second selection disappears."
+                    Trade-off: a save failure here can't show an on-screen error the way a
+                    blocking save could (same trade already made for Chat notifications) --
+                    it's logged to the server console instead.
+                    """
+                    def _run():
+                        try:
+                            with db_conn.session as session:
                                 session.execute(text("""
                                     INSERT INTO checklist_entries (log_date, item_key)
                                     VALUES (:c_date, :item_key)
                                     ON CONFLICT (log_date, item_key) DO NOTHING
                                 """), {"c_date": CURRENT_DATE, "item_key": item_key})
+                                set_parts = [f"{field}=:{field}" for field in set_parts_dict]
+                                params = {"c_date": CURRENT_DATE, "item_key": item_key, **set_parts_dict}
                                 session.execute(text(f"UPDATE checklist_entries SET {', '.join(set_parts)} WHERE log_date=:c_date AND item_key=:item_key"), params)
-                        session.commit()
-                    merged = dict(last_processed)
-                    for row_idx, changes in edited_rows.items():
-                        merged.setdefault(row_idx, {}).update(changes)
-                    st.session_state[last_processed_key] = merged
-                except Exception as e:
-                    st.session_state["_checklist_autosave_error"] = str(e)
+                                session.commit()
+                        except Exception as e:
+                            print(f"Checklist autosave failed for {item_key}: {str(e)}")
+                    threading.Thread(target=_run, daemon=True).start()
+
+                for row_idx, changes in new_edits_to_save.items():
+                    item_key = checklist_items[int(row_idx)].item_key
+                    set_parts_dict = {}
+                    for col_name, new_val in changes.items():
+                        if col_name not in COLUMN_TO_ENTRY_FIELD:
+                            continue
+                        field = COLUMN_TO_ENTRY_FIELD[col_name]
+                        val_to_store = str(new_val) if col_name in ("Oldest Date", "Target Date") else new_val
+                        set_parts_dict[field] = val_to_store
+                    if set_parts_dict:
+                        _save_checklist_row_async(item_key, set_parts_dict)
+
+                merged = dict(last_processed)
+                for row_idx, changes in edited_rows.items():
+                    merged.setdefault(row_idx, {}).update(changes)
+                st.session_state[last_processed_key] = merged
 
             st.markdown("<br>", unsafe_allow_html=True)
 
