@@ -1906,11 +1906,11 @@ def render_daily_verification_section():
 
         with c_col:
             with db_conn.session as session:
-                checklist_items = session.execute(text("SELECT item_key, label, aging_basis, red_threshold_days FROM checklist_items ORDER BY sort_order, label")).fetchall()
+                checklist_items_fresh = session.execute(text("SELECT item_key, label, aging_basis, red_threshold_days FROM checklist_items ORDER BY sort_order, label")).fetchall()
                 entry_rows = session.execute(text("SELECT item_key, status, oldest_date, target_date, verified_by, notes FROM checklist_entries WHERE log_date=:c_date"), {"c_date": CURRENT_DATE}).fetchall()
             entries_by_key = {r.item_key: r for r in entry_rows}
 
-            if not checklist_items:
+            if not checklist_items_fresh:
                 st.info("No checklist items configured yet. Add some from ⚙️ Manage Checklist Items above.")
                 return
 
@@ -1932,20 +1932,48 @@ def render_daily_verification_section():
             if autosave_error:
                 st.error(f"⚠️ Autosave failed for a checklist field -- your last entry may not be saved: {autosave_error}")
 
-            table_rows = []
-            for item in checklist_items:
+            # Cheap signature of everything that would affect the displayed table (both the
+            # item config and the day's entries). Only rebuild the DataFrame we hand to
+            # data_editor when this actually differs from what we last built it from --
+            # otherwise the exact same DataFrame object is reused, so data_editor has no
+            # reason to reset anything. Previously the table was rebuilt fresh on literally
+            # every rerun, including ones where nothing had changed at all (e.g. the global
+            # heartbeat firing with zero other activity), which was tearing down in-progress
+            # selections for no reason.
+            sig_parts = []
+            for item in checklist_items_fresh:
                 entry = entries_by_key.get(item.item_key)
-                status = entry.status if entry else "Pending"
-                odt = parse_stored_date(entry.oldest_date if entry else "")
-                tdt = parse_stored_date(entry.target_date if entry else "")
-                by = entry.verified_by if entry else ""
-                notes = entry.notes if entry else ""
-                _, _, badge = compute_aging(item.aging_basis, item.red_threshold_days, odt, tdt)
-                table_rows.append({
-                    "Queue": item.label, "Status": status, "Oldest Date": odt, "Target Date": tdt,
-                    "Aging": badge, "Verified By": by, "Notes/Explanations": notes,
-                })
-            checklist_df = pd.DataFrame(table_rows)
+                sig_parts.append("|".join([
+                    item.item_key, item.label, item.aging_basis, str(item.red_threshold_days),
+                    entry.status if entry else "Pending",
+                    entry.oldest_date if entry else "", entry.target_date if entry else "",
+                    entry.verified_by if entry else "", entry.notes if entry else "",
+                ]))
+            current_signature = "||".join(sig_parts)
+
+            cache_key = "checklist_table_cache"
+            sig_key = "checklist_table_signature"
+
+            if cache_key not in st.session_state or st.session_state.get(sig_key) != current_signature:
+                table_rows = []
+                for item in checklist_items_fresh:
+                    entry = entries_by_key.get(item.item_key)
+                    status = entry.status if entry else "Pending"
+                    odt = parse_stored_date(entry.oldest_date if entry else "")
+                    tdt = parse_stored_date(entry.target_date if entry else "")
+                    by = entry.verified_by if entry else ""
+                    notes = entry.notes if entry else ""
+                    _, _, badge = compute_aging(item.aging_basis, item.red_threshold_days, odt, tdt)
+                    table_rows.append({
+                        "Queue": item.label, "Status": status, "Oldest Date": odt, "Target Date": tdt,
+                        "Aging": badge, "Verified By": by, "Notes/Explanations": notes,
+                    })
+                st.session_state[cache_key] = pd.DataFrame(table_rows)
+                st.session_state["checklist_items_cache"] = checklist_items_fresh
+                st.session_state[sig_key] = current_signature
+
+            checklist_df = st.session_state[cache_key]
+            checklist_items = st.session_state["checklist_items_cache"]
 
             # st.data_editor tracks exactly which cells were touched via its own built-in
             # edited_rows mechanism, and checklist_items/checklist_entries (normalized, like
