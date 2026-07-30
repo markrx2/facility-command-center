@@ -616,7 +616,7 @@ if submit_deployment:
 # (still there if historical data is wanted) but nothing writes to it anymore.
 DEPT_LABELS = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}
 
-@st.fragment(run_every="5s")
+@st.fragment
 def render_dynamic_volume_ribbon():
     with db_conn.session as session:
         all_queues = session.execute(text("SELECT dept_prefix, queue_name, goal_target FROM dynamic_queues ORDER BY dept_prefix, queue_name")).fetchall()
@@ -1200,7 +1200,7 @@ def apply_schedule_proposal(dept_prefix, db_table):
         session.commit()
     return skipped
 
-@st.fragment(run_every="5s")
+@st.fragment
 def render_autoscheduler_tab():
     if not is_manager:
         st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to use the auto-scheduler.")
@@ -1679,7 +1679,7 @@ with tab_analytics:
                 st.line_chart(display_df.groupby(["Date", "Assigned Queue"])["Logged Units"].sum().unstack(fill_value=0))
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
-@st.fragment(run_every="5s")
+@st.fragment
 def render_daily_verification_section():
     with st.container(border=True):
         st.header("📋 Global Facility Daily Queue Verification Log")
@@ -1707,125 +1707,140 @@ def render_daily_verification_section():
                         st.error(f"⚠️ Couldn't update the deadline right now: {str(e)}")
             
         with c_col:
-            opt = ["Pending", "Yes", "No"]
-        
+            CHECKLIST_ROWS = [
+                ("14 Day Return Queue Checked", "return_fourteen_queue"),
+                ("AI /Tech Check Queue Checked", "ai_tech_check"),
+                ("Billing Queue Checked", "billing"),
+                ("Central Fill Queue Checked", "central_fill_queue"),
+                ("Data Re-Entry Checked", "data_re_entry"),
+                ("Dispense Queue Checked", "dispense"),
+                ("ERx Queue Checked", "erx_queue"),
+                ("Future Bill Queue Checked", "future_bill"),
+                ("On Hold Queue Checked", "on_hold_queue"),
+                ("Ordering Queue Checked", "ordering"),
+                ("Prior Authorization Queue", "pa_queue"),
+                ("Rejection Queue Checked", "rejection_queue"),
+                ("Untransmitted Claims Completed", "untransmitted_claims"),
+            ]
+
             def parse_stored_date(val):
                 if not val or str(val).strip() == "": return datetime.now().date()
                 try: return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
                 except: return datetime.now().date()
 
-            autosave_error = st.session_state.pop("_checklist_autosave_error", None)
-            if autosave_error:
-                st.error(f"⚠️ Autosave failed for a checklist field -- your last entry may not be saved: {autosave_error}")
-
-            def _save_field_on_change(widget_key, tracking_key, db_column, kind):
-                """
-                on_change callback: Streamlit runs this synchronously as part of handling the
-                user's interaction with THIS widget, strictly before any script rerun --
-                including a racing global auto-refresh -- gets processed. Doing the save here
-                (rather than by comparing values during the next render pass, which could be
-                superseded/abandoned by an overlapping rerun before it reached the write) is
-                what closes the "edit right before the 10s refresh boundary sometimes gets
-                dropped" race. This is safe now specifically because hydration/cross-session
-                sync (below) uses the delete-and-recreate pattern instead of ever writing
-                directly into the widget's own session_state -- that direct-write + on_change
-                combination was what caused the earlier revert-to-default bug.
-                """
-                new_value = st.session_state.get(widget_key)
-                val_to_store = str(new_value) if kind == "date" else new_value
+            def compute_aging(db_prefix, odt, tdt):
                 try:
-                    with db_conn.session as session:
-                        session.execute(text(f"UPDATE daily_checklist SET {db_column}=:val WHERE log_date=:c_date"), {"val": val_to_store, "c_date": CURRENT_DATE})
-                        session.commit()
-                    st.session_state[tracking_key] = new_value
-                except Exception as e:
-                    st.session_state["_checklist_autosave_error"] = str(e)
-
-            def render_synced_field(kind, label, col, widget_key, db_value, db_column):
-                """
-                Tracks, in a session-local variable separate from the widget's own state, "the
-                last value we know for certain is correctly saved to the database" for this
-                field. Whenever the freshly-fetched DB value disagrees with that tracked value
-                (either because this is the very first time this session has ever rendered
-                this field, or because another user's session saved a change since we last
-                looked), the widget is explicitly deleted and recreated with the DB value as
-                its default -- rather than directly overwriting its session_state, which
-                turned out to interact unpredictably with on_change/selectbox internals on a
-                widget's first-ever creation (that combination is what caused a status field to
-                revert to its default a few seconds after being set).
-                """
-                tracking_key = f"{widget_key}__tracked_saved_value"
-                if tracking_key not in st.session_state or st.session_state[tracking_key] != db_value:
-                    if widget_key in st.session_state:
-                        del st.session_state[widget_key]
-                    st.session_state[tracking_key] = db_value
-
-                on_change_args = (widget_key, tracking_key, db_column, kind)
-                if kind == "status":
-                    idx = opt.index(db_value) if db_value in opt else 0
-                    val = col.selectbox(label, options=opt, index=idx, key=widget_key, on_change=_save_field_on_change, args=on_change_args)
-                elif kind == "date":
-                    val = col.date_input(label, value=db_value, key=widget_key, on_change=_save_field_on_change, args=on_change_args)
-                else:
-                    val = col.text_input(label, value=db_value, key=widget_key, on_change=_save_field_on_change, args=on_change_args)
-
-                return val
-
-            form_states = {}
-
-            def render_checklist_row(label, db_prefix, prefix_key):
-                st.markdown(f"##### {label}")
-                cols = st.columns([1.1, 1.0, 1.0, 0.7, 0.8, 2.0])
-            
-                stored_status = getattr(chk, db_prefix, "Pending") if chk else "Pending"
-                stored_odt = getattr(chk, f"{db_prefix}_date", "") if chk else ""
-                stored_tdt = getattr(chk, f"{db_prefix}_target", "") if chk else ""
-                stored_by = getattr(chk, f"{db_prefix}_by", "") if chk else ""
-                stored_notes = getattr(chk, f"{db_prefix}_notes", "") if chk else ""
-
-                curr_status = render_synced_field("status", "Status", cols[0], f"status_{prefix_key}_{CURRENT_DATE}", stored_status, db_prefix)
-                curr_odt = render_synced_field("date", "Oldest Date", cols[1], f"odt_{prefix_key}_{CURRENT_DATE}", parse_stored_date(stored_odt), f"{db_prefix}_date")
-                curr_tdt = render_synced_field("date", "Target Date", cols[2], f"tdt_{prefix_key}_{CURRENT_DATE}", parse_stored_date(stored_tdt), f"{db_prefix}_target")
-            
-                try:
-                    date_delta = (datetime.now().date() - curr_odt).days if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"] else (curr_tdt - curr_odt).days
+                    date_delta = (datetime.now().date() - odt).days if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue"] else (tdt - odt).days
                     is_red = False
                     if date_delta > 0:
                         if db_prefix in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims"]: is_red = True
                         elif db_prefix in ["ai_tech_check", "rejection_queue"] and date_delta > 4: is_red = True
                         elif db_prefix == "return_fourteen_queue" and date_delta >= 14: is_red = True
                         elif db_prefix not in ["erx_queue", "central_fill_queue", "on_hold_queue", "data_re_entry", "untransmitted_claims", "ai_tech_check", "rejection_queue", "return_fourteen_queue"] and date_delta >= 7: is_red = True
-
-                    badge_html = f"<div style='text-align:center;'><span style='background-color:#f8d7da; color:#842029; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>🚨 {date_delta} Days</span></div>" if is_red else (f"<div style='text-align:center;'><span style='background-color:#fff3cd; color:#664d03; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>⚠️ {date_delta} Days</span></div>" if date_delta > 0 else f"<div style='text-align:center;'><span style='background-color:#d1e7dd; color:#0f5132; padding:6px 10px; border-radius:4px; font-weight:bold; font-size:12px;'>✅ Current</span></div>")
-                    cols[3].markdown(f"<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div>{badge_html}", unsafe_allow_html=True)
+                    badge = f"🚨 {date_delta} Days" if is_red else (f"⚠️ {date_delta} Days" if date_delta > 0 else "✅ Current")
+                    return date_delta, is_red, badge
                 except Exception:
-                    cols[3].markdown("<div style='font-size: 14px; margin-bottom: 10px; color: #31333F;'>Aging</div><div style='text-align:center;'><span style='background-color:#cbd5e1; color:#1e293b; padding:6px 10px; border-radius:4px; font-size:12px;'>-</span></div>", unsafe_allow_html=True)
-                    is_red = False
-                    date_delta = 0
+                    return 0, False, "-"
 
-                curr_by = render_synced_field("text", "Verified By", cols[4], f"by_{prefix_key}_{CURRENT_DATE}", stored_by, f"{db_prefix}_by")
-                curr_notes = render_synced_field("text", "Notes/Explanations", cols[5], f"notes_{prefix_key}_{CURRENT_DATE}", stored_notes, f"{db_prefix}_notes")
-            
-                form_states[db_prefix] = {
-                    "label": label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
-                    "by": curr_by, "notes": curr_notes, "is_red": is_red, "delta": date_delta
-                }
+            autosave_error = st.session_state.pop("_checklist_autosave_error", None)
+            if autosave_error:
+                st.error(f"⚠️ Autosave failed for a checklist field -- your last entry may not be saved: {autosave_error}")
 
-            render_checklist_row("14 Day Return Queue Checked", "return_fourteen_queue", "ret_14")
-            render_checklist_row("AI /Tech Check Queue Checked", "ai_tech_check", "ai_tch")
-            render_checklist_row("Billing Queue Checked", "billing", "bill")
-            render_checklist_row("Central Fill Queue Checked", "central_fill_queue", "c_fill")
-            render_checklist_row("Data Re-Entry Checked", "data_re_entry", "re_ent")
-            render_checklist_row("Dispense Queue Checked", "dispense", "disp")
-            render_checklist_row("ERx Queue Checked", "erx_queue", "erx_chk")
-            render_checklist_row("Future Bill Queue Checked", "future_bill", "fut")
-            render_checklist_row("On Hold Queue Checked", "on_hold_queue", "on_hld")
-            render_checklist_row("Ordering Queue Checked", "ordering", "ord")
-            render_checklist_row("Prior Authorization Queue", "pa_queue", "pa")
-            render_checklist_row("Rejection Queue Checked", "rejection_queue", "rej")
-            render_checklist_row("Untransmitted Claims Completed", "untransmitted_claims", "untrans")
+            table_rows = []
+            for label, db_prefix in CHECKLIST_ROWS:
+                status = getattr(chk, db_prefix, "Pending") if chk else "Pending"
+                odt = parse_stored_date(getattr(chk, f"{db_prefix}_date", "") if chk else "")
+                tdt = parse_stored_date(getattr(chk, f"{db_prefix}_target", "") if chk else "")
+                by = getattr(chk, f"{db_prefix}_by", "") if chk else ""
+                notes = getattr(chk, f"{db_prefix}_notes", "") if chk else ""
+                _, _, badge = compute_aging(db_prefix, odt, tdt)
+                table_rows.append({
+                    "Queue": label, "Status": status, "Oldest Date": odt, "Target Date": tdt,
+                    "Aging": badge, "Verified By": by, "Notes/Explanations": notes,
+                })
+            checklist_df = pd.DataFrame(table_rows)
+
+            # st.data_editor tracks exactly which cells were touched via its own built-in
+            # edited_rows mechanism (session_state["checklist_data_editor"]["edited_rows"]),
+            # rather than us comparing values by hand across reruns to guess what changed --
+            # that guessing is what caused three successive bugs in the hand-rolled version
+            # (revert-to-default, cross-session overwrites, and the database itself
+            # oscillating between values). This also means cross-session sync is handled by
+            # Streamlit's own tested merge behavior: a cell THIS session hasn't locally edited
+            # always reflects the freshly-fetched data passed in below, while a cell this
+            # session HAS edited keeps showing that edit (which matches the DB anyway, since
+            # it's saved immediately below) -- no custom shadow-key/delete-recreate logic
+            # needed to achieve that.
+            edited_df = st.data_editor(
+                checklist_df,
+                key="checklist_data_editor",
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Queue": st.column_config.TextColumn("Queue", disabled=True),
+                    "Status": st.column_config.SelectboxColumn("Status", options=["Pending", "Yes", "No"], required=True),
+                    "Oldest Date": st.column_config.DateColumn("Oldest Date"),
+                    "Target Date": st.column_config.DateColumn("Target Date"),
+                    "Aging": st.column_config.TextColumn("Aging", disabled=True),
+                    "Verified By": st.column_config.TextColumn("Verified By"),
+                    "Notes/Explanations": st.column_config.TextColumn("Notes/Explanations"),
+                },
+            )
+
+            COLUMN_TO_DB_SUFFIX = {
+                "Status": "", "Oldest Date": "_date", "Target Date": "_target",
+                "Verified By": "_by", "Notes/Explanations": "_notes",
+            }
+
+            edited_rows = st.session_state.get("checklist_data_editor", {}).get("edited_rows", {})
+            last_processed_key = "_checklist_last_processed_edits"
+            last_processed = st.session_state.get(last_processed_key, {})
+
+            # Only persist cells that are NEW or changed since the last time we processed
+            # edited_rows -- edited_rows accumulates every edit made this whole session, so
+            # blindly re-saving all of it on every rerun would risk re-overwriting a field
+            # another user changed more recently than our own earlier edit to it.
+            new_edits_to_save = {}
+            for row_idx, changes in edited_rows.items():
+                prev_changes = last_processed.get(row_idx, {})
+                diff_changes = {k: v for k, v in changes.items() if prev_changes.get(k) != v}
+                if diff_changes:
+                    new_edits_to_save[row_idx] = diff_changes
+
+            if new_edits_to_save:
+                try:
+                    with db_conn.session as session:
+                        for row_idx, changes in new_edits_to_save.items():
+                            _, db_prefix = CHECKLIST_ROWS[int(row_idx)]
+                            for col_name, new_val in changes.items():
+                                if col_name not in COLUMN_TO_DB_SUFFIX:
+                                    continue
+                                db_column = db_prefix + COLUMN_TO_DB_SUFFIX[col_name]
+                                val_to_store = str(new_val) if col_name in ("Oldest Date", "Target Date") else new_val
+                                session.execute(text(f"UPDATE daily_checklist SET {db_column}=:val WHERE log_date=:c_date"), {"val": val_to_store, "c_date": CURRENT_DATE})
+                        session.commit()
+                    merged = dict(last_processed)
+                    for row_idx, changes in edited_rows.items():
+                        merged.setdefault(row_idx, {}).update(changes)
+                    st.session_state[last_processed_key] = merged
+                except Exception as e:
+                    st.session_state["_checklist_autosave_error"] = str(e)
 
             st.markdown("<br>", unsafe_allow_html=True)
+
+            # Build the same form_states shape the Submit logic below expects, from the
+            # CURRENT edited dataframe -- so Submit always acts on exactly what's displayed,
+            # including anything just autosaved above in this same render pass.
+            form_states = {}
+            for i, (label, db_prefix) in enumerate(CHECKLIST_ROWS):
+                row = edited_df.iloc[i]
+                odt_val = row["Oldest Date"]
+                tdt_val = row["Target Date"]
+                delta, is_red, _ = compute_aging(db_prefix, odt_val, tdt_val)
+                form_states[db_prefix] = {
+                    "label": label, "status": row["Status"], "odt": str(odt_val), "tdt": str(tdt_val),
+                    "by": row["Verified By"], "notes": row["Notes/Explanations"], "is_red": is_red, "delta": delta
+                }
 
             already_submitted_today = bool(chk.last_submitted_at) if chk else False
             resubmit_armed_key = "checklist_resubmit_armed"
@@ -1833,9 +1848,6 @@ def render_daily_verification_section():
             if already_submitted_today:
                 st.info(f"✅ Already submitted today at **{chk.last_submitted_at} EST**. Submitting again will re-send Chat alerts for anything still flagged below.")
 
-            # Two-step guard: once already submitted today, the first click only "arms" a
-            # resubmit and asks for explicit confirmation, so a stray click can't silently
-            # re-fire duplicate Chat alerts for the same deficiencies.
             if already_submitted_today and not st.session_state.get(resubmit_armed_key, False):
                 submit_clicked = False
                 if st.button("🔁 Resubmit Anyway", key="checklist_resubmit_arm_btn", use_container_width=True):
@@ -1849,10 +1861,6 @@ def render_daily_verification_section():
                 deficiency_list = []
             
                 try:
-                    # Single batched UPDATE covering all 13 checklist rows plus the tracking
-                    # flags, instead of 13+ separate sequential round trips to the DB. Each
-                    # round trip has its own network latency, so this was a real contributor
-                    # to the "lag on submit" -- now it's one statement, one round trip.
                     set_parts = []
                     params = {"c_date": CURRENT_DATE}
                     for db_field, data in form_states.items():
@@ -1886,18 +1894,11 @@ def render_daily_verification_section():
                         if chat_sent_ok:
                             st.success("Deficiency summary report compiled and pushed to Google Chat!")
                         else:
-                            # dispatch_real_time_alert() previously failed completely silently here --
-                            # the DB save succeeded (that part is confirmed above) but the webhook POST
-                            # did not, and nothing told the user that. Surfacing it now.
                             st.warning("⚠️ The verification data saved, but the Google Chat notification failed to send. Check the webhook configuration/connectivity.")
                     else:
                         st.success("Verification metrics logged successfully! All operational channels are current.")
 
                     st.session_state[resubmit_armed_key] = False
-                    # No immediate rerun here, same reasoning as elsewhere in this app: forcing
-                    # one right after showing a success/warning message risks wiping it before
-                    # it's readable. The autosave logic above and the global 10s heartbeat will
-                    # naturally reflect this submission on the next interaction regardless.
                 except Exception as e:
                     st.error(f"⚠️ Couldn't save the verification report right now: {str(e)}")
 
