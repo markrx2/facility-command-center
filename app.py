@@ -445,7 +445,6 @@ def execution_global_background_automation_engine():
                     
                     start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
                     end_time = start_time + timedelta(minutes=db_dur_min)
-                    escalation_time = end_time + timedelta(minutes=10)
                     fifteen_min_overdue_time = end_time + timedelta(minutes=15)
                     
                     if current_now >= end_time:
@@ -462,7 +461,12 @@ def execution_global_background_automation_engine():
                                 dispatch_individual_tech_notification(tech_email, worker, slot_num, label)
                             if tech_webhook:
                                 dispatch_individual_chat_alert(tech_webhook, f"⏱️ **Timer Expired!**\nYour tracking block timer has ended for *{label}* (Slot {slot_num}).\n\nPlease log counts.")
-                            dispatch_real_time_alert(f"⚠️ TIMER ALERT: {worker} reached zero on {label} Slot {slot_num} without metrics.")
+                            # Deliberately no manager-wide notification here -- this fires the
+                            # instant the timer hits zero, before the tech has had any chance
+                            # to miss the window. The individual tech reminder above is all
+                            # that should happen at this point. The manager only hears about it
+                            # if the tech actually fails to respond by fifteen_min_overdue_time
+                            # below -- there's no separate 10-minute manager escalation anymore.
                             
                             session.execute(
                                 text(f"UPDATE {table_name} SET tech_notified = 1 WHERE log_date = :c_date AND tech_name = :t_name AND slot_id = :s_id"),
@@ -470,15 +474,7 @@ def execution_global_background_automation_engine():
                             )
                             state_changed = True
                         
-                        if current_now >= escalation_time and db_s_not == 0:
-                            dispatch_real_time_alert(f"🚨 CRITICAL ESCALATION: {worker} missed metrics window for {label} Slot {slot_num}.")
-                            session.execute(
-                                text(f"UPDATE {table_name} SET supervisor_notified = 1 WHERE log_date = :c_date AND tech_name = :t_name AND slot_id = :s_id"),
-                                {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num}
-                            )
-                            state_changed = True
-                            
-                        if current_now >= fifteen_min_overdue_time and db_s_not < 2:
+                        if current_now >= fifteen_min_overdue_time and db_s_not == 0:
                             dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
                             session.execute(
                                 text(f"UPDATE {table_name} SET supervisor_notified = 2 WHERE log_date = :c_date AND tech_name = :t_name AND slot_id = :s_id"),
@@ -620,6 +616,7 @@ if submit_deployment:
 # (still there if historical data is wanted) but nothing writes to it anymore.
 DEPT_LABELS = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}
 
+@st.fragment(run_every="5s")
 def render_dynamic_volume_ribbon():
     with db_conn.session as session:
         all_queues = session.execute(text("SELECT dept_prefix, queue_name, goal_target FROM dynamic_queues ORDER BY dept_prefix, queue_name")).fetchall()
@@ -631,13 +628,39 @@ def render_dynamic_volume_ribbon():
 
     volume_lookup = {(r.dept_prefix, r.queue_name): r.volume for r in vol_rows}
 
+    autosave_error = st.session_state.pop("_volume_autosave_error", None)
+    if autosave_error:
+        st.error(f"⚠️ Couldn't save a volume number just now: {autosave_error}")
+
     st.markdown("<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Today's Queue Volume (start-of-day counts, editable anytime)</h4>", unsafe_allow_html=True)
+
+    def _save_volume_on_change(widget_key, tracking_key, dept_prefix, queue_name):
+        """
+        on_change callback -- runs synchronously the moment this specific field is edited,
+        before any other rerun (including the global 10s heartbeat) can be processed. This
+        replaces the previous "detect a difference during render" approach, which relied on
+        directly overwriting a widget's session_state to reflect external changes -- the same
+        risky pattern that caused the checklist's revert-to-default bug. Doing it this way
+        also means a stale screen can never accidentally re-save someone else's field, since
+        each field only ever saves itself, on its own genuine edit.
+        """
+        new_value = st.session_state.get(widget_key)
+        try:
+            with db_conn.session as session:
+                session.execute(text("""
+                    INSERT INTO queue_volumes (log_date, dept_prefix, queue_name, volume)
+                    VALUES (:c_date, :pfx, :qname, :vol)
+                    ON CONFLICT (log_date, dept_prefix, queue_name) DO UPDATE SET volume = EXCLUDED.volume
+                """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "qname": queue_name, "vol": new_value})
+                session.commit()
+            st.session_state[tracking_key] = new_value
+        except Exception as e:
+            st.session_state["_volume_autosave_error"] = str(e)
 
     queues_by_dept = {}
     for q in all_queues:
         queues_by_dept.setdefault(q.dept_prefix, []).append(q)
 
-    updates = {}
     for dept_prefix, dept_queues in queues_by_dept.items():
         dept_label = DEPT_LABELS.get(dept_prefix, dept_prefix)
         st.caption(f"**{dept_label}**")
@@ -647,35 +670,20 @@ def render_dynamic_volume_ribbon():
             with cols[i % num_cols]:
                 current_value = int(volume_lookup.get((dept_prefix, q.queue_name), 0))
                 widget_key = f"vol_{dept_prefix}_{q.queue_name}_{CURRENT_DATE}"
-                shadow_key = f"{widget_key}__last_synced_db_value"
-                # A widget with a fixed key only uses `value=` as its INITIAL default the
-                # first time it's ever rendered in this browser session -- on every later
-                # rerun, Streamlit keeps whatever's already in session_state for that key and
-                # silently ignores `value=`, even though we're re-fetching fresh data from the
-                # DB every 10s. That's exactly why one person's edits never showed up on
-                # someone else's already-open screen. Fix: explicitly detect when the DB value
-                # has changed since we last synced it in THIS session, and force the widget's
-                # state to catch up before creating it.
-                if st.session_state.get(shadow_key) != current_value:
-                    st.session_state[widget_key] = current_value
-                    st.session_state[shadow_key] = current_value
-                new_val = st.number_input(q.queue_name, min_value=0, step=1, key=widget_key)
-                if new_val != current_value:
-                    updates[(dept_prefix, q.queue_name)] = new_val
+                tracking_key = f"{widget_key}__tracked_saved_value"
+                # Whenever the DB disagrees with what this session last confirmed was saved
+                # (first-ever render, or another user's save landed since we last checked),
+                # delete and recreate the widget with the DB value as its explicit default,
+                # rather than writing directly into its session_state.
+                if tracking_key not in st.session_state or st.session_state[tracking_key] != current_value:
+                    if widget_key in st.session_state:
+                        del st.session_state[widget_key]
+                    st.session_state[tracking_key] = current_value
+                st.number_input(
+                    q.queue_name, min_value=0, step=1, value=current_value, key=widget_key,
+                    on_change=_save_volume_on_change, args=(widget_key, tracking_key, dept_prefix, q.queue_name)
+                )
 
-    if updates:
-        try:
-            with db_conn.session as session:
-                for (dept_prefix, queue_name), val in updates.items():
-                    session.execute(text("""
-                        INSERT INTO queue_volumes (log_date, dept_prefix, queue_name, volume)
-                        VALUES (:c_date, :pfx, :qname, :vol)
-                        ON CONFLICT (log_date, dept_prefix, queue_name) DO UPDATE SET volume = EXCLUDED.volume
-                    """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "qname": queue_name, "vol": val})
-                session.commit()
-            st.rerun()
-        except Exception as e:
-            st.error(f"⚠️ Couldn't save volume numbers right now: {str(e)}")
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
 
 # --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
@@ -852,7 +860,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         
                         start_time = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S")
                         end_time = start_time + timedelta(minutes=db_dur_min)
-                        escalation_time = end_time + timedelta(minutes=10)
+                        fifteen_min_overdue_time = end_time + timedelta(minutes=15)
                         current_now = now_eastern_naive()
                         
                         if current_now < end_time and not db_sub:
@@ -865,9 +873,8 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         elif not db_sub:
                             st.error("🛑 Timer Expired!")
                         
-                        if current_now >= escalation_time and not db_sub:
-                            if db_s_not == 1: st.error("🚨 Supervisor alert sent to Google Chat.")
-                            elif db_s_not == 2: st.error("🚨 CRITICAL: Past 15-Minute Deadline Notification Dispatched.")
+                        if current_now >= fifteen_min_overdue_time and not db_sub and db_s_not == 2:
+                            st.error("🚨 CRITICAL: Past 15-Minute Deadline -- Manager Notified.")
                         
                         if not db_sub:
                             val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{w_id}_{slot_num}")
@@ -1193,7 +1200,7 @@ def apply_schedule_proposal(dept_prefix, db_table):
         session.commit()
     return skipped
 
-@st.fragment
+@st.fragment(run_every="5s")
 def render_autoscheduler_tab():
     if not is_manager:
         st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to use the auto-scheduler.")
@@ -1240,7 +1247,49 @@ def render_autoscheduler_tab():
             st.info(f"No technicians assigned to {dept_label} yet. Add them from the sidebar first.")
             continue
 
-        shift_form_state = {}
+        shift_autosave_error = st.session_state.pop("_shift_autosave_error", None)
+        if shift_autosave_error:
+            st.error(f"⚠️ Couldn't save a shift change just now: {shift_autosave_error}")
+
+        def _save_shift_choice(dept_prefix, tech_name, widget_key, tracking_key):
+            """
+            on_change callback for the shift-choice dropdown -- saves immediately on genuine
+            user interaction, never based on a full-form snapshot. This is what closes the bug
+            where clicking one big "Save" button could silently overwrite OTHER techs' shifts
+            with whatever was stale/default on your particular screen at that moment.
+            """
+            chosen = st.session_state.get(widget_key)
+            try:
+                with db_conn.session as session:
+                    if chosen == "Not Working Today":
+                        session.execute(text("DELETE FROM tech_shifts WHERE log_date=:c_date AND dept_prefix=:pfx AND tech_name=:t_name"), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name})
+                    elif chosen == "Custom":
+                        session.execute(text("""
+                            INSERT INTO tech_shifts (log_date, dept_prefix, tech_name, shift_start, shift_end)
+                            VALUES (:c_date, :pfx, :t_name, '09:00', '17:00')
+                            ON CONFLICT (log_date, dept_prefix, tech_name) DO UPDATE SET shift_start=EXCLUDED.shift_start, shift_end=EXCLUDED.shift_end
+                        """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name})
+                    else:
+                        p_start, p_end = SHIFT_PRESETS[chosen]
+                        session.execute(text("""
+                            INSERT INTO tech_shifts (log_date, dept_prefix, tech_name, shift_start, shift_end)
+                            VALUES (:c_date, :pfx, :t_name, :s_start, :s_end)
+                            ON CONFLICT (log_date, dept_prefix, tech_name) DO UPDATE SET shift_start=EXCLUDED.shift_start, shift_end=EXCLUDED.shift_end
+                        """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name, "s_start": p_start.strftime("%H:%M"), "s_end": p_end.strftime("%H:%M")})
+                    session.commit()
+                st.session_state[tracking_key] = chosen
+            except Exception as e:
+                st.session_state["_shift_autosave_error"] = str(e)
+
+        def _save_custom_time(dept_prefix, tech_name, db_column, widget_key):
+            new_time = st.session_state.get(widget_key)
+            try:
+                with db_conn.session as session:
+                    session.execute(text(f"UPDATE tech_shifts SET {db_column}=:val WHERE log_date=:c_date AND dept_prefix=:pfx AND tech_name=:t_name"), {"val": new_time.strftime("%H:%M"), "c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name})
+                    session.commit()
+            except Exception as e:
+                st.session_state["_shift_autosave_error"] = str(e)
+
         for r in roster_rows:
             tech_name = r.tech_name
             t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
@@ -1248,47 +1297,46 @@ def render_autoscheduler_tab():
             cols[0].markdown(f"**{tech_name}**")
 
             preset_options = ["Not Working Today"] + list(SHIFT_PRESETS.keys()) + ["Custom"]
-            default_index = 0
+            true_chosen = "Not Working Today"
             custom_start, custom_end = dtime(9, 0), dtime(17, 0)
             if tech_name in existing_shifts:
                 s_str, e_str = existing_shifts[tech_name]
                 matched_preset = next((label for label, (ps, pe) in SHIFT_PRESETS.items() if ps.strftime("%H:%M") == s_str and pe.strftime("%H:%M") == e_str), None)
                 if matched_preset:
-                    default_index = preset_options.index(matched_preset)
+                    true_chosen = matched_preset
                 else:
-                    default_index = preset_options.index("Custom")
+                    true_chosen = "Custom"
                     custom_start = datetime.strptime(s_str, "%H:%M").time()
                     custom_end = datetime.strptime(e_str, "%H:%M").time()
 
-            chosen = cols[1].selectbox("Shift", options=preset_options, index=default_index, key=f"shift_choice_{dept_prefix}_{t_id}_{CURRENT_DATE}", label_visibility="collapsed")
+            choice_key = f"shift_choice_{dept_prefix}_{t_id}_{CURRENT_DATE}"
+            choice_tracking_key = f"{choice_key}__tracked_saved_value"
+            if choice_tracking_key not in st.session_state or st.session_state[choice_tracking_key] != true_chosen:
+                if choice_key in st.session_state:
+                    del st.session_state[choice_key]
+                st.session_state[choice_tracking_key] = true_chosen
+
+            chosen = cols[1].selectbox(
+                "Shift", options=preset_options, index=preset_options.index(true_chosen), key=choice_key,
+                label_visibility="collapsed", on_change=_save_shift_choice, args=(dept_prefix, tech_name, choice_key, choice_tracking_key)
+            )
 
             if chosen == "Custom":
-                c_start = cols[2].time_input("Start", value=custom_start, key=f"shift_start_{dept_prefix}_{t_id}_{CURRENT_DATE}", label_visibility="collapsed")
-                c_end = cols[3].time_input("End", value=custom_end, key=f"shift_end_{dept_prefix}_{t_id}_{CURRENT_DATE}", label_visibility="collapsed")
-                shift_form_state[tech_name] = (chosen, c_start, c_end)
-            elif chosen == "Not Working Today":
-                shift_form_state[tech_name] = (chosen, None, None)
-            else:
-                p_start, p_end = SHIFT_PRESETS[chosen]
-                shift_form_state[tech_name] = (chosen, p_start, p_end)
+                start_key = f"shift_start_{dept_prefix}_{t_id}_{CURRENT_DATE}"
+                end_key = f"shift_end_{dept_prefix}_{t_id}_{CURRENT_DATE}"
+                start_tracking_key = f"{start_key}__tracked_saved_value"
+                end_tracking_key = f"{end_key}__tracked_saved_value"
+                if start_tracking_key not in st.session_state or st.session_state[start_tracking_key] != custom_start:
+                    if start_key in st.session_state:
+                        del st.session_state[start_key]
+                    st.session_state[start_tracking_key] = custom_start
+                if end_tracking_key not in st.session_state or st.session_state[end_tracking_key] != custom_end:
+                    if end_key in st.session_state:
+                        del st.session_state[end_key]
+                    st.session_state[end_tracking_key] = custom_end
 
-        if st.button(f"💾 Save {dept_label} Shift Schedule", key=f"save_shifts_{dept_prefix}", use_container_width=True):
-            try:
-                with db_conn.session as session:
-                    for tech_name, (chosen, s_time, e_time) in shift_form_state.items():
-                        if chosen == "Not Working Today":
-                            session.execute(text("DELETE FROM tech_shifts WHERE log_date=:c_date AND dept_prefix=:pfx AND tech_name=:t_name"), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name})
-                        else:
-                            session.execute(text("""
-                                INSERT INTO tech_shifts (log_date, dept_prefix, tech_name, shift_start, shift_end)
-                                VALUES (:c_date, :pfx, :t_name, :s_start, :s_end)
-                                ON CONFLICT (log_date, dept_prefix, tech_name) DO UPDATE SET shift_start=EXCLUDED.shift_start, shift_end=EXCLUDED.shift_end
-                            """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name, "s_start": s_time.strftime("%H:%M"), "s_end": e_time.strftime("%H:%M")})
-                    session.commit()
-                st.success("Shift schedule saved.")
-                fragment_rerun()
-            except Exception as e:
-                st.error(f"⚠️ Couldn't save the shift schedule right now: {str(e)}")
+                cols[2].time_input("Start", value=custom_start, key=start_key, label_visibility="collapsed", on_change=_save_custom_time, args=(dept_prefix, tech_name, "shift_start", start_key))
+                cols[3].time_input("End", value=custom_end, key=end_key, label_visibility="collapsed", on_change=_save_custom_time, args=(dept_prefix, tech_name, "shift_end", end_key))
 
         st.markdown("---")
         st.subheader(f"🚫 {dept_label} — Queue Exclusions")
@@ -1305,34 +1353,48 @@ def render_autoscheduler_tab():
         if not dept_queue_names:
             st.caption("No queues configured yet for this department.")
         else:
-            exclusion_form_state = {}
+            excl_autosave_error = st.session_state.pop("_exclusions_autosave_error", None)
+            if excl_autosave_error:
+                st.error(f"⚠️ Couldn't save an exclusion change just now: {excl_autosave_error}")
+
+            def _save_exclusions(dept_prefix, tech_name, widget_key, tracking_key):
+                """
+                on_change callback, scoped to deleting/reinserting only THIS tech's exclusion
+                rows -- the previous version deleted every tech's exclusions in the whole
+                department before reinserting whatever the current screen showed, which meant
+                one person's save could silently wipe another tech's exclusions that simply
+                hadn't loaded yet on that screen.
+                """
+                chosen_exclusions = st.session_state.get(widget_key, [])
+                try:
+                    with db_conn.session as session:
+                        session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx AND tech_name=:t_name"), {"pfx": dept_prefix, "t_name": tech_name})
+                        for q in chosen_exclusions:
+                            session.execute(text("""
+                                INSERT INTO tech_queue_exclusions (dept_prefix, tech_name, queue_name)
+                                VALUES (:pfx, :t_name, :q)
+                                ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
+                            """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
+                        session.commit()
+                    st.session_state[tracking_key] = sorted(chosen_exclusions)
+                except Exception as e:
+                    st.session_state["_exclusions_autosave_error"] = str(e)
+
             for r in roster_rows:
                 tech_name = r.tech_name
                 t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
-                chosen_exclusions = st.multiselect(
-                    f"{tech_name}",
-                    options=dept_queue_names,
-                    default=[q for q in existing_exclusions.get(tech_name, []) if q in dept_queue_names],
-                    key=f"excl_{dept_prefix}_{t_id}"
-                )
-                exclusion_form_state[tech_name] = chosen_exclusions
+                true_exclusions = sorted([q for q in existing_exclusions.get(tech_name, []) if q in dept_queue_names])
+                widget_key = f"excl_{dept_prefix}_{t_id}"
+                tracking_key = f"{widget_key}__tracked_saved_value"
+                if tracking_key not in st.session_state or st.session_state[tracking_key] != true_exclusions:
+                    if widget_key in st.session_state:
+                        del st.session_state[widget_key]
+                    st.session_state[tracking_key] = true_exclusions
 
-            if st.button(f"💾 Save {dept_label} Exclusions", key=f"save_excl_{dept_prefix}", use_container_width=True):
-                try:
-                    with db_conn.session as session:
-                        session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx"), {"pfx": dept_prefix})
-                        for tech_name, excluded_queues in exclusion_form_state.items():
-                            for q in excluded_queues:
-                                session.execute(text("""
-                                    INSERT INTO tech_queue_exclusions (dept_prefix, tech_name, queue_name)
-                                    VALUES (:pfx, :t_name, :q)
-                                    ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
-                                """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
-                        session.commit()
-                    st.success("Exclusions saved.")
-                    fragment_rerun()
-                except Exception as e:
-                    st.error(f"⚠️ Couldn't save exclusions right now: {str(e)}")
+                st.multiselect(
+                    f"{tech_name}", options=dept_queue_names, default=true_exclusions, key=widget_key,
+                    on_change=_save_exclusions, args=(dept_prefix, tech_name, widget_key, tracking_key)
+                )
 
         st.markdown("---")
         st.subheader(f"⚙️ {dept_label} — Generate Proposal")
@@ -1617,7 +1679,7 @@ with tab_analytics:
                 st.line_chart(display_df.groupby(["Date", "Assigned Queue"])["Logged Units"].sum().unstack(fill_value=0))
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
-@st.fragment
+@st.fragment(run_every="5s")
 def render_daily_verification_section():
     with st.container(border=True):
         st.header("📋 Global Facility Daily Queue Verification Log")
