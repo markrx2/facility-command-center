@@ -512,6 +512,10 @@ def dispatch_individual_tech_notification(recipient_email, personnel_name, block
 @st.fragment(run_every="5s")
 def execution_global_background_automation_engine():
     current_now = now_eastern_naive()
+    # See sync_homebase_shifts for why this is recomputed locally rather than trusting the
+    # module-level CURRENT_DATE -- especially important here since this runs unattended on
+    # its own timer all day.
+    CURRENT_DATE = get_current_eastern_date()
     
     dept_mappings = [
         ("data_entry_slots", "de", "Data Entry"),
@@ -713,6 +717,10 @@ DEPT_LABELS = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": 
 
 @st.fragment
 def render_dynamic_volume_ribbon(dept_prefix, dept_label):
+    # See sync_homebase_shifts for why this is recomputed locally rather than trusting the
+    # module-level CURRENT_DATE.
+    CURRENT_DATE = get_current_eastern_date()
+
     with db_conn.session as session:
         dept_queues = session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=:pfx ORDER BY queue_name"), {"pfx": dept_prefix}).fetchall()
         vol_rows = session.execute(text("SELECT queue_name, volume FROM queue_volumes WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
@@ -723,31 +731,32 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
 
     volume_lookup = {r.queue_name: r.volume for r in vol_rows}
 
-    autosave_error = st.session_state.pop(f"_volume_autosave_error_{dept_prefix}", None)
-    if autosave_error:
-        st.error(f"⚠️ Couldn't save a volume number just now: {autosave_error}")
-
     st.markdown(f"<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Today's {dept_label} Queue Volume (start-of-day counts, editable anytime)</h4>", unsafe_allow_html=True)
 
     def _save_volume_on_change(widget_key, tracking_key, dept_prefix, queue_name):
         """
-        on_change callback -- runs synchronously the moment this specific field is edited,
-        before any other rerun (including the global heartbeat) can be processed. This means
-        a stale screen can never accidentally re-save someone else's field, since each field
-        only ever saves itself, on its own genuine edit.
+        on_change callback, fire-and-forget: the actual DB write runs on a background thread
+        so this rerun returns control to the browser almost immediately, instead of waiting
+        on a full round trip in the middle of it -- shrinking the window during which editing
+        a second field right after this one could race against it and get lost (same fix
+        applied to the daily checklist for the same symptom). A save failure here logs to the
+        server console rather than showing an on-screen error, same trade-off made elsewhere.
         """
         new_value = st.session_state.get(widget_key)
-        try:
-            with db_conn.session as session:
-                session.execute(text("""
-                    INSERT INTO queue_volumes (log_date, dept_prefix, queue_name, volume)
-                    VALUES (:c_date, :pfx, :qname, :vol)
-                    ON CONFLICT (log_date, dept_prefix, queue_name) DO UPDATE SET volume = EXCLUDED.volume
-                """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "qname": queue_name, "vol": new_value})
-                session.commit()
-            st.session_state[tracking_key] = new_value
-        except Exception as e:
-            st.session_state[f"_volume_autosave_error_{dept_prefix}"] = str(e)
+        st.session_state[tracking_key] = new_value
+
+        def _run():
+            try:
+                with db_conn.session as session:
+                    session.execute(text("""
+                        INSERT INTO queue_volumes (log_date, dept_prefix, queue_name, volume)
+                        VALUES (:c_date, :pfx, :qname, :vol)
+                        ON CONFLICT (log_date, dept_prefix, queue_name) DO UPDATE SET volume = EXCLUDED.volume
+                    """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "qname": queue_name, "vol": new_value})
+                    session.commit()
+            except Exception as e:
+                print(f"Volume autosave failed for {dept_prefix}/{queue_name}: {str(e)}")
+        threading.Thread(target=_run, daemon=True).start()
 
     num_cols = min(len(dept_queues), 6) or 1
     cols = st.columns(num_cols)
@@ -774,6 +783,10 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
 # --- 6. RENDERING ENGINE FOR WORKER GRID ROWS ---
 @st.fragment
 def render_synchronized_matrix(db_table, prefix, dept_label):
+    # See sync_homebase_shifts for why this is recomputed locally rather than trusting the
+    # module-level CURRENT_DATE.
+    CURRENT_DATE = get_current_eastern_date()
+
     with db_conn.session as session:
         goals_dict = {r.queue_name: r.goal_target for r in session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix = :pfx"), {"pfx": prefix}).fetchall()}
         roster_rows = session.execute(text("SELECT tech_name, tech_email, tech_webhook FROM global_roster WHERE dept_prefix = :pfx"), {"pfx": prefix}).fetchall()
@@ -1159,6 +1172,12 @@ def sync_homebase_shifts(dept_prefix):
     field, which we haven't verified matches our department taxonomy), and upserts matches
     into tech_shifts. Returns (result_dict, error_string) -- exactly one will be None.
     """
+    # Recomputed fresh rather than trusting the module-level CURRENT_DATE, which only gets
+    # refreshed by a full top-level script rerun -- this function is called from inside a
+    # fragment-scoped button click, which doesn't trigger that, so without this it could keep
+    # reading/writing yesterday's date indefinitely within a long-lived session.
+    CURRENT_DATE = get_current_eastern_date()
+
     if not HOMEBASE_API_KEY or not HOMEBASE_LOCATION_UUIDS:
         return None, "Homebase isn't configured yet. Add [homebase] api_key and location_uuids to your secrets file."
 
@@ -1217,6 +1236,10 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
     recalculation) and saves it to schedule_proposals. Returns a summary dict for display;
     nothing here touches the real slot tables.
     """
+    # See sync_homebase_shifts for why this is recomputed locally rather than trusting the
+    # module-level CURRENT_DATE.
+    CURRENT_DATE = get_current_eastern_date()
+
     with db_conn.session as session:
         shift_rows = session.execute(text("SELECT tech_name, shift_start, shift_end FROM tech_shifts WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
         queue_rows = session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=:pfx"), {"pfx": dept_prefix}).fetchall()
@@ -1306,6 +1329,10 @@ def apply_schedule_proposal(dept_prefix, db_table):
     """Writes an approved proposal into the real slot table -- starts real timers. Skips
     slots that are already occupied by an active (non-submitted) assignment rather than
     clobbering a tech's in-progress work, and reports anything it had to skip."""
+    # See sync_homebase_shifts for why this is recomputed locally rather than trusting the
+    # module-level CURRENT_DATE.
+    CURRENT_DATE = get_current_eastern_date()
+
     skipped = []
     with db_conn.session as session:
         queue_rows = session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix=:pfx"), {"pfx": dept_prefix}).fetchall()
@@ -1347,6 +1374,13 @@ def apply_schedule_proposal(dept_prefix, db_table):
 
 @st.fragment
 def render_autoscheduler_tab():
+    # Recomputed fresh here rather than trusting the module-level CURRENT_DATE, which is
+    # only refreshed by a full top-level script rerun -- a fragment-scoped rerun (like this
+    # tab's own Sync button) doesn't re-execute that code, so without this, a session that
+    # goes a while between full reloads could silently keep writing/reading against a stale
+    # date. This local variable shadows the global one for everything below in this function.
+    CURRENT_DATE = get_current_eastern_date()
+
     if not is_manager:
         st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to use the auto-scheduler.")
         return
@@ -1658,6 +1692,10 @@ with tab_sched:
 # --- 8. DYNAMIC QUEUE & ROSTER MANAGEMENT CONFIGURATION TAB ---
 @st.fragment
 def render_queue_management_tab():
+        # See sync_homebase_shifts for why this is recomputed locally rather than trusting
+        # the module-level CURRENT_DATE.
+        CURRENT_DATE = get_current_eastern_date()
+
         st.header("⚙️ System Queue & Target Goal Adjustments")
         st.markdown("---")
     
@@ -1879,6 +1917,10 @@ with tab_analytics:
 st.markdown("<br>", unsafe_allow_html=True)
 @st.fragment
 def render_daily_verification_section():
+    # See sync_homebase_shifts for why this is recomputed locally rather than trusting the
+    # module-level CURRENT_DATE.
+    CURRENT_DATE = get_current_eastern_date()
+
     with st.container(border=True):
         st.header("📋 Global Facility Daily Queue Verification Log")
 
@@ -2000,63 +2042,33 @@ def render_daily_verification_section():
                 "Verified By": "verified_by", "Notes/Explanations": "notes",
             }
 
-            edited_rows = st.session_state.get("checklist_data_editor", {}).get("edited_rows", {})
-            last_processed_key = "_checklist_last_processed_edits"
-            last_processed = st.session_state.get(last_processed_key, {})
-
-            new_edits_to_save = {}
-            for row_idx, changes in edited_rows.items():
-                prev_changes = last_processed.get(row_idx, {})
-                diff_changes = {k: v for k, v in changes.items() if prev_changes.get(k) != v}
-                if diff_changes:
-                    new_edits_to_save[row_idx] = diff_changes
-
-            if new_edits_to_save:
-                def _save_checklist_row_async(item_key, set_parts_dict):
-                    """
-                    Fire-and-forget: runs the actual DB write on a background thread so this
-                    script's rerun finishes and control returns to the browser almost
-                    immediately, instead of waiting on a full DB round trip in the middle of
-                    it. That round trip was the window during which a rapid follow-up edit
-                    (e.g. clicking a second cell right after the first) could arrive back from
-                    the server and clobber the second edit before it was ever saved -- shrinking
-                    this window is what should fix "the second selection disappears."
-                    Trade-off: a save failure here can't show an on-screen error the way a
-                    blocking save could (same trade already made for Chat notifications) --
-                    it's logged to the server console instead.
-                    """
-                    def _run():
-                        try:
-                            with db_conn.session as session:
-                                session.execute(text("""
-                                    INSERT INTO checklist_entries (log_date, item_key)
-                                    VALUES (:c_date, :item_key)
-                                    ON CONFLICT (log_date, item_key) DO NOTHING
-                                """), {"c_date": CURRENT_DATE, "item_key": item_key})
-                                set_parts = [f"{field}=:{field}" for field in set_parts_dict]
-                                params = {"c_date": CURRENT_DATE, "item_key": item_key, **set_parts_dict}
-                                session.execute(text(f"UPDATE checklist_entries SET {', '.join(set_parts)} WHERE log_date=:c_date AND item_key=:item_key"), params)
-                                session.commit()
-                        except Exception as e:
-                            print(f"Checklist autosave failed for {item_key}: {str(e)}")
-                    threading.Thread(target=_run, daemon=True).start()
-
-                for row_idx, changes in new_edits_to_save.items():
-                    item_key = checklist_items[int(row_idx)].item_key
-                    set_parts_dict = {}
-                    for col_name, new_val in changes.items():
-                        if col_name not in COLUMN_TO_ENTRY_FIELD:
-                            continue
-                        field = COLUMN_TO_ENTRY_FIELD[col_name]
-                        val_to_store = str(new_val) if col_name in ("Oldest Date", "Target Date") else new_val
-                        set_parts_dict[field] = val_to_store
-                    if set_parts_dict:
-                        _save_checklist_row_async(item_key, set_parts_dict)
-
-                merged = dict(last_processed)
-                for row_idx, changes in edited_rows.items():
-                    merged.setdefault(row_idx, {}).update(changes)
-                st.session_state[last_processed_key] = merged
+            # No autosave here anymore -- every previous version of this section (comparison-
+            # based, on_change-based, then fire-and-forget on_change) still had some edit land
+            # near a rerun and get lost. Removing any database write from firing during active
+            # editing removes the possibility of that race entirely: nothing touches the
+            # database until this explicit button is clicked, which persists everything
+            # currently shown in the table in one go.
+            if st.button("💾 Save Checklist Changes", key="checklist_save_btn", use_container_width=True):
+                try:
+                    with db_conn.session as session:
+                        for i, item in enumerate(checklist_items):
+                            row = edited_df.iloc[i]
+                            session.execute(text("""
+                                INSERT INTO checklist_entries (log_date, item_key, status, oldest_date, target_date, verified_by, notes)
+                                VALUES (:c_date, :item_key, :status, :odt, :tdt, :by, :notes)
+                                ON CONFLICT (log_date, item_key) DO UPDATE
+                                SET status=EXCLUDED.status, oldest_date=EXCLUDED.oldest_date, target_date=EXCLUDED.target_date,
+                                    verified_by=EXCLUDED.verified_by, notes=EXCLUDED.notes
+                            """), {
+                                "c_date": CURRENT_DATE, "item_key": item.item_key, "status": row["Status"],
+                                "odt": str(row["Oldest Date"]), "tdt": str(row["Target Date"]),
+                                "by": row["Verified By"], "notes": row["Notes/Explanations"],
+                            })
+                        session.commit()
+                    st.success("Checklist changes saved.")
+                    fragment_rerun()
+                except Exception as e:
+                    st.error(f"⚠️ Couldn't save checklist changes right now: {str(e)}")
 
             st.markdown("<br>", unsafe_allow_html=True)
 
