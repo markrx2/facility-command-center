@@ -774,7 +774,7 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
                     del st.session_state[widget_key]
                 st.session_state[tracking_key] = current_value
             st.number_input(
-                q.queue_name, min_value=0, step=1, value=current_value, key=widget_key,
+                q.queue_name, min_value=0, step=1, key=widget_key,
                 on_change=_save_volume_on_change, args=(widget_key, tracking_key, dept_prefix, q.queue_name)
             )
 
@@ -1491,12 +1491,11 @@ def render_autoscheduler_tab():
             choice_key = f"shift_choice_{dept_prefix}_{t_id}_{CURRENT_DATE}"
             choice_tracking_key = f"{choice_key}__tracked_saved_value"
             if choice_tracking_key not in st.session_state or st.session_state[choice_tracking_key] != true_chosen:
-                if choice_key in st.session_state:
-                    del st.session_state[choice_key]
+                st.session_state[choice_key] = true_chosen
                 st.session_state[choice_tracking_key] = true_chosen
 
             chosen = cols[1].selectbox(
-                "Shift", options=preset_options, index=preset_options.index(true_chosen), key=choice_key,
+                "Shift", options=preset_options, key=choice_key,
                 label_visibility="collapsed", on_change=_save_shift_choice, args=(dept_prefix, tech_name, choice_key, choice_tracking_key)
             )
 
@@ -1506,16 +1505,14 @@ def render_autoscheduler_tab():
                 start_tracking_key = f"{start_key}__tracked_saved_value"
                 end_tracking_key = f"{end_key}__tracked_saved_value"
                 if start_tracking_key not in st.session_state or st.session_state[start_tracking_key] != custom_start:
-                    if start_key in st.session_state:
-                        del st.session_state[start_key]
+                    st.session_state[start_key] = custom_start
                     st.session_state[start_tracking_key] = custom_start
                 if end_tracking_key not in st.session_state or st.session_state[end_tracking_key] != custom_end:
-                    if end_key in st.session_state:
-                        del st.session_state[end_key]
+                    st.session_state[end_key] = custom_end
                     st.session_state[end_tracking_key] = custom_end
 
-                cols[2].time_input("Start", value=custom_start, key=start_key, label_visibility="collapsed", on_change=_save_custom_time, args=(dept_prefix, tech_name, "shift_start", start_key))
-                cols[3].time_input("End", value=custom_end, key=end_key, label_visibility="collapsed", on_change=_save_custom_time, args=(dept_prefix, tech_name, "shift_end", end_key))
+                cols[2].time_input("Start", key=start_key, label_visibility="collapsed", on_change=_save_custom_time, args=(dept_prefix, tech_name, "shift_start", start_key))
+                cols[3].time_input("End", key=end_key, label_visibility="collapsed", on_change=_save_custom_time, args=(dept_prefix, tech_name, "shift_end", end_key))
 
         st.markdown("---")
         st.subheader(f"🚫 {dept_label} — Queue Exclusions")
@@ -1566,12 +1563,11 @@ def render_autoscheduler_tab():
                 widget_key = f"excl_{dept_prefix}_{t_id}"
                 tracking_key = f"{widget_key}__tracked_saved_value"
                 if tracking_key not in st.session_state or st.session_state[tracking_key] != true_exclusions:
-                    if widget_key in st.session_state:
-                        del st.session_state[widget_key]
+                    st.session_state[widget_key] = true_exclusions
                     st.session_state[tracking_key] = true_exclusions
 
                 st.multiselect(
-                    f"{tech_name}", options=dept_queue_names, default=true_exclusions, key=widget_key,
+                    f"{tech_name}", options=dept_queue_names, key=widget_key,
                     on_change=_save_exclusions, args=(dept_prefix, tech_name, widget_key, tracking_key)
                 )
 
@@ -1619,8 +1615,26 @@ def render_autoscheduler_tab():
                 for r in rows:
                     rc1, rc2, rc3 = st.columns([2.5, 1, 0.8])
                     q_options = dept_queue_names if r.queue_name in dept_queue_names else dept_queue_names + [r.queue_name]
-                    new_q = rc1.selectbox("Queue", options=q_options, index=q_options.index(r.queue_name), key=f"padj_q_{dept_prefix}_{t_id}_{r.proposal_slot}", label_visibility="collapsed")
-                    new_dur = rc2.number_input("Min", min_value=5, step=5, value=max(5, int(r.duration_minutes)), key=f"padj_d_{dept_prefix}_{t_id}_{r.proposal_slot}", label_visibility="collapsed")
+
+                    q_key = f"padj_q_{dept_prefix}_{t_id}_{r.proposal_slot}"
+                    d_key = f"padj_d_{dept_prefix}_{t_id}_{r.proposal_slot}"
+                    q_tracking_key = f"{q_key}__tracked_db_value"
+                    d_tracking_key = f"{d_key}__tracked_db_value"
+                    stored_duration = max(5, int(r.duration_minutes))
+                    # Same fix as the daily checklist: only reseed when the underlying
+                    # proposal row has genuinely changed since we last checked, never
+                    # unconditionally -- otherwise adjusting one row would wipe out an
+                    # already-adjusted-but-not-yet-saved change on another row the next time
+                    # anything on the page triggers a rerun.
+                    if q_tracking_key not in st.session_state or st.session_state[q_tracking_key] != r.queue_name:
+                        st.session_state[q_key] = r.queue_name
+                        st.session_state[q_tracking_key] = r.queue_name
+                    if d_tracking_key not in st.session_state or st.session_state[d_tracking_key] != stored_duration:
+                        st.session_state[d_key] = stored_duration
+                        st.session_state[d_tracking_key] = stored_duration
+
+                    new_q = rc1.selectbox("Queue", options=q_options, key=q_key, label_visibility="collapsed")
+                    new_dur = rc2.number_input("Min", min_value=5, step=5, key=d_key, label_visibility="collapsed")
                     remove = rc3.checkbox("Remove", key=f"padj_rm_{dept_prefix}_{t_id}_{r.proposal_slot}")
                     if remove:
                         edited_deletes.append((tech_name, r.proposal_slot))
@@ -1992,15 +2006,40 @@ def render_daily_verification_section():
                 stored_by = entry.verified_by if entry else ""
                 stored_notes = entry.notes if entry else ""
 
+                status_key = f"cl_status_{item.item_key}_{CURRENT_DATE}"
+                odt_key = f"cl_odt_{item.item_key}_{CURRENT_DATE}"
+                tdt_key = f"cl_tdt_{item.item_key}_{CURRENT_DATE}"
+                by_key = f"cl_by_{item.item_key}_{CURRENT_DATE}"
+                notes_key = f"cl_notes_{item.item_key}_{CURRENT_DATE}"
+
+                # Track, separately from the widget's own state, "the last database value we
+                # know we've already reconciled" for each field. Only overwrite the widget's
+                # session_state when the database has genuinely changed since we last checked
+                # (either this is the very first render, or someone else just saved a change)
+                # -- never unconditionally, and never by passing index=/value= on the widget
+                # call itself (that overrides session_state on every single render regardless
+                # of prior state, which was the actual root cause of every earlier version of
+                # this bug). If nothing has changed externally, the field is left completely
+                # untouched, so an unsaved local edit survives any number of unrelated reruns.
+                for key, stored_val in [
+                    (status_key, stored_status if stored_status in opt else "Pending"),
+                    (odt_key, stored_odt), (tdt_key, stored_tdt),
+                    (by_key, stored_by), (notes_key, stored_notes),
+                ]:
+                    tracking_key = f"{key}__tracked_db_value"
+                    if tracking_key not in st.session_state or st.session_state[tracking_key] != stored_val:
+                        st.session_state[key] = stored_val
+                        st.session_state[tracking_key] = stored_val
+
                 cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
                 cols[0].markdown(item.label)
-                curr_status = cols[1].selectbox("Status", options=opt, index=opt.index(stored_status) if stored_status in opt else 0, key=f"cl_status_{item.item_key}_{CURRENT_DATE}", label_visibility="collapsed")
-                curr_odt = cols[2].date_input("Oldest Date", value=stored_odt, key=f"cl_odt_{item.item_key}_{CURRENT_DATE}", label_visibility="collapsed")
-                curr_tdt = cols[3].date_input("Target Date", value=stored_tdt, key=f"cl_tdt_{item.item_key}_{CURRENT_DATE}", label_visibility="collapsed")
+                curr_status = cols[1].selectbox("Status", options=opt, key=status_key, label_visibility="collapsed")
+                curr_odt = cols[2].date_input("Oldest Date", key=odt_key, label_visibility="collapsed")
+                curr_tdt = cols[3].date_input("Target Date", key=tdt_key, label_visibility="collapsed")
                 delta, is_red, badge = compute_aging(item.aging_basis, item.red_threshold_days, curr_odt, curr_tdt)
                 cols[4].markdown(badge)
-                curr_by = cols[5].text_input("Verified By", value=stored_by, key=f"cl_by_{item.item_key}_{CURRENT_DATE}", label_visibility="collapsed")
-                curr_notes = cols[6].text_input("Notes/Explanations", value=stored_notes, key=f"cl_notes_{item.item_key}_{CURRENT_DATE}", label_visibility="collapsed")
+                curr_by = cols[5].text_input("Verified By", key=by_key, label_visibility="collapsed")
+                curr_notes = cols[6].text_input("Notes/Explanations", key=notes_key, label_visibility="collapsed")
 
                 form_states[item.item_key] = {
                     "label": item.label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
