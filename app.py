@@ -731,32 +731,30 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
 
     volume_lookup = {r.queue_name: r.volume for r in vol_rows}
 
+    autosave_error = st.session_state.pop("_volume_autosave_error", None)
+    if autosave_error:
+        st.error(f"⚠️ Couldn't save a volume number just now: {autosave_error}")
+
     st.markdown(f"<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Today's {dept_label} Queue Volume (start-of-day counts, editable anytime)</h4>", unsafe_allow_html=True)
 
-    def _save_volume_on_change(widget_key, tracking_key, dept_prefix, queue_name):
+    def _save_volume_on_change(widget_key, dept_prefix, queue_name):
         """
-        on_change callback, fire-and-forget: the actual DB write runs on a background thread
-        so this rerun returns control to the browser almost immediately, instead of waiting
-        on a full round trip in the middle of it -- shrinking the window during which editing
-        a second field right after this one could race against it and get lost (same fix
-        applied to the daily checklist for the same symptom). A save failure here logs to the
-        server console rather than showing an on-screen error, same trade-off made elsewhere.
+        on_change callback -- saves synchronously so a failure is actually visible on screen
+        rather than only logged to a server console nobody's watching. A background-thread
+        version of this was tried for speed, but made it impossible to tell "the value isn't
+        showing because it never saved" apart from any other kind of display issue.
         """
         new_value = st.session_state.get(widget_key)
-        st.session_state[tracking_key] = new_value
-
-        def _run():
-            try:
-                with db_conn.session as session:
-                    session.execute(text("""
-                        INSERT INTO queue_volumes (log_date, dept_prefix, queue_name, volume)
-                        VALUES (:c_date, :pfx, :qname, :vol)
-                        ON CONFLICT (log_date, dept_prefix, queue_name) DO UPDATE SET volume = EXCLUDED.volume
-                    """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "qname": queue_name, "vol": new_value})
-                    session.commit()
-            except Exception as e:
-                print(f"Volume autosave failed for {dept_prefix}/{queue_name}: {str(e)}")
-        threading.Thread(target=_run, daemon=True).start()
+        try:
+            with db_conn.session as session:
+                session.execute(text("""
+                    INSERT INTO queue_volumes (log_date, dept_prefix, queue_name, volume)
+                    VALUES (:c_date, :pfx, :qname, :vol)
+                    ON CONFLICT (log_date, dept_prefix, queue_name) DO UPDATE SET volume = EXCLUDED.volume
+                """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "qname": queue_name, "vol": new_value})
+                session.commit()
+        except Exception as e:
+            st.session_state["_volume_autosave_error"] = str(e)
 
     num_cols = min(len(dept_queues), 6) or 1
     cols = st.columns(num_cols)
@@ -764,18 +762,14 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
         with cols[i % num_cols]:
             current_value = int(volume_lookup.get(q.queue_name, 0))
             widget_key = f"vol_{dept_prefix}_{q.queue_name}_{CURRENT_DATE}"
-            tracking_key = f"{widget_key}__tracked_saved_value"
-            # Whenever the DB disagrees with what this session last confirmed was saved
-            # (first-ever render, or another user's save landed since we last checked),
-            # delete and recreate the widget with the DB value as its explicit default,
-            # rather than writing directly into its session_state.
-            if tracking_key not in st.session_state or st.session_state[tracking_key] != current_value:
-                if widget_key in st.session_state:
-                    del st.session_state[widget_key]
-                st.session_state[tracking_key] = current_value
+            # Seed only the very first time this key has ever existed in this session --
+            # never re-checked afterward. A coworker's saved change won't appear until this
+            # browser tab is reloaded (a fresh session, empty state, seeds fresh from the DB).
+            if widget_key not in st.session_state:
+                st.session_state[widget_key] = current_value
             st.number_input(
                 q.queue_name, min_value=0, step=1, key=widget_key,
-                on_change=_save_volume_on_change, args=(widget_key, tracking_key, dept_prefix, q.queue_name)
+                on_change=_save_volume_on_change, args=(widget_key, dept_prefix, q.queue_name)
             )
 
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
@@ -1430,12 +1424,10 @@ def render_autoscheduler_tab():
         if shift_autosave_error:
             st.error(f"⚠️ Couldn't save a shift change just now: {shift_autosave_error}")
 
-        def _save_shift_choice(dept_prefix, tech_name, widget_key, tracking_key):
+        def _save_shift_choice(dept_prefix, tech_name, widget_key):
             """
             on_change callback for the shift-choice dropdown -- saves immediately on genuine
-            user interaction, never based on a full-form snapshot. This is what closes the bug
-            where clicking one big "Save" button could silently overwrite OTHER techs' shifts
-            with whatever was stale/default on your particular screen at that moment.
+            user interaction, never based on a full-form snapshot.
             """
             chosen = st.session_state.get(widget_key)
             try:
@@ -1456,7 +1448,6 @@ def render_autoscheduler_tab():
                             ON CONFLICT (log_date, dept_prefix, tech_name) DO UPDATE SET shift_start=EXCLUDED.shift_start, shift_end=EXCLUDED.shift_end
                         """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name, "s_start": p_start.strftime("%H:%M"), "s_end": p_end.strftime("%H:%M")})
                     session.commit()
-                st.session_state[tracking_key] = chosen
             except Exception as e:
                 st.session_state["_shift_autosave_error"] = str(e)
 
@@ -1489,27 +1480,21 @@ def render_autoscheduler_tab():
                     custom_end = datetime.strptime(e_str, "%H:%M").time()
 
             choice_key = f"shift_choice_{dept_prefix}_{t_id}_{CURRENT_DATE}"
-            choice_tracking_key = f"{choice_key}__tracked_saved_value"
-            if choice_tracking_key not in st.session_state or st.session_state[choice_tracking_key] != true_chosen:
+            if choice_key not in st.session_state:
                 st.session_state[choice_key] = true_chosen
-                st.session_state[choice_tracking_key] = true_chosen
 
             chosen = cols[1].selectbox(
                 "Shift", options=preset_options, key=choice_key,
-                label_visibility="collapsed", on_change=_save_shift_choice, args=(dept_prefix, tech_name, choice_key, choice_tracking_key)
+                label_visibility="collapsed", on_change=_save_shift_choice, args=(dept_prefix, tech_name, choice_key)
             )
 
             if chosen == "Custom":
                 start_key = f"shift_start_{dept_prefix}_{t_id}_{CURRENT_DATE}"
                 end_key = f"shift_end_{dept_prefix}_{t_id}_{CURRENT_DATE}"
-                start_tracking_key = f"{start_key}__tracked_saved_value"
-                end_tracking_key = f"{end_key}__tracked_saved_value"
-                if start_tracking_key not in st.session_state or st.session_state[start_tracking_key] != custom_start:
+                if start_key not in st.session_state:
                     st.session_state[start_key] = custom_start
-                    st.session_state[start_tracking_key] = custom_start
-                if end_tracking_key not in st.session_state or st.session_state[end_tracking_key] != custom_end:
+                if end_key not in st.session_state:
                     st.session_state[end_key] = custom_end
-                    st.session_state[end_tracking_key] = custom_end
 
                 cols[2].time_input("Start", key=start_key, label_visibility="collapsed", on_change=_save_custom_time, args=(dept_prefix, tech_name, "shift_start", start_key))
                 cols[3].time_input("End", key=end_key, label_visibility="collapsed", on_change=_save_custom_time, args=(dept_prefix, tech_name, "shift_end", end_key))
@@ -1533,13 +1518,10 @@ def render_autoscheduler_tab():
             if excl_autosave_error:
                 st.error(f"⚠️ Couldn't save an exclusion change just now: {excl_autosave_error}")
 
-            def _save_exclusions(dept_prefix, tech_name, widget_key, tracking_key):
+            def _save_exclusions(dept_prefix, tech_name, widget_key):
                 """
                 on_change callback, scoped to deleting/reinserting only THIS tech's exclusion
-                rows -- the previous version deleted every tech's exclusions in the whole
-                department before reinserting whatever the current screen showed, which meant
-                one person's save could silently wipe another tech's exclusions that simply
-                hadn't loaded yet on that screen.
+                rows.
                 """
                 chosen_exclusions = st.session_state.get(widget_key, [])
                 try:
@@ -1552,7 +1534,6 @@ def render_autoscheduler_tab():
                                 ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
                             """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
                         session.commit()
-                    st.session_state[tracking_key] = sorted(chosen_exclusions)
                 except Exception as e:
                     st.session_state["_exclusions_autosave_error"] = str(e)
 
@@ -1561,14 +1542,12 @@ def render_autoscheduler_tab():
                 t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
                 true_exclusions = sorted([q for q in existing_exclusions.get(tech_name, []) if q in dept_queue_names])
                 widget_key = f"excl_{dept_prefix}_{t_id}"
-                tracking_key = f"{widget_key}__tracked_saved_value"
-                if tracking_key not in st.session_state or st.session_state[tracking_key] != true_exclusions:
+                if widget_key not in st.session_state:
                     st.session_state[widget_key] = true_exclusions
-                    st.session_state[tracking_key] = true_exclusions
 
                 st.multiselect(
                     f"{tech_name}", options=dept_queue_names, key=widget_key,
-                    on_change=_save_exclusions, args=(dept_prefix, tech_name, widget_key, tracking_key)
+                    on_change=_save_exclusions, args=(dept_prefix, tech_name, widget_key)
                 )
 
         st.markdown("---")
@@ -1618,20 +1597,11 @@ def render_autoscheduler_tab():
 
                     q_key = f"padj_q_{dept_prefix}_{t_id}_{r.proposal_slot}"
                     d_key = f"padj_d_{dept_prefix}_{t_id}_{r.proposal_slot}"
-                    q_tracking_key = f"{q_key}__tracked_db_value"
-                    d_tracking_key = f"{d_key}__tracked_db_value"
                     stored_duration = max(5, int(r.duration_minutes))
-                    # Same fix as the daily checklist: only reseed when the underlying
-                    # proposal row has genuinely changed since we last checked, never
-                    # unconditionally -- otherwise adjusting one row would wipe out an
-                    # already-adjusted-but-not-yet-saved change on another row the next time
-                    # anything on the page triggers a rerun.
-                    if q_tracking_key not in st.session_state or st.session_state[q_tracking_key] != r.queue_name:
+                    if q_key not in st.session_state:
                         st.session_state[q_key] = r.queue_name
-                        st.session_state[q_tracking_key] = r.queue_name
-                    if d_tracking_key not in st.session_state or st.session_state[d_tracking_key] != stored_duration:
+                    if d_key not in st.session_state:
                         st.session_state[d_key] = stored_duration
-                        st.session_state[d_tracking_key] = stored_duration
 
                     new_q = rc1.selectbox("Queue", options=q_options, key=q_key, label_visibility="collapsed")
                     new_dur = rc2.number_input("Min", min_value=5, step=5, key=d_key, label_visibility="collapsed")
@@ -2012,24 +1982,18 @@ def render_daily_verification_section():
                 by_key = f"cl_by_{item.item_key}_{CURRENT_DATE}"
                 notes_key = f"cl_notes_{item.item_key}_{CURRENT_DATE}"
 
-                # Track, separately from the widget's own state, "the last database value we
-                # know we've already reconciled" for each field. Only overwrite the widget's
-                # session_state when the database has genuinely changed since we last checked
-                # (either this is the very first render, or someone else just saved a change)
-                # -- never unconditionally, and never by passing index=/value= on the widget
-                # call itself (that overrides session_state on every single render regardless
-                # of prior state, which was the actual root cause of every earlier version of
-                # this bug). If nothing has changed externally, the field is left completely
-                # untouched, so an unsaved local edit survives any number of unrelated reruns.
+                # Seed only the very first time this key has ever existed in this session --
+                # never re-checked afterward. A coworker's saved change won't appear until
+                # this browser tab is reloaded (a fresh session, empty state, seeds fresh
+                # from the DB). This is deliberately simple: it's what keeps an in-progress,
+                # not-yet-saved selection from ever being touched by anything else on the page.
                 for key, stored_val in [
                     (status_key, stored_status if stored_status in opt else "Pending"),
                     (odt_key, stored_odt), (tdt_key, stored_tdt),
                     (by_key, stored_by), (notes_key, stored_notes),
                 ]:
-                    tracking_key = f"{key}__tracked_db_value"
-                    if tracking_key not in st.session_state or st.session_state[tracking_key] != stored_val:
+                    if key not in st.session_state:
                         st.session_state[key] = stored_val
-                        st.session_state[tracking_key] = stored_val
 
                 cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
                 cols[0].markdown(item.label)
