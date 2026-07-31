@@ -1948,11 +1948,11 @@ def render_daily_verification_section():
 
         with c_col:
             with db_conn.session as session:
-                checklist_items_fresh = session.execute(text("SELECT item_key, label, aging_basis, red_threshold_days FROM checklist_items ORDER BY sort_order, label")).fetchall()
+                checklist_items = session.execute(text("SELECT item_key, label, aging_basis, red_threshold_days FROM checklist_items ORDER BY sort_order, label")).fetchall()
                 entry_rows = session.execute(text("SELECT item_key, status, oldest_date, target_date, verified_by, notes FROM checklist_entries WHERE log_date=:c_date"), {"c_date": CURRENT_DATE}).fetchall()
             entries_by_key = {r.item_key: r for r in entry_rows}
 
-            if not checklist_items_fresh:
+            if not checklist_items:
                 st.info("No checklist items configured yet. Add some from ⚙️ Manage Checklist Items above.")
                 return
 
@@ -1970,89 +1970,47 @@ def render_daily_verification_section():
                 except Exception:
                     return 0, False, "-"
 
-            autosave_error = st.session_state.pop("_checklist_autosave_error", None)
-            if autosave_error:
-                st.error(f"⚠️ Autosave failed for a checklist field -- your last entry may not be saved: {autosave_error}")
+            opt = ["Pending", "Yes", "No"]
 
-            # Cheap signature of everything that would affect the displayed table (both the
-            # item config and the day's entries). Only rebuild the DataFrame we hand to
-            # data_editor when this actually differs from what we last built it from --
-            # otherwise the exact same DataFrame object is reused, so data_editor has no
-            # reason to reset anything. Previously the table was rebuilt fresh on literally
-            # every rerun, including ones where nothing had changed at all (e.g. the global
-            # heartbeat firing with zero other activity), which was tearing down in-progress
-            # selections for no reason.
-            sig_parts = []
-            for item in checklist_items_fresh:
+            # Plain native Streamlit widgets (selectbox/date_input/text_input) instead of
+            # st.data_editor. This is a deliberate step back from the grid-table approach --
+            # data_editor kept resetting in-progress edits on reruns even after removing
+            # autosave AND caching the underlying data, which points to the widget itself
+            # being unreliable here, not our surrounding logic. Plain widgets with stable
+            # keys reliably hold their value across reruns as long as nothing deletes their
+            # session_state, and nothing here does that anymore.
+            form_states = {}
+            header_cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
+            for h, label in zip(header_cols, ["Queue", "Status", "Oldest Date", "Target Date", "Aging", "Verified By", "Notes/Explanations"]):
+                h.markdown(f"**{label}**")
+
+            for item in checklist_items:
                 entry = entries_by_key.get(item.item_key)
-                sig_parts.append("|".join([
-                    item.item_key, item.label, item.aging_basis, str(item.red_threshold_days),
-                    entry.status if entry else "Pending",
-                    entry.oldest_date if entry else "", entry.target_date if entry else "",
-                    entry.verified_by if entry else "", entry.notes if entry else "",
-                ]))
-            current_signature = "||".join(sig_parts)
+                stored_status = entry.status if entry else "Pending"
+                stored_odt = parse_stored_date(entry.oldest_date if entry else "")
+                stored_tdt = parse_stored_date(entry.target_date if entry else "")
+                stored_by = entry.verified_by if entry else ""
+                stored_notes = entry.notes if entry else ""
 
-            cache_key = "checklist_table_cache"
-            sig_key = "checklist_table_signature"
+                cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
+                cols[0].markdown(item.label)
+                curr_status = cols[1].selectbox("Status", options=opt, index=opt.index(stored_status) if stored_status in opt else 0, key=f"cl_status_{item.item_key}_{CURRENT_DATE}", label_visibility="collapsed")
+                curr_odt = cols[2].date_input("Oldest Date", value=stored_odt, key=f"cl_odt_{item.item_key}_{CURRENT_DATE}", label_visibility="collapsed")
+                curr_tdt = cols[3].date_input("Target Date", value=stored_tdt, key=f"cl_tdt_{item.item_key}_{CURRENT_DATE}", label_visibility="collapsed")
+                delta, is_red, badge = compute_aging(item.aging_basis, item.red_threshold_days, curr_odt, curr_tdt)
+                cols[4].markdown(badge)
+                curr_by = cols[5].text_input("Verified By", value=stored_by, key=f"cl_by_{item.item_key}_{CURRENT_DATE}", label_visibility="collapsed")
+                curr_notes = cols[6].text_input("Notes/Explanations", value=stored_notes, key=f"cl_notes_{item.item_key}_{CURRENT_DATE}", label_visibility="collapsed")
 
-            if cache_key not in st.session_state or st.session_state.get(sig_key) != current_signature:
-                table_rows = []
-                for item in checklist_items_fresh:
-                    entry = entries_by_key.get(item.item_key)
-                    status = entry.status if entry else "Pending"
-                    odt = parse_stored_date(entry.oldest_date if entry else "")
-                    tdt = parse_stored_date(entry.target_date if entry else "")
-                    by = entry.verified_by if entry else ""
-                    notes = entry.notes if entry else ""
-                    _, _, badge = compute_aging(item.aging_basis, item.red_threshold_days, odt, tdt)
-                    table_rows.append({
-                        "Queue": item.label, "Status": status, "Oldest Date": odt, "Target Date": tdt,
-                        "Aging": badge, "Verified By": by, "Notes/Explanations": notes,
-                    })
-                st.session_state[cache_key] = pd.DataFrame(table_rows)
-                st.session_state["checklist_items_cache"] = checklist_items_fresh
-                st.session_state[sig_key] = current_signature
+                form_states[item.item_key] = {
+                    "label": item.label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
+                    "by": curr_by, "notes": curr_notes, "is_red": is_red, "delta": delta
+                }
 
-            checklist_df = st.session_state[cache_key]
-            checklist_items = st.session_state["checklist_items_cache"]
-
-            # st.data_editor tracks exactly which cells were touched via its own built-in
-            # edited_rows mechanism, and checklist_items/checklist_entries (normalized, like
-            # dynamic_queues/queue_volumes) is what makes rows genuinely addable/removable --
-            # the old fixed-column daily_checklist design couldn't support that at all.
-            edited_df = st.data_editor(
-                checklist_df,
-                key="checklist_data_editor",
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Queue": st.column_config.TextColumn("Queue", disabled=True),
-                    "Status": st.column_config.SelectboxColumn("Status", options=["Pending", "Yes", "No"], required=True),
-                    "Oldest Date": st.column_config.DateColumn("Oldest Date"),
-                    "Target Date": st.column_config.DateColumn("Target Date"),
-                    "Aging": st.column_config.TextColumn("Aging", disabled=True),
-                    "Verified By": st.column_config.TextColumn("Verified By"),
-                    "Notes/Explanations": st.column_config.TextColumn("Notes/Explanations"),
-                },
-            )
-
-            COLUMN_TO_ENTRY_FIELD = {
-                "Status": "status", "Oldest Date": "oldest_date", "Target Date": "target_date",
-                "Verified By": "verified_by", "Notes/Explanations": "notes",
-            }
-
-            # No autosave here anymore -- every previous version of this section (comparison-
-            # based, on_change-based, then fire-and-forget on_change) still had some edit land
-            # near a rerun and get lost. Removing any database write from firing during active
-            # editing removes the possibility of that race entirely: nothing touches the
-            # database until this explicit button is clicked, which persists everything
-            # currently shown in the table in one go.
             if st.button("💾 Save Checklist Changes", key="checklist_save_btn", use_container_width=True):
                 try:
                     with db_conn.session as session:
-                        for i, item in enumerate(checklist_items):
-                            row = edited_df.iloc[i]
+                        for item_key, data in form_states.items():
                             session.execute(text("""
                                 INSERT INTO checklist_entries (log_date, item_key, status, oldest_date, target_date, verified_by, notes)
                                 VALUES (:c_date, :item_key, :status, :odt, :tdt, :by, :notes)
@@ -2060,9 +2018,8 @@ def render_daily_verification_section():
                                 SET status=EXCLUDED.status, oldest_date=EXCLUDED.oldest_date, target_date=EXCLUDED.target_date,
                                     verified_by=EXCLUDED.verified_by, notes=EXCLUDED.notes
                             """), {
-                                "c_date": CURRENT_DATE, "item_key": item.item_key, "status": row["Status"],
-                                "odt": str(row["Oldest Date"]), "tdt": str(row["Target Date"]),
-                                "by": row["Verified By"], "notes": row["Notes/Explanations"],
+                                "c_date": CURRENT_DATE, "item_key": item_key, "status": data["status"],
+                                "odt": data["odt"], "tdt": data["tdt"], "by": data["by"], "notes": data["notes"],
                             })
                         session.commit()
                     st.success("Checklist changes saved.")
@@ -2071,17 +2028,6 @@ def render_daily_verification_section():
                     st.error(f"⚠️ Couldn't save checklist changes right now: {str(e)}")
 
             st.markdown("<br>", unsafe_allow_html=True)
-
-            form_states = {}
-            for i, item in enumerate(checklist_items):
-                row = edited_df.iloc[i]
-                odt_val = row["Oldest Date"]
-                tdt_val = row["Target Date"]
-                delta, is_red, _ = compute_aging(item.aging_basis, item.red_threshold_days, odt_val, tdt_val)
-                form_states[item.item_key] = {
-                    "label": item.label, "status": row["Status"], "odt": str(odt_val), "tdt": str(tdt_val),
-                    "by": row["Verified By"], "notes": row["Notes/Explanations"], "is_red": is_red, "delta": delta
-                }
 
             already_submitted_today = bool(chk.last_submitted_at) if chk else False
             resubmit_armed_key = "checklist_resubmit_armed"
