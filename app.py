@@ -1988,11 +1988,12 @@ def render_daily_verification_section():
             with st.container(border=True):
                 t_obj = datetime.strptime(chk.reminder_time, "%H:%M").time()
                 new_target_time = st.time_input("Set Verification Deadline (EST):", value=t_obj, key="checklist_deadline_widget")
-                if new_target_time.strftime("%H:%M") != chk.reminder_time:
+                if st.button("Update Deadline", key="checklist_deadline_update_btn", use_container_width=True):
                     try:
                         with db_conn.session as session:
                             session.execute(text("UPDATE daily_checklist SET reminder_time=:rt, reminder_sent=0, supervisor_escaped=0 WHERE log_date=:c_date"), {"rt": new_target_time.strftime("%H:%M"), "c_date": CURRENT_DATE})
                             session.commit()
+                        st.success(f"Deadline updated to {new_target_time.strftime('%H:%M')} EST.")
                         fragment_rerun()
                     except Exception as e:
                         st.error(f"⚠️ Couldn't update the deadline right now: {str(e)}")
