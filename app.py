@@ -1542,29 +1542,11 @@ def render_autoscheduler_tab():
         if not dept_queue_names:
             st.caption("No queues configured yet for this department.")
         else:
-            excl_autosave_error = st.session_state.pop("_exclusions_autosave_error", None)
-            if excl_autosave_error:
-                st.error(f"⚠️ Couldn't save an exclusion change just now: {excl_autosave_error}")
+            excl_save_error = st.session_state.pop("_exclusions_save_error", None)
+            if excl_save_error:
+                st.error(f"⚠️ Couldn't save exclusion changes right now: {excl_save_error}")
 
-            def _save_exclusions(dept_prefix, tech_name, widget_key):
-                """
-                on_change callback, scoped to deleting/reinserting only THIS tech's exclusion
-                rows.
-                """
-                chosen_exclusions = st.session_state.get(widget_key, [])
-                try:
-                    with db_conn.session as session:
-                        session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx AND tech_name=:t_name"), {"pfx": dept_prefix, "t_name": tech_name})
-                        for q in chosen_exclusions:
-                            session.execute(text("""
-                                INSERT INTO tech_queue_exclusions (dept_prefix, tech_name, queue_name)
-                                VALUES (:pfx, :t_name, :q)
-                                ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
-                            """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
-                        session.commit()
-                except Exception as e:
-                    st.session_state["_exclusions_autosave_error"] = str(e)
-
+            excl_widget_keys = {}
             for r in roster_rows:
                 tech_name = r.tech_name
                 t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
@@ -1572,11 +1554,28 @@ def render_autoscheduler_tab():
                 widget_key = f"excl_{dept_prefix}_{t_id}"
                 if widget_key not in st.session_state:
                     st.session_state[widget_key] = true_exclusions
+                excl_widget_keys[tech_name] = widget_key
 
-                st.multiselect(
-                    f"{tech_name}", options=dept_queue_names, key=widget_key,
-                    on_change=_save_exclusions, args=(dept_prefix, tech_name, widget_key)
-                )
+                st.multiselect(f"{tech_name}", options=dept_queue_names, key=widget_key)
+
+            if st.button(f"💾 Save {dept_label} Exclusions", key=f"excl_save_btn_{dept_prefix}", use_container_width=True):
+                try:
+                    with db_conn.session as session:
+                        for tech_name, widget_key in excl_widget_keys.items():
+                            chosen_exclusions = st.session_state.get(widget_key, [])
+                            session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx AND tech_name=:t_name"), {"pfx": dept_prefix, "t_name": tech_name})
+                            for q in chosen_exclusions:
+                                session.execute(text("""
+                                    INSERT INTO tech_queue_exclusions (dept_prefix, tech_name, queue_name)
+                                    VALUES (:pfx, :t_name, :q)
+                                    ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
+                                """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
+                        session.commit()
+                    st.success("Exclusions saved.")
+                    fragment_rerun()
+                except Exception as e:
+                    st.session_state["_exclusions_save_error"] = str(e)
+                    fragment_rerun()
 
         st.markdown("---")
         st.subheader(f"⚙️ {dept_label} — Generate Proposal")
