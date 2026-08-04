@@ -68,10 +68,17 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-# Global browser heartbeat. Keeps the container awake and forces a full-script check cycle every 15 seconds.
+# Global browser heartbeat. Keeps the container awake and forces a full-script check cycle.
+# TEMPORARILY slowed to 5 minutes (was 15s) as a diagnostic test: checklist data has been
+# reported disappearing purely from waiting through an automatic refresh, with nothing else
+# touched -- which shouldn't be possible given the "seed once" session-state logic elsewhere
+# in this app. If data now survives sitting untouched for several minutes, that confirms this
+# specific mechanism (not just "any rerun") is the actual cause, and a real fix (rather than
+# just a slower interval) needs to be found for it. Revert to a shorter interval once this
+# is resolved, since this value is too slow for normal day-to-day cross-tab freshness.
 # NOTE: this is what keeps things like the Analytics tab and backlog ribbon fresh, since those live
 # outside any @st.fragment and only update on a full rerun.
-st_autorefresh(interval=15000, key="global_system_heartbeat")
+st_autorefresh(interval=300000, key="global_system_heartbeat")  # TEMPORARY: slowed to 5 min for diagnostic testing -- see note above this line
 
 # Timezone Lock Configuration 
 try:
@@ -281,19 +288,20 @@ def initialize_system_database():
             # "any positive delta is red" items get threshold=1; "> 4 days" becomes
             # threshold=5; the 14-day and default-7-day rules carry over directly).
             default_items = [
-                ("return_fourteen_queue", "14 Day Return Queue Checked", "target_minus_oldest", 14, 1),
-                ("ai_tech_check", "AI /Tech Check Queue Checked", "target_minus_oldest", 5, 2),
-                ("billing", "Billing Queue Checked", "target_minus_oldest", 7, 3),
-                ("central_fill_queue", "Central Fill Queue Checked", "today_minus_oldest", 1, 4),
-                ("data_re_entry", "Data Re-Entry Checked", "target_minus_oldest", 1, 5),
-                ("dispense", "Dispense Queue Checked", "target_minus_oldest", 7, 6),
-                ("erx_queue", "ERx Queue Checked", "today_minus_oldest", 1, 7),
-                ("future_bill", "Future Bill Queue Checked", "target_minus_oldest", 7, 8),
-                ("on_hold_queue", "On Hold Queue Checked", "today_minus_oldest", 1, 9),
-                ("ordering", "Ordering Queue Checked", "target_minus_oldest", 7, 10),
+                ("return_fourteen_queue", "14 Day Return Queue Checked", "target_minus_oldest", 14, 13),
+                ("ai_tech_check", "AI /Tech Check Queue Checked", "target_minus_oldest", 5, 6),
+                ("billing", "Billing Queue Checked", "target_minus_oldest", 7, 7),
+                ("central_fill_queue", "Central Fill Queue Checked", "today_minus_oldest", 1, 5),
+                ("data_re_entry", "Data Re-Entry Checked", "target_minus_oldest", 1, 10),
+                ("dispense", "Dispense Queue Checked", "target_minus_oldest", 7, 9),
+                ("erx_queue", "ERx Queue Checked", "today_minus_oldest", 1, 3),
+                ("future_bill", "Future Bill Queue Checked", "target_minus_oldest", 7, 12),
+                ("on_hold_queue", "On Hold Queue Checked", "today_minus_oldest", 1, 1),
+                ("ordering", "Ordering Queue Checked", "target_minus_oldest", 7, 8),
                 ("pa_queue", "Prior Authorization Queue", "target_minus_oldest", 7, 11),
-                ("rejection_queue", "Rejection Queue Checked", "target_minus_oldest", 5, 12),
-                ("untransmitted_claims", "Untransmitted Claims Completed", "target_minus_oldest", 1, 13),
+                ("rejection_queue", "Rejection Queue Checked", "target_minus_oldest", 5, 2),
+                ("untransmitted_claims", "Untransmitted Claims Completed", "target_minus_oldest", 1, 14),
+                ("inbound_fax", "Inbound Fax Checked", "target_minus_oldest", 7, 4),
             ]
             for item_key, label, basis, threshold, order in default_items:
                 session.execute(
@@ -324,6 +332,26 @@ def initialize_system_database():
                         "verified_by": getattr(old_row, f"{item_key}_by", "") or "",
                         "notes": getattr(old_row, f"{item_key}_notes", "") or "",
                     })
+            session.commit()
+
+        # One-time reorder + new-item migration for deployments that already had
+        # checklist_items seeded before this reorder was requested. Guarded on whether
+        # "inbound_fax" already exists, so this only actually changes anything once.
+        already_migrated = session.execute(text("SELECT COUNT(*) as cnt FROM checklist_items WHERE item_key = 'inbound_fax'")).fetchone()
+        if already_migrated[0] == 0:
+            new_order = {
+                "on_hold_queue": 1, "rejection_queue": 2, "erx_queue": 3, "inbound_fax": 4,
+                "central_fill_queue": 5, "ai_tech_check": 6, "billing": 7, "ordering": 8,
+                "dispense": 9, "data_re_entry": 10, "pa_queue": 11, "future_bill": 12,
+                "return_fourteen_queue": 13, "untransmitted_claims": 14,
+            }
+            for item_key, order in new_order.items():
+                session.execute(text("UPDATE checklist_items SET sort_order=:o WHERE item_key=:k"), {"o": order, "k": item_key})
+            session.execute(text("""
+                INSERT INTO checklist_items (item_key, label, aging_basis, red_threshold_days, sort_order)
+                VALUES ('inbound_fax', 'Inbound Fax Checked', 'target_minus_oldest', 7, 4)
+                ON CONFLICT (item_key) DO NOTHING
+            """))
             session.commit()
 
         # --- AUTO-SCHEDULER SUPPORT TABLES ---
@@ -925,7 +953,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         # display target -- but a manual override is available if someone wants
                         # to jump ahead rather than wait for the sequence.
                         st.markdown(f"Queue: `{slot_row.queue}`")
-                        st.info("⏳ Queued — will start automatically once your current slot is submitted.")
+                        st.info("⏳ Queued — click Start to begin, or it will start automatically once an earlier slot for this tech is submitted.")
                         if st.button("▶️ Start Now Anyway", key=f"queued_start_now_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                             now_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
                             try:
@@ -1113,7 +1141,7 @@ SHIFT_PRESETS = {
 # queue rather than fragmenting their day into many small pieces, but never go below
 # MIN_ASSIGNMENT_MINUTES -- if volume/availability can't support the target, fall back to
 # the largest block that's still reasonable rather than forcing something tiny.
-MIN_ASSIGNMENT_MINUTES = 30
+MIN_ASSIGNMENT_MINUTES = 60
 TARGET_BLOCK_MINUTES = 120
 
 def parse_hourly_rate(goal_str):
@@ -1350,17 +1378,17 @@ def apply_schedule_proposal(dept_prefix, db_table):
                     continue
                 target_slot = free_slots.pop(0)
                 goal_str = rate_strings.get(row.queue_name, "")
-                # Only the first assignment in the sequence starts immediately (a real
-                # start_time). The rest are inserted as "queued" (start_time NULL, goal/queue
-                # already set) and get auto-started one at a time as each prior one is
-                # submitted -- see the auto-advance logic in the Submit Metrics handler.
-                slot_start = now_str if i == 0 else None
+                # No slot auto-starts anymore, including the first one -- every assignment
+                # from a proposal populates as "queued" (start_time NULL) and waits for an
+                # explicit click (the "Start Now Anyway" button) to begin. Once a tech's
+                # current slot is submitted, auto-advance still kicks off their next queued
+                # slot automatically -- see the Submit Metrics handler.
                 session.execute(text(f"""
                     INSERT INTO {db_table} (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes, input_number, tech_notified, supervisor_notified, submitted)
                     VALUES (:c_date, :t_name, :s_id, :queue, :goal, :st, :dur, NULL, 0, 0, 0)
                     ON CONFLICT (log_date, tech_name, slot_id) DO UPDATE
                     SET queue=EXCLUDED.queue, goal=EXCLUDED.goal, start_time=EXCLUDED.start_time, duration_minutes=EXCLUDED.duration_minutes, submitted=0, input_number=NULL
-                """), {"c_date": CURRENT_DATE, "t_name": tech_name, "s_id": target_slot, "queue": row.queue_name, "goal": goal_str, "st": slot_start, "dur": row.duration_minutes})
+                """), {"c_date": CURRENT_DATE, "t_name": tech_name, "s_id": target_slot, "queue": row.queue_name, "goal": goal_str, "st": None, "dur": row.duration_minutes})
 
         session.execute(text("DELETE FROM schedule_proposals WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix})
         session.commit()
@@ -1655,7 +1683,7 @@ def render_autoscheduler_tab():
                     if skipped:
                         st.warning("Applied with some exceptions (existing active slots were not overwritten):\n\n" + "\n".join(f"- {s}" for s in skipped))
                     else:
-                        st.success(f"{dept_label} schedule applied — first assignment started for each tech; the rest will auto-start in sequence as each is submitted.")
+                        st.success(f"{dept_label} schedule applied — assignments are queued for each tech. Click Start on their first slot to begin; the rest will follow automatically as each is submitted.")
                     st.session_state.pop(f"last_proposal_summary_{dept_prefix}", None)
                     fragment_rerun()
                 except Exception as e:
@@ -1669,6 +1697,34 @@ def render_autoscheduler_tab():
                     fragment_rerun()
                 except Exception as e:
                     st.error(f"⚠️ Couldn't discard this proposal right now: {str(e)}")
+
+        st.markdown("---")
+        st.subheader(f"📋 {dept_label} — Today's Applied Schedule")
+        st.caption("What's actually been applied to techs' real slots today -- stays here until midnight, independent of proposal generation/approval above.")
+        with db_conn.session as session:
+            applied_rows = session.execute(text(f"""
+                SELECT tech_name, slot_id, queue, duration_minutes, start_time, submitted, input_number
+                FROM {db_table} WHERE log_date=:c_date AND queue IS NOT NULL
+                ORDER BY tech_name, slot_id
+            """), {"c_date": CURRENT_DATE}).fetchall()
+
+        if not applied_rows:
+            st.caption("No assignments applied yet today.")
+        else:
+            applied_by_tech = {}
+            for r in applied_rows:
+                applied_by_tech.setdefault(r.tech_name, []).append(r)
+            for tech_name, rows in applied_by_tech.items():
+                parts = []
+                for r in rows:
+                    if r.submitted:
+                        status_txt = f"✅ Submitted ({r.input_number})"
+                    elif r.start_time is None:
+                        status_txt = "⏳ Queued"
+                    else:
+                        status_txt = "▶️ Active"
+                    parts.append(f"{r.queue} ({r.duration_minutes} min, {status_txt})")
+                st.markdown(f"👤 **{tech_name}**: " + " → ".join(parts))
 
 with tab_sched:
     render_autoscheduler_tab()
