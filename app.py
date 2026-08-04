@@ -68,17 +68,17 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-# Global browser heartbeat. Keeps the container awake and forces a full-script check cycle.
-# TEMPORARILY slowed to 5 minutes (was 15s) as a diagnostic test: checklist data has been
-# reported disappearing purely from waiting through an automatic refresh, with nothing else
-# touched -- which shouldn't be possible given the "seed once" session-state logic elsewhere
-# in this app. If data now survives sitting untouched for several minutes, that confirms this
-# specific mechanism (not just "any rerun") is the actual cause, and a real fix (rather than
-# just a slower interval) needs to be found for it. Revert to a shorter interval once this
-# is resolved, since this value is too slow for normal day-to-day cross-tab freshness.
-# NOTE: this is what keeps things like the Analytics tab and backlog ribbon fresh, since those live
-# outside any @st.fragment and only update on a full rerun.
-st_autorefresh(interval=300000, key="global_system_heartbeat")  # TEMPORARY: slowed to 5 min for diagnostic testing -- see note above this line
+# Global browser heartbeat. Keeps the container awake and forces a full-script check cycle
+# every 15 seconds. This is what keeps things like the Analytics tab and worker grid fresh,
+# since those live outside any @st.fragment and only update on a full rerun.
+#
+# Diagnostic finding from an earlier test: data was still lost even with this slowed to 5
+# minutes and zero manual interaction, which ruled out refresh frequency as the cause --
+# session state was disappearing outright, consistent with an actual session reset rather
+# than just a script rerun. The real fix is autosave (write immediately on every change,
+# closing the window before a reset can lose anything), not a slower interval -- see the
+# checklist and exclusions sections for where that's implemented.
+st_autorefresh(interval=15000, key="global_system_heartbeat")
 
 # Timezone Lock Configuration 
 try:
@@ -576,37 +576,47 @@ def execution_global_background_automation_engine():
                     
                     if current_now >= end_time:
                         if db_t_not == 0:
-                            roster_profile = session.execute(
-                                text("SELECT tech_email, tech_webhook FROM global_roster WHERE dept_prefix = :pfx AND tech_name = :t_name"),
-                                {"pfx": prefix, "t_name": worker}
-                            ).fetchone()
-                            
-                            tech_email = roster_profile.tech_email if roster_profile else None
-                            tech_webhook = roster_profile.tech_webhook if roster_profile else None
-                            
-                            if tech_email:
-                                dispatch_individual_tech_notification(tech_email, worker, slot_num, label)
-                            if tech_webhook:
-                                dispatch_individual_chat_alert(tech_webhook, f"⏱️ **Timer Expired!**\nYour tracking block timer has ended for *{label}* (Slot {slot_num}).\n\nPlease log counts.")
-                            # Deliberately no manager-wide notification here -- this fires the
-                            # instant the timer hits zero, before the tech has had any chance
-                            # to miss the window. The individual tech reminder above is all
-                            # that should happen at this point. The manager only hears about it
-                            # if the tech actually fails to respond by fifteen_min_overdue_time
-                            # below -- there's no separate 10-minute manager escalation anymore.
-                            
-                            session.execute(
-                                text(f"UPDATE {table_name} SET tech_notified = 1 WHERE log_date = :c_date AND tech_name = :t_name AND slot_id = :s_id"),
+                            # Atomic claim: only proceed to notify if THIS session's UPDATE
+                            # actually flipped the flag (rowcount > 0). If another concurrent
+                            # session already claimed it a moment ago, this UPDATE affects 0
+                            # rows and we correctly skip sending -- this is what prevents
+                            # duplicate notifications when multiple browser tabs/sessions have
+                            # this same background engine running at once (each session polls
+                            # independently every 5s, and a plain "read then write" pattern
+                            # has a race window where two sessions can both see "not yet sent"
+                            # before either commits).
+                            claim = session.execute(
+                                text(f"UPDATE {table_name} SET tech_notified = 1 WHERE log_date = :c_date AND tech_name = :t_name AND slot_id = :s_id AND tech_notified = 0"),
                                 {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num}
                             )
+                            if claim.rowcount > 0:
+                                roster_profile = session.execute(
+                                    text("SELECT tech_email, tech_webhook FROM global_roster WHERE dept_prefix = :pfx AND tech_name = :t_name"),
+                                    {"pfx": prefix, "t_name": worker}
+                                ).fetchone()
+                                
+                                tech_email = roster_profile.tech_email if roster_profile else None
+                                tech_webhook = roster_profile.tech_webhook if roster_profile else None
+                                
+                                if tech_email:
+                                    dispatch_individual_tech_notification(tech_email, worker, slot_num, label)
+                                if tech_webhook:
+                                    dispatch_individual_chat_alert(tech_webhook, f"⏱️ **Timer Expired!**\nYour tracking block timer has ended for *{label}* (Slot {slot_num}).\n\nPlease log counts.")
+                                # Deliberately no manager-wide notification here -- this fires the
+                                # instant the timer hits zero, before the tech has had any chance
+                                # to miss the window. The individual tech reminder above is all
+                                # that should happen at this point. The manager only hears about it
+                                # if the tech actually fails to respond by fifteen_min_overdue_time
+                                # below -- there's no separate 10-minute manager escalation anymore.
                             state_changed = True
                         
                         if current_now >= fifteen_min_overdue_time and db_s_not == 0:
-                            dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
-                            session.execute(
-                                text(f"UPDATE {table_name} SET supervisor_notified = 2 WHERE log_date = :c_date AND tech_name = :t_name AND slot_id = :s_id"),
+                            claim = session.execute(
+                                text(f"UPDATE {table_name} SET supervisor_notified = 2 WHERE log_date = :c_date AND tech_name = :t_name AND slot_id = :s_id AND supervisor_notified = 0"),
                                 {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num}
                             )
+                            if claim.rowcount > 0:
+                                dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
                             state_changed = True
 
             chk_row = session.execute(
@@ -625,26 +635,28 @@ def execution_global_background_automation_engine():
                     dilation_deadline = deadline_datetime + timedelta(minutes=30)
                     
                     if current_time_now >= deadline_datetime and chk_row.reminder_sent == 0:
-                        initial_warning_msg = (
-                            f"📋 **FACILITY OPERATIONS REQUIREMENT REMINDER**\n\n"
-                            f"The **Global Facility Daily Queue Verification Log** deadline has been reached.\n"
-                            f"⏳ **Target Deadline:** {chk_row.reminder_time} EST\n"
-                            f"⚠️ *Please ensure all daily backlogs and checklist audits are finalized and submitted.*"
-                        )
-                        dispatch_real_time_alert(initial_warning_msg)
-                        session.execute(text("UPDATE daily_checklist SET reminder_sent = 1 WHERE log_date = :c_date"), {"c_date": CURRENT_DATE})
+                        claim = session.execute(text("UPDATE daily_checklist SET reminder_sent = 1 WHERE log_date = :c_date AND reminder_sent = 0"), {"c_date": CURRENT_DATE})
+                        if claim.rowcount > 0:
+                            initial_warning_msg = (
+                                f"📋 **FACILITY OPERATIONS REQUIREMENT REMINDER**\n\n"
+                                f"The **Global Facility Daily Queue Verification Log** deadline has been reached.\n"
+                                f"⏳ **Target Deadline:** {chk_row.reminder_time} EST\n"
+                                f"⚠️ *Please ensure all daily backlogs and checklist audits are finalized and submitted.*"
+                            )
+                            dispatch_real_time_alert(initial_warning_msg)
                         state_changed = True
                         
                     if current_time_now >= dilation_deadline and chk_row.supervisor_escaped == 0:
-                        escalation_chat_msg = (
-                            f"⏰ **🚨 CRITICAL OPERATIONS ESCALATION** 🚨 ⏰\n\n"
-                            f"The **Global Facility Daily Queue Verification Log** has NOT been submitted for today.\n"
-                            f"⏳ **Target Deadline:** {chk_row.reminder_time} EST\n"
-                            f"❌ **Status:** Overdue by 30+ minutes without supervisor sign-off.\n\n"
-                            f"Please complete and log all verification vectors immediately."
-                        )
-                        dispatch_real_time_alert(escalation_chat_msg)
-                        session.execute(text("UPDATE daily_checklist SET supervisor_escaped = 1 WHERE log_date = :c_date"), {"c_date": CURRENT_DATE})
+                        claim = session.execute(text("UPDATE daily_checklist SET supervisor_escaped = 1 WHERE log_date = :c_date AND supervisor_escaped = 0"), {"c_date": CURRENT_DATE})
+                        if claim.rowcount > 0:
+                            escalation_chat_msg = (
+                                f"⏰ **🚨 CRITICAL OPERATIONS ESCALATION** 🚨 ⏰\n\n"
+                                f"The **Global Facility Daily Queue Verification Log** has NOT been submitted for today.\n"
+                                f"⏳ **Target Deadline:** {chk_row.reminder_time} EST\n"
+                                f"❌ **Status:** Overdue by 30+ minutes without supervisor sign-off.\n\n"
+                                f"Please complete and log all verification vectors immediately."
+                            )
+                            dispatch_real_time_alert(escalation_chat_msg)
                         state_changed = True
                 except Exception as e:
                     print(f"Checklist Background Engine Processing Error: {str(e)}")
