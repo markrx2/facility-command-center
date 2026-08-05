@@ -158,9 +158,16 @@ def initialize_system_database():
                 tech_name TEXT,
                 tech_email TEXT,
                 tech_webhook TEXT,
+                is_active INTEGER DEFAULT 1,
                 PRIMARY KEY (dept_prefix, tech_name)
             )
         """))
+        session.commit()
+        # Existing deployments already had this table without is_active -- add it explicitly
+        # so soft-removal (stop showing someone on a department's screen without deleting
+        # their profile/email/webhook) works without losing any data already entered.
+        session.execute(text("ALTER TABLE global_roster ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1"))
+        session.commit()
         
         # Department execution queues matrix configuration
         tables = ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]
@@ -735,10 +742,10 @@ if submit_deployment:
         try:
             with db_conn.session as session:
                 session.execute(text("""
-                    INSERT INTO global_roster (dept_prefix, tech_name, tech_email, tech_webhook) 
-                    VALUES (:prefix, :name, :email, :webhook)
+                    INSERT INTO global_roster (dept_prefix, tech_name, tech_email, tech_webhook, is_active) 
+                    VALUES (:prefix, :name, :email, :webhook, 1)
                     ON CONFLICT (dept_prefix, tech_name) DO UPDATE 
-                    SET tech_email = EXCLUDED.tech_email, tech_webhook = EXCLUDED.tech_webhook
+                    SET tech_email = EXCLUDED.tech_email, tech_webhook = EXCLUDED.tech_webhook, is_active = 1
                 """), {"prefix": dest_dept[1], "name": new_worker_name, "email": new_worker_email, "webhook": new_worker_webhook})
                 session.commit()
             st.session_state["selected_profile_state"] = "-- Create New Profile --"
@@ -823,7 +830,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
 
     with db_conn.session as session:
         goals_dict = {r.queue_name: r.goal_target for r in session.execute(text("SELECT queue_name, goal_target FROM dynamic_queues WHERE dept_prefix = :pfx"), {"pfx": prefix}).fetchall()}
-        roster_rows = session.execute(text("SELECT tech_name, tech_email, tech_webhook FROM global_roster WHERE dept_prefix = :pfx"), {"pfx": prefix}).fetchall()
+        roster_rows = session.execute(text("SELECT tech_name, tech_email, tech_webhook FROM global_roster WHERE dept_prefix = :pfx AND is_active = 1"), {"pfx": prefix}).fetchall()
         # Batched: one query for every slot in this department/day, instead of a separate
         # round trip per worker per slot below. With N workers x 4 slots, the old per-slot
         # query pattern meant N*4 sequential DB calls on every single render of this fragment
@@ -847,30 +854,18 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
         
         if is_mgr_active:
-            wipe_armed_key = f"wipe_armed_{prefix}_{w_id}"
-            if not st.session_state.get(wipe_armed_key, False):
-                if st.button(f"🚨 Wipe Profile & Timers for {worker} from {dept_label}", key=f"mgr_wipe_personnel_{prefix}_{w_id}"):
-                    st.session_state[wipe_armed_key] = True
+            if st.button(f"👋 Remove {worker} from {dept_label} Screen", key=f"mgr_soft_remove_{prefix}_{w_id}", use_container_width=True):
+                try:
+                    with db_conn.session as session:
+                        session.execute(text("UPDATE global_roster SET is_active = 0 WHERE dept_prefix=:pfx AND tech_name=:t_name"), {"pfx": prefix, "t_name": worker})
+                        session.commit()
+                    st.info(f"{worker} removed from the {dept_label} screen. Their profile (email/webhook) is kept -- re-add them from the sidebar anytime to bring them back with nothing to re-enter. To permanently delete their profile, use Queue Management instead.")
+                    # Full rerun (not fragment-scoped): the sidebar's "Select Existing Profile"
+                    # dropdown behavior depends on this too, and this is a rare enough action
+                    # that the full-page cost doesn't matter.
                     st.rerun()
-            else:
-                st.warning(f"⚠️ This permanently deletes {worker}'s profile and all of today's timer data for {dept_label}. This cannot be undone.")
-                confirm_col1, confirm_col2 = st.columns(2)
-                if confirm_col1.button(f"✅ Confirm Wipe {worker}", key=f"mgr_wipe_confirm_{prefix}_{w_id}", type="primary", use_container_width=True):
-                    try:
-                        with db_conn.session as session:
-                            session.execute(text(f"DELETE FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name"), {"c_date": CURRENT_DATE, "t_name": worker})
-                            session.execute(text("DELETE FROM global_roster WHERE dept_prefix=:pfx AND tech_name=:t_name"), {"pfx": prefix, "t_name": worker})
-                            session.commit()
-                        st.session_state["selected_profile_state"] = "-- Create New Profile --"
-                        st.session_state.pop(wipe_armed_key, None)
-                        # Full rerun (not fragment-scoped): this changes global_roster, which the
-                        # sidebar's profile dropdown reads from, and the sidebar lives outside this fragment.
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"⚠️ Couldn't wipe this profile right now: {str(e)}")
-                if confirm_col2.button("Cancel", key=f"mgr_wipe_cancel_{prefix}_{w_id}", use_container_width=True):
-                    st.session_state.pop(wipe_armed_key, None)
-                    st.rerun()
+                except Exception as e:
+                    st.error(f"⚠️ Couldn't remove {worker} from this screen right now: {str(e)}")
 
         cols = st.columns(4)
         
@@ -887,26 +882,18 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             try:
                                 with db_conn.session as session:
-                                    if slot_num == 1:
-                                        session.execute(text("DELETE FROM global_roster WHERE dept_prefix=:pfx AND tech_name=:t_name"), {"pfx": prefix, "t_name": worker})
-                                        session.execute(text(f"DELETE FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name"), {"c_date": CURRENT_DATE, "t_name": worker})
-                                    else:
-                                        session.execute(text(f"""
-                                            UPDATE {db_table} 
-                                            SET queue=NULL, goal=NULL, start_time=NULL, duration_minutes=60, input_number=NULL, 
-                                                tech_notified=0, supervisor_notified=0, submitted=0 
-                                            WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id
-                                        """), {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                    session.execute(text(f"""
+                                        UPDATE {db_table} 
+                                        SET queue=NULL, goal=NULL, start_time=NULL, duration_minutes=60, input_number=NULL, 
+                                            tech_notified=0, supervisor_notified=0, submitted=0 
+                                        WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id
+                                    """), {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
                                     session.commit()
                                 
                                 for key in [f"num_{prefix}_{w_id}_{slot_num}", f"q_{prefix}_{w_id}_{slot_num}", f"dur_{prefix}_{w_id}_{slot_num}"]:
                                     if key in st.session_state: del st.session_state[key]
 
-                                if slot_num == 1:
-                                    # This branch also deletes the roster row -> sidebar dropdown needs a full refresh.
-                                    st.rerun()
-                                else:
-                                    fragment_rerun()
+                                fragment_rerun()
                             except Exception as e:
                                 st.error(f"⚠️ Couldn't reset this slot right now: {str(e)}")
                             
@@ -1216,7 +1203,7 @@ def sync_homebase_shifts(dept_prefix):
         return None, "Homebase isn't configured yet. Add [homebase] api_key and location_uuids to your secrets file."
 
     with db_conn.session as session:
-        roster_rows = session.execute(text("SELECT tech_name FROM global_roster WHERE dept_prefix=:pfx"), {"pfx": dept_prefix}).fetchall()
+        roster_rows = session.execute(text("SELECT tech_name FROM global_roster WHERE dept_prefix=:pfx AND is_active = 1"), {"pfx": dept_prefix}).fetchall()
     roster_lookup = {normalize_name(r.tech_name): r.tech_name for r in roster_rows}
 
     all_shifts = []
@@ -1380,6 +1367,16 @@ def apply_schedule_proposal(dept_prefix, db_table):
         now_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
 
         for tech_name, rows in by_tech.items():
+            # Clear this tech's existing QUEUED-but-not-yet-started assignments before
+            # applying the new proposal -- those represent a "future plan" that a fresh
+            # proposal should replace, not stack on top of. Anything already ACTIVE
+            # (start_time set) or already SUBMITTED is real, already-happened work and is
+            # deliberately left untouched here.
+            session.execute(text(f"""
+                UPDATE {db_table} SET queue=NULL, goal=NULL, duration_minutes=60
+                WHERE log_date=:c_date AND tech_name=:t_name AND queue IS NOT NULL AND start_time IS NULL AND submitted=0
+            """), {"c_date": CURRENT_DATE, "t_name": tech_name})
+
             existing = session.execute(text(f"SELECT slot_id, queue, submitted FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name"), {"c_date": CURRENT_DATE, "t_name": tech_name}).fetchall()
             occupied = {e.slot_id for e in existing if e.queue is not None and e.submitted == 0}
             free_slots = [s for s in range(1, 5) if s not in occupied]
@@ -1452,7 +1449,7 @@ def render_autoscheduler_tab():
             st.caption("💡 Homebase sync available once `[homebase]` credentials are added to secrets — manual entry below works either way.")
 
         with db_conn.session as session:
-            roster_rows = session.execute(text("SELECT tech_name FROM global_roster WHERE dept_prefix=:pfx ORDER BY tech_name"), {"pfx": dept_prefix}).fetchall()
+            roster_rows = session.execute(text("SELECT tech_name FROM global_roster WHERE dept_prefix=:pfx AND is_active = 1 ORDER BY tech_name"), {"pfx": dept_prefix}).fetchall()
             shift_rows = session.execute(text("SELECT tech_name, shift_start, shift_end FROM tech_shifts WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix}).fetchall()
         existing_shifts = {r.tech_name: (r.shift_start, r.shift_end) for r in shift_rows}
 
@@ -1776,10 +1773,12 @@ def render_queue_management_tab():
                             st.error(f"⚠️ Couldn't save this queue right now: {str(e)}")
             
                 st.markdown("<br><br>", unsafe_allow_html=True)
-                st.subheader("🗑 ... Decommission Employee Profiles")
+                st.subheader("🚨 Wipe Employee Profiles")
+                st.caption("Permanently deletes a profile and today's timer data for that one department only. For day-to-day removal without losing anything, use \"Remove from Screen\" on the worker grid instead.")
                 with db_conn.session as session:
-                    all_staff = session.execute(text("SELECT dept_prefix, tech_name FROM global_roster ORDER BY tech_name ASC")).fetchall()
-            
+                    all_staff = session.execute(text("SELECT dept_prefix, tech_name, is_active FROM global_roster ORDER BY tech_name ASC")).fetchall()
+                dept_table_map = {"de": "data_entry_slots", "cc": "call_center_slots", "sh": "shipping_slots", "fi": "fill_slots"}
+
                 if not all_staff:
                     st.info("No saved technician profiles found.")
                 else:
@@ -1787,20 +1786,35 @@ def render_queue_management_tab():
                         s_prefix, s_name = staff.dept_prefix, staff.tech_name
                         s_id = hashlib.md5(s_name.encode('utf-8')).hexdigest()[:8]
                         d_lbl = {"de": "Data Entry", "cc": "Call Center", "sh": "Shipping", "fi": "Fill"}[s_prefix]
+                        staff_wipe_armed_key = f"staff_wipe_armed_{s_prefix}_{s_id}"
+
                         s_col1, s_col2 = st.columns([2.5, 1])
-                        s_col1.markdown(f"👤 **{s_name}** `({d_lbl})`")
-                        if s_col2.button("Remove Profile", key=f"del_staff_{s_prefix}_{s_id}", type="secondary", use_container_width=True):
-                            try:
-                                with db_conn.session as session:
-                                    session.execute(text("DELETE FROM global_roster WHERE dept_prefix=:prefix AND tech_name=:name"), {"prefix": s_prefix, "name": s_name})
-                                    for t in ["data_entry_slots", "call_center_slots", "shipping_slots", "fill_slots"]:
-                                        session.execute(text(f"DELETE FROM {t} WHERE log_date=:c_date AND tech_name=:name"), {"c_date": CURRENT_DATE, "name": s_name})
-                                    session.commit()
-                                st.session_state["selected_profile_state"] = "-- Create New Profile --"
-                                st.success(f"Decommissioned {s_name} from system.")
+                        status_note = "" if staff.is_active else " *(inactive/removed from screen)*"
+                        s_col1.markdown(f"👤 **{s_name}** `({d_lbl})`{status_note}")
+                        if not st.session_state.get(staff_wipe_armed_key, False):
+                            if s_col2.button("🚨 Wipe", key=f"del_staff_{s_prefix}_{s_id}", type="secondary", use_container_width=True):
+                                st.session_state[staff_wipe_armed_key] = True
                                 st.rerun()
-                            except Exception as e:
-                                st.error(f"⚠️ Couldn't remove this profile right now: {str(e)}")
+                        else:
+                            st.warning(f"⚠️ This permanently deletes {s_name}'s profile and today's timer data for {d_lbl} only. This cannot be undone.")
+                            confirm_col1, confirm_col2 = st.columns(2)
+                            if confirm_col1.button(f"✅ Confirm Wipe {s_name}", key=f"del_staff_confirm_{s_prefix}_{s_id}", type="primary", use_container_width=True):
+                                try:
+                                    with db_conn.session as session:
+                                        session.execute(text("DELETE FROM global_roster WHERE dept_prefix=:prefix AND tech_name=:name"), {"prefix": s_prefix, "name": s_name})
+                                        target_table = dept_table_map.get(s_prefix)
+                                        if target_table:
+                                            session.execute(text(f"DELETE FROM {target_table} WHERE log_date=:c_date AND tech_name=:name"), {"c_date": CURRENT_DATE, "name": s_name})
+                                        session.commit()
+                                    st.session_state["selected_profile_state"] = "-- Create New Profile --"
+                                    st.session_state.pop(staff_wipe_armed_key, None)
+                                    st.success(f"Wiped {s_name}'s {d_lbl} profile.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"⚠️ Couldn't remove this profile right now: {str(e)}")
+                            if confirm_col2.button("Cancel", key=f"del_staff_cancel_{s_prefix}_{s_id}", use_container_width=True):
+                                st.session_state.pop(staff_wipe_armed_key, None)
+                                st.rerun()
                         st.markdown("<hr style='margin:2px 0px !important;'>", unsafe_allow_html=True)
                     
             with m_col2:
