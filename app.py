@@ -185,9 +185,14 @@ def initialize_system_database():
                     tech_notified INTEGER DEFAULT 0,
                     supervisor_notified INTEGER DEFAULT 0,
                     submitted INTEGER DEFAULT 0,
+                    escalated INTEGER DEFAULT 0,
                     PRIMARY KEY (log_date, tech_name, slot_id)
                 )
             """))
+            # Existing deployments already had this table without escalated -- add it
+            # explicitly so the "Logged Units" display can show red/green correctly for
+            # already-submitted slots without needing to guess after the fact.
+            session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS escalated INTEGER DEFAULT 0"))
             
         session.execute(text("""
             CREATE TABLE IF NOT EXISTS dynamic_queues (
@@ -984,6 +989,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     else:
                         db_queue, db_goal, db_start, db_input = slot_row.queue, slot_row.goal, slot_row.start_time, slot_row.input_number
                         db_t_not, db_s_not, db_sub, db_dur_min = slot_row.tech_notified, slot_row.supervisor_notified, slot_row.submitted, slot_row.duration_minutes
+                        db_escalated = getattr(slot_row, "escalated", 0)
                         
                         numeric_match = re.search(r'\d+', str(db_goal))
                         if numeric_match:
@@ -1082,9 +1088,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                         """), {"c_date": CURRENT_DATE, "dept": dept_label, "t_name": worker, "s_id": slot_num, "queue": db_queue, "goal": db_goal, "val": val, "esc": is_escalated, "ts": time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), "dur": actual_minutes_used})
                                         
                                         session.execute(text(f"""
-                                            UPDATE {db_table} SET input_number=:val, submitted=1 
+                                            UPDATE {db_table} SET input_number=:val, submitted=1, escalated=:esc
                                             WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id
-                                        """), {"val": val, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                        """), {"val": val, "esc": is_escalated, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
 
                                         session.commit()
 
@@ -1111,7 +1117,10 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 except Exception as e:
                                     st.error(f"⚠️ Couldn't save these metrics right now: {str(e)}")
                         else:
-                            st.success(f"✅ Logged Units: **{db_input}**")
+                            if db_escalated:
+                                st.error(f"❌ Logged Units: **{db_input}** (Goal Missed)")
+                            else:
+                                st.success(f"✅ Logged Units: **{db_input}**")
 
 # --- 7. CORE APP ROUTING INTERFACE ---
 tab_de, tab_cc, tab_sh, tab_fi, tab_sched, tab_analytics, tab_mgmt = st.tabs([
