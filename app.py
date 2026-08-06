@@ -886,9 +886,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                 except Exception as e:
                     st.error(f"⚠️ Couldn't remove {worker} from this screen right now: {str(e)}")
 
-        cols = st.columns(4)
+        cols = st.columns(5)
         
-        for slot_num in range(1, 5):
+        for slot_num in range(1, 6):
             with cols[slot_num - 1]:
                 with st.container(border=True):
                     st.markdown(f"**🕒 Slot {slot_num}**")
@@ -1318,7 +1318,7 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
             for queue_name, alloc_minutes in allocations:
                 remaining_alloc = alloc_minutes
                 while remaining_alloc > 0.5:
-                    eligible = [t for t in tech_capacity if t["remaining"] >= MIN_ASSIGNMENT_MINUTES and t["slots_used"] < 4 and queue_name not in exclusions.get(t["tech"], set())]
+                    eligible = [t for t in tech_capacity if t["remaining"] >= MIN_ASSIGNMENT_MINUTES and t["slots_used"] < 5 and queue_name not in exclusions.get(t["tech"], set())]
                     if not eligible:
                         summary["unmet"][queue_name] = summary["unmet"].get(queue_name, 0) + round(remaining_alloc)
                         break
@@ -1386,7 +1386,7 @@ def apply_schedule_proposal(dept_prefix, db_table):
 
             existing = session.execute(text(f"SELECT slot_id, queue, submitted FROM {db_table} WHERE log_date=:c_date AND tech_name=:t_name"), {"c_date": CURRENT_DATE, "t_name": tech_name}).fetchall()
             occupied = {e.slot_id for e in existing if e.queue is not None and e.submitted == 0}
-            free_slots = [s for s in range(1, 5) if s not in occupied]
+            free_slots = [s for s in range(1, 6) if s not in occupied]
 
             for i, row in enumerate(rows):
                 if not free_slots:
