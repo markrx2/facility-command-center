@@ -2099,7 +2099,12 @@ def render_daily_verification_section():
                             })
                         session.commit()
                     st.success("Checklist changes saved.")
-                    fragment_rerun()
+                    # Full rerun, not fragment-scoped: confirmed via direct testing that the
+                    # lighter fragment-scoped rerun doesn't reliably re-fetch fresh data right
+                    # after this specific save (the DB was correct immediately, but this
+                    # section kept showing the old value until a genuine full page reload) --
+                    # this forces the same full refresh a manual reload does.
+                    st.rerun()
                 except Exception as e:
                     st.error(f"⚠️ Couldn't save checklist changes right now: {str(e)}")
 
