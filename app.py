@@ -361,6 +361,25 @@ def initialize_system_database():
             """))
             session.commit()
 
+        # Separate one-time migration for the two Ekit checklist items -- guarded
+        # independently so it only runs once, regardless of whether the migration above has
+        # already run before.
+        ekit_migrated = session.execute(text("SELECT COUNT(*) as cnt FROM checklist_items WHERE item_key = 'ekit_non_controlled_check'")).fetchone()
+        if ekit_migrated[0] == 0:
+            max_order_row = session.execute(text("SELECT COALESCE(MAX(sort_order), 0) as m FROM checklist_items")).fetchone()
+            next_order = (max_order_row.m if max_order_row else 0) + 1
+            session.execute(text("""
+                INSERT INTO checklist_items (item_key, label, aging_basis, red_threshold_days, sort_order)
+                VALUES ('ekit_non_controlled_check', 'Ekit Non-Controlled Checked', 'target_minus_oldest', 7, :o)
+                ON CONFLICT (item_key) DO NOTHING
+            """), {"o": next_order})
+            session.execute(text("""
+                INSERT INTO checklist_items (item_key, label, aging_basis, red_threshold_days, sort_order)
+                VALUES ('ekit_controlled_check', 'Ekit Controlled Checked', 'target_minus_oldest', 7, :o)
+                ON CONFLICT (item_key) DO NOTHING
+            """), {"o": next_order + 1})
+            session.commit()
+
         # --- AUTO-SCHEDULER SUPPORT TABLES ---
         # queue_volumes replaces the old fixed-9-field floor_backlogs ribbon going forward.
         # One row per (day, department, queue) so the ribbon can grow automatically as queues
@@ -646,7 +665,7 @@ def execution_global_background_automation_engine():
                         if claim.rowcount > 0:
                             initial_warning_msg = (
                                 f"📋 **FACILITY OPERATIONS REQUIREMENT REMINDER**\n\n"
-                                f"The **Global Facility Daily Queue Verification Log** deadline has been reached.\n"
+                                f"The **Daily Queue Verification Checklist** deadline has been reached.\n"
                                 f"⏳ **Target Deadline:** {chk_row.reminder_time} EST\n"
                                 f"⚠️ *Please ensure all daily backlogs and checklist audits are finalized and submitted.*"
                             )
@@ -658,7 +677,7 @@ def execution_global_background_automation_engine():
                         if claim.rowcount > 0:
                             escalation_chat_msg = (
                                 f"⏰ **🚨 CRITICAL OPERATIONS ESCALATION** 🚨 ⏰\n\n"
-                                f"The **Global Facility Daily Queue Verification Log** has NOT been submitted for today.\n"
+                                f"The **Daily Queue Verification Checklist** has NOT been submitted for today.\n"
                                 f"⏳ **Target Deadline:** {chk_row.reminder_time} EST\n"
                                 f"❌ **Status:** Overdue by 30+ minutes without supervisor sign-off.\n\n"
                                 f"Please complete and log all verification vectors immediately."
@@ -1831,7 +1850,7 @@ def render_queue_management_tab():
 
             st.markdown("---")
             st.subheader("📋 Daily Verification Checklist Items")
-            st.caption("Add, remove, or adjust aging rules for rows shown in the Global Facility Daily Queue Verification Log.")
+            st.caption("Add, remove, or adjust aging rules for rows shown in the Daily Queue Verification Checklist.")
             with db_conn.session as session:
                 current_checklist_items = session.execute(text("SELECT item_key, label, aging_basis, red_threshold_days FROM checklist_items ORDER BY sort_order, label")).fetchall()
 
@@ -1975,7 +1994,7 @@ def render_daily_verification_section():
     CURRENT_DATE = get_current_eastern_date()
 
     with st.container(border=True):
-        st.header("📋 Global Facility Daily Queue Verification Log")
+        st.header("📋 Daily Queue Verification Checklist")
 
         with db_conn.session as session:
             chk = session.execute(text("SELECT * FROM daily_checklist WHERE log_date = :c_date"), {"c_date": CURRENT_DATE}).fetchone()
