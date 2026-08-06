@@ -2033,7 +2033,7 @@ def render_daily_verification_section():
             # which is what was causing rapid-fire refreshes to clear selections before Save
             # could even be clicked. The Aging badge below reflects the last-saved state
             # rather than updating live as you type a new date -- it'll refresh once you Save.
-            with st.form(key="daily_checklist_form"):
+            with st.form(key="daily_checklist_form", clear_on_submit=False):
                 form_states = {}
                 header_cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
                 for h, label in zip(header_cols, ["Queue", "Status", "Oldest Date", "Target Date", "Aging", "Verified By", "Notes/Explanations"]):
