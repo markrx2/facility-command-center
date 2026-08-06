@@ -952,7 +952,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         # display target -- but a manual override is available if someone wants
                         # to jump ahead rather than wait for the sequence.
                         st.markdown(f"Queue: `{slot_row.queue}`")
-                        st.info("⏳ Queued — click Start to begin, or it will start automatically once an earlier slot for this tech is submitted.")
+                        st.info("⏳ Queued — click Start Now Anyway to begin this slot.")
                         if st.button("▶️ Start Now Anyway", key=f"queued_start_now_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                             now_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
                             try:
@@ -1066,18 +1066,6 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                             UPDATE {db_table} SET input_number=:val, submitted=1 
                                             WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id
                                         """), {"val": val, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
-
-                                        # Auto-advance: this tech may have another queue queued up by
-                                        # the auto-scheduler (assigned but not yet started, since only
-                                        # one slot at a time should be actively running). Start the
-                                        # earliest such slot now that this one is done.
-                                        next_queued = session.execute(text(f"""
-                                            SELECT slot_id FROM {db_table}
-                                            WHERE log_date=:c_date AND tech_name=:t_name AND queue IS NOT NULL AND start_time IS NULL
-                                            ORDER BY slot_id ASC LIMIT 1
-                                        """), {"c_date": CURRENT_DATE, "t_name": worker}).fetchone()
-                                        if next_queued:
-                                            session.execute(text(f"UPDATE {db_table} SET start_time=:st WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), "c_date": CURRENT_DATE, "t_name": worker, "s_id": next_queued.slot_id})
 
                                         session.commit()
 
@@ -1691,7 +1679,7 @@ def render_autoscheduler_tab():
                     if skipped:
                         st.warning("Applied with some exceptions (existing active slots were not overwritten):\n\n" + "\n".join(f"- {s}" for s in skipped))
                     else:
-                        st.success(f"{dept_label} schedule applied — assignments are queued for each tech. Click Start on their first slot to begin; the rest will follow automatically as each is submitted.")
+                        st.success(f"{dept_label} schedule applied — all assignments are queued for each tech. Every slot needs its own manual Start click; nothing starts automatically.")
                     st.session_state.pop(f"last_proposal_summary_{dept_prefix}", None)
                     fragment_rerun()
                 except Exception as e:
@@ -2038,61 +2026,64 @@ def render_daily_verification_section():
 
             opt = ["Pending", "Yes", "No"]
 
-            # Plain native Streamlit widgets (selectbox/date_input/text_input) instead of
-            # st.data_editor. This is a deliberate step back from the grid-table approach --
-            # data_editor kept resetting in-progress edits on reruns even after removing
-            # autosave AND caching the underlying data, which points to the widget itself
-            # being unreliable here, not our surrounding logic. Plain widgets with stable
-            # keys reliably hold their value across reruns as long as nothing deletes their
-            # session_state, and nothing here does that anymore.
-            form_states = {}
-            header_cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
-            for h, label in zip(header_cols, ["Queue", "Status", "Oldest Date", "Target Date", "Aging", "Verified By", "Notes/Explanations"]):
-                h.markdown(f"**{label}**")
+            # Wrapped in st.form(): widgets inside a form don't trigger ANY rerun when you
+            # interact with them -- nothing happens server-side until the form's own submit
+            # button is clicked. This is a stronger guarantee than "seed once" alone, since it
+            # removes the possibility of ANY rerun (from anywhere) landing mid-edit at all,
+            # which is what was causing rapid-fire refreshes to clear selections before Save
+            # could even be clicked. The Aging badge below reflects the last-saved state
+            # rather than updating live as you type a new date -- it'll refresh once you Save.
+            with st.form(key="daily_checklist_form"):
+                form_states = {}
+                header_cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
+                for h, label in zip(header_cols, ["Queue", "Status", "Oldest Date", "Target Date", "Aging", "Verified By", "Notes/Explanations"]):
+                    h.markdown(f"**{label}**")
 
-            for item in checklist_items:
-                entry = entries_by_key.get(item.item_key)
-                stored_status = entry.status if entry else "Pending"
-                stored_odt = parse_stored_date(entry.oldest_date if entry else "")
-                stored_tdt = parse_stored_date(entry.target_date if entry else "")
-                stored_by = entry.verified_by if entry else ""
-                stored_notes = entry.notes if entry else ""
+                for item in checklist_items:
+                    entry = entries_by_key.get(item.item_key)
+                    stored_status = entry.status if entry else "Pending"
+                    stored_odt = parse_stored_date(entry.oldest_date if entry else "")
+                    stored_tdt = parse_stored_date(entry.target_date if entry else "")
+                    stored_by = entry.verified_by if entry else ""
+                    stored_notes = entry.notes if entry else ""
 
-                status_key = f"cl_status_{item.item_key}_{CURRENT_DATE}"
-                odt_key = f"cl_odt_{item.item_key}_{CURRENT_DATE}"
-                tdt_key = f"cl_tdt_{item.item_key}_{CURRENT_DATE}"
-                by_key = f"cl_by_{item.item_key}_{CURRENT_DATE}"
-                notes_key = f"cl_notes_{item.item_key}_{CURRENT_DATE}"
+                    status_key = f"cl_status_{item.item_key}_{CURRENT_DATE}"
+                    odt_key = f"cl_odt_{item.item_key}_{CURRENT_DATE}"
+                    tdt_key = f"cl_tdt_{item.item_key}_{CURRENT_DATE}"
+                    by_key = f"cl_by_{item.item_key}_{CURRENT_DATE}"
+                    notes_key = f"cl_notes_{item.item_key}_{CURRENT_DATE}"
 
-                # Seed only the very first time this key has ever existed in this session --
-                # never re-checked afterward. A coworker's saved change won't appear until
-                # this browser tab is reloaded (a fresh session, empty state, seeds fresh
-                # from the DB). This is deliberately simple: it's what keeps an in-progress,
-                # not-yet-saved selection from ever being touched by anything else on the page.
-                for key, stored_val in [
-                    (status_key, stored_status if stored_status in opt else "Pending"),
-                    (odt_key, stored_odt), (tdt_key, stored_tdt),
-                    (by_key, stored_by), (notes_key, stored_notes),
-                ]:
-                    if key not in st.session_state:
-                        st.session_state[key] = stored_val
+                    for key, stored_val in [
+                        (status_key, stored_status if stored_status in opt else "Pending"),
+                        (odt_key, stored_odt), (tdt_key, stored_tdt),
+                        (by_key, stored_by), (notes_key, stored_notes),
+                    ]:
+                        if key not in st.session_state:
+                            st.session_state[key] = stored_val
 
-                cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
-                cols[0].markdown(item.label)
-                curr_status = cols[1].selectbox("Status", options=opt, key=status_key, label_visibility="collapsed")
-                curr_odt = cols[2].date_input("Oldest Date", key=odt_key, label_visibility="collapsed")
-                curr_tdt = cols[3].date_input("Target Date", key=tdt_key, label_visibility="collapsed")
-                delta, is_red, badge = compute_aging(item.aging_basis, item.red_threshold_days, curr_odt, curr_tdt)
-                cols[4].markdown(badge)
-                curr_by = cols[5].text_input("Verified By", key=by_key, label_visibility="collapsed")
-                curr_notes = cols[6].text_input("Notes/Explanations", key=notes_key, label_visibility="collapsed")
+                    cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
+                    cols[0].markdown(item.label)
+                    curr_status = cols[1].selectbox("Status", options=opt, key=status_key, label_visibility="collapsed")
+                    curr_odt = cols[2].date_input("Oldest Date", key=odt_key, label_visibility="collapsed")
+                    curr_tdt = cols[3].date_input("Target Date", key=tdt_key, label_visibility="collapsed")
+                    # Displayed badge uses the last-SAVED state (won't update until Save is
+                    # clicked, since nothing reruns inside a form) -- but the value stored into
+                    # form_states below uses the actual current widget values, so deficiency
+                    # detection on Submit is still correct even though the badge display lags.
+                    _, _, badge = compute_aging(item.aging_basis, item.red_threshold_days, stored_odt, stored_tdt)
+                    cols[4].markdown(badge)
+                    curr_by = cols[5].text_input("Verified By", key=by_key, label_visibility="collapsed")
+                    curr_notes = cols[6].text_input("Notes/Explanations", key=notes_key, label_visibility="collapsed")
 
-                form_states[item.item_key] = {
-                    "label": item.label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
-                    "by": curr_by, "notes": curr_notes, "is_red": is_red, "delta": delta
-                }
+                    live_delta, live_is_red, _ = compute_aging(item.aging_basis, item.red_threshold_days, curr_odt, curr_tdt)
+                    form_states[item.item_key] = {
+                        "label": item.label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
+                        "by": curr_by, "notes": curr_notes, "is_red": live_is_red, "delta": live_delta
+                    }
 
-            if st.button("💾 Save Checklist Changes", key="checklist_save_btn", use_container_width=True):
+                checklist_save_clicked = st.form_submit_button("💾 Save Checklist Changes", use_container_width=True)
+
+            if checklist_save_clicked:
                 try:
                     with db_conn.session as session:
                         for item_key, data in form_states.items():
