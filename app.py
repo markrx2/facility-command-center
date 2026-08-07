@@ -987,28 +987,44 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     
                     if not slot_row or slot_row.queue is None:
                         if goals_dict:
-                            chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=f"q_{prefix}_{w_id}_{slot_num}")
-                            base_goal_str = goals_dict[chosen_q]
-                            
                             durations = {"30 Minutes": 30, "1 Hour": 60, "2 Hours": 120, "4 Hours": 240, "8 Hours": 480}
+                            q_key = f"q_{prefix}_{w_id}_{slot_num}"
                             dur_key = f"dur_{prefix}_{w_id}_{slot_num}"
+                            if q_key not in st.session_state:
+                                st.session_state[q_key] = list(goals_dict.keys())[0]
                             if dur_key not in st.session_state:
                                 st.session_state[dur_key] = "1 Hour"
-                            chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), key=dur_key)
-                            chosen_dur_min = durations[chosen_dur_label]
-                            
-                            numeric_match = re.search(r'\d+', str(base_goal_str))
-                            if numeric_match:
-                                base_num = int(numeric_match.group())
-                                text_suffix = base_goal_str.replace(str(base_num), "").strip()
-                                scaled_num = int(base_num * (float(chosen_dur_min) / 60.0))
-                                calculated_goal_str = f"{scaled_num} {text_suffix}".strip()
-                            else:
-                                calculated_goal_str = base_goal_str
+
+                            # Wrapped in st.form(): same fix that's proven reliable everywhere
+                            # else this session -- a heartbeat-triggered refresh landing on
+                            # this dropdown was reverting a manual selection back to default
+                            # before Start Clock could ever be clicked, even with seed-once
+                            # protection alone. Trade-off: the "Scheduled Target" preview below
+                            # no longer updates live as you adjust these -- it reflects the
+                            # final choice once Start Clock (the form's submit) is clicked,
+                            # which is fine since the preview is irrelevant the moment the slot
+                            # actually goes active with whatever was selected.
+                            with st.form(key=f"assign_form_{prefix}_{w_id}_{slot_num}", clear_on_submit=False):
+                                chosen_q = st.selectbox("Assign Queue:", options=list(goals_dict.keys()), key=q_key)
+                                base_goal_str = goals_dict[chosen_q]
                                 
-                            st.caption(f"🎯 Scheduled Target: **{calculated_goal_str}** *(Base: {base_goal_str}/hr)*")
-                            
-                            if st.button("🚀 Start Clock", key=f"str_{prefix}_{w_id}_{slot_num}", use_container_width=True):
+                                chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), key=dur_key)
+                                chosen_dur_min = durations[chosen_dur_label]
+                                
+                                numeric_match = re.search(r'\d+', str(base_goal_str))
+                                if numeric_match:
+                                    base_num = int(numeric_match.group())
+                                    text_suffix = base_goal_str.replace(str(base_num), "").strip()
+                                    scaled_num = int(base_num * (float(chosen_dur_min) / 60.0))
+                                    calculated_goal_str = f"{scaled_num} {text_suffix}".strip()
+                                else:
+                                    calculated_goal_str = base_goal_str
+                                    
+                                st.caption(f"🎯 Scheduled Target: **{calculated_goal_str}** *(Base: {base_goal_str}/hr)*")
+                                
+                                start_clicked = st.form_submit_button("🚀 Start Clock", use_container_width=True)
+
+                            if start_clicked:
                                 now_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
                                 try:
                                     with db_conn.session as session:
