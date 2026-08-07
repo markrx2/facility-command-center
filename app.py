@@ -189,15 +189,17 @@ def initialize_system_database():
                     pro_rata_target INTEGER DEFAULT NULL,
                     paused INTEGER DEFAULT 0,
                     pause_started_at TEXT DEFAULT NULL,
+                    actual_minutes_used INTEGER DEFAULT NULL,
                     PRIMARY KEY (log_date, tech_name, slot_id)
                 )
             """))
             # Existing deployments already had this table without escalated/pro_rata_target/
-            # paused/pause_started_at -- add them explicitly.
+            # paused/pause_started_at/actual_minutes_used -- add them explicitly.
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS escalated INTEGER DEFAULT 0"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS pro_rata_target INTEGER DEFAULT NULL"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS paused INTEGER DEFAULT 0"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS pause_started_at TEXT DEFAULT NULL"))
+            session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS actual_minutes_used INTEGER DEFAULT NULL"))
             
         session.execute(text("""
             CREATE TABLE IF NOT EXISTS dynamic_queues (
@@ -817,14 +819,6 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
 
     volume_lookup = {r.queue_name: r.volume for r in vol_rows}
 
-    save_success = st.session_state.pop("_volume_save_success", None)
-    if save_success:
-        st.success(save_success)
-
-    save_error = st.session_state.pop("_volume_save_error", None)
-    if save_error:
-        st.error(f"⚠️ Couldn't save volume numbers just now: {save_error}")
-
     st.markdown(f"<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Today's {dept_label} Queue Volume (start-of-day counts, editable anytime)</h4>", unsafe_allow_html=True)
 
     # Wrapped in st.form(): same fix that solved the checklist's rapid-refresh problem --
@@ -845,6 +839,15 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
                 entered_values[q.queue_name] = widget_key
 
         volume_save_clicked = st.form_submit_button(f"💾 Save {dept_label} Volume", use_container_width=True)
+
+    # Shown below the Save button rather than above the whole section.
+    save_success = st.session_state.pop("_volume_save_success", None)
+    if save_success:
+        st.success(save_success)
+
+    save_error = st.session_state.pop("_volume_save_error", None)
+    if save_error:
+        st.error(f"⚠️ Couldn't save volume numbers just now: {save_error}")
 
     if volume_save_clicked:
         try:
@@ -1044,6 +1047,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         db_t_not, db_s_not, db_sub, db_dur_min = slot_row.tech_notified, slot_row.supervisor_notified, slot_row.submitted, slot_row.duration_minutes
                         db_escalated = getattr(slot_row, "escalated", 0)
                         db_pro_rata_target = getattr(slot_row, "pro_rata_target", None)
+                        db_actual_minutes = getattr(slot_row, "actual_minutes_used", None)
                         
                         numeric_match = re.search(r'\d+', str(db_goal))
                         if numeric_match:
@@ -1144,9 +1148,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                         """), {"c_date": CURRENT_DATE, "dept": dept_label, "t_name": worker, "s_id": slot_num, "queue": db_queue, "goal": db_goal, "val": val, "esc": is_escalated, "ts": time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), "dur": actual_minutes_used})
                                         
                                         session.execute(text(f"""
-                                            UPDATE {db_table} SET input_number=:val, submitted=1, escalated=:esc, pro_rata_target=:prt
+                                            UPDATE {db_table} SET input_number=:val, submitted=1, escalated=:esc, pro_rata_target=:prt, actual_minutes_used=:amu
                                             WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id
-                                        """), {"val": val, "esc": is_escalated, "prt": dynamic_target_threshold, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                        """), {"val": val, "esc": is_escalated, "prt": dynamic_target_threshold, "amu": actual_minutes_used, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
 
                                         session.commit()
 
@@ -1174,10 +1178,11 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     st.error(f"⚠️ Couldn't save these metrics right now: {str(e)}")
                         else:
                             target_note = f" — Expected: **{db_pro_rata_target}**" if db_pro_rata_target is not None else ""
+                            minutes_note = f" *(based on {db_actual_minutes} min)*" if db_actual_minutes is not None else ""
                             if db_escalated:
-                                st.error(f"❌ Logged Units: **{db_input}** (Goal Missed{target_note})")
+                                st.error(f"❌ Logged Units: **{db_input}** (Goal Missed{target_note}{minutes_note})")
                             else:
-                                st.success(f"✅ Logged Units: **{db_input}** (Goal Made{target_note})")
+                                st.success(f"✅ Logged Units: **{db_input}** (Goal Made{target_note}{minutes_note})")
 
 # --- 7. CORE APP ROUTING INTERFACE ---
 tab_de, tab_cc, tab_sh, tab_fi, tab_sched, tab_analytics, tab_mgmt = st.tabs([
@@ -1625,8 +1630,6 @@ def render_autoscheduler_tab():
             st.caption("No queues configured yet for this department.")
         else:
             excl_save_error = st.session_state.pop("_exclusions_save_error", None)
-            if excl_save_error:
-                st.error(f"⚠️ Couldn't save exclusion changes right now: {excl_save_error}")
 
             # Wrapped in st.form(): same fix that solved the checklist and ribbon's
             # rapid-refresh problem -- nothing reruns while selecting, nothing saves until
@@ -1646,6 +1649,15 @@ def render_autoscheduler_tab():
 
                 excl_save_clicked = st.form_submit_button(f"💾 Save {dept_label} Exclusions", use_container_width=True)
 
+            # Shown below the Save button rather than above it -- this was previously being
+            # set but never actually displayed anywhere, which is why no confirmation ever
+            # appeared even though the save itself was working.
+            excl_save_success = st.session_state.pop("_exclusions_save_success", None)
+            if excl_save_success:
+                st.success(excl_save_success)
+            if excl_save_error:
+                st.error(f"⚠️ Couldn't save exclusion changes right now: {excl_save_error}")
+
             if excl_save_clicked:
                 try:
                     with db_conn.session as session:
@@ -1663,6 +1675,7 @@ def render_autoscheduler_tab():
                     st.rerun()
                 except Exception as e:
                     st.session_state["_exclusions_save_error"] = str(e)
+                    st.rerun()
                     st.rerun()
 
         st.markdown("---")
