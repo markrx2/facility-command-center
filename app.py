@@ -1047,7 +1047,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         # slot for this tech is submitted. It's not running yet -- no timer, no
                         # display target -- but a manual override is available if someone wants
                         # to jump ahead rather than wait for the sequence.
-                        st.markdown(f"Queue: `{slot_row.queue}`")
+                        st.markdown(f"Queue: `{slot_row.queue}` ({slot_row.duration_minutes} min)")
                         st.info("⏳ Queued — click Start Now Anyway to begin this slot.")
                         if st.button("▶️ Start Now Anyway", key=f"queued_start_now_{prefix}_{w_id}_{slot_num}", use_container_width=True):
                             now_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
@@ -1058,6 +1058,56 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 fragment_rerun()
                             except Exception as e:
                                 st.error(f"⚠️ Couldn't start this slot right now: {str(e)}")
+
+                        if is_mgr_active and goals_dict:
+                            edit_armed_key = f"edit_queued_armed_{prefix}_{w_id}_{slot_num}"
+                            if not st.session_state.get(edit_armed_key, False):
+                                if st.button("✏️ Edit Assignment", key=f"edit_queued_btn_{prefix}_{w_id}_{slot_num}", use_container_width=True):
+                                    st.session_state[edit_armed_key] = True
+                                    fragment_rerun()
+                            else:
+                                edit_q_key = f"edit_q_{prefix}_{w_id}_{slot_num}"
+                                edit_dur_key = f"edit_dur_{prefix}_{w_id}_{slot_num}"
+                                edit_durations = {"30 Minutes": 30, "1 Hour": 60, "2 Hours": 120, "4 Hours": 240, "8 Hours": 480}
+                                if edit_q_key not in st.session_state:
+                                    st.session_state[edit_q_key] = slot_row.queue if slot_row.queue in goals_dict else list(goals_dict.keys())[0]
+                                if edit_dur_key not in st.session_state:
+                                    closest_label = min(edit_durations.items(), key=lambda kv: abs(kv[1] - slot_row.duration_minutes))[0]
+                                    st.session_state[edit_dur_key] = closest_label
+
+                                with st.form(key=f"edit_queued_form_{prefix}_{w_id}_{slot_num}", clear_on_submit=False):
+                                    new_edit_q = st.selectbox("Change Queue To:", options=list(goals_dict.keys()), key=edit_q_key)
+                                    new_edit_dur_label = st.selectbox("Change Duration To:", options=list(edit_durations.keys()), key=edit_dur_key)
+                                    edit_col1, edit_col2 = st.columns(2)
+                                    update_clicked = edit_col1.form_submit_button("💾 Update Assignment", use_container_width=True)
+                                    cancel_clicked = edit_col2.form_submit_button("Cancel", use_container_width=True)
+
+                                if update_clicked:
+                                    new_edit_dur_min = edit_durations[new_edit_dur_label]
+                                    new_edit_goal_str = goals_dict[new_edit_q]
+                                    numeric_match_edit = re.search(r'\d+', str(new_edit_goal_str))
+                                    if numeric_match_edit:
+                                        edit_base_num = int(numeric_match_edit.group())
+                                        edit_text_suffix = new_edit_goal_str.replace(str(edit_base_num), "").strip()
+                                        edit_scaled_num = int(edit_base_num * (float(new_edit_dur_min) / 60.0))
+                                        new_edit_calc_goal = f"{edit_scaled_num} {edit_text_suffix}".strip()
+                                    else:
+                                        new_edit_calc_goal = new_edit_goal_str
+                                    try:
+                                        with db_conn.session as session:
+                                            session.execute(text(f"UPDATE {db_table} SET queue=:q, goal=:g, duration_minutes=:d WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"q": new_edit_q, "g": new_edit_calc_goal, "d": new_edit_dur_min, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                            session.commit()
+                                        st.session_state.pop(edit_armed_key, None)
+                                        st.session_state.pop(edit_q_key, None)
+                                        st.session_state.pop(edit_dur_key, None)
+                                        fragment_rerun()
+                                    except Exception as e:
+                                        st.error(f"⚠️ Couldn't update this assignment right now: {str(e)}")
+                                if cancel_clicked:
+                                    st.session_state.pop(edit_armed_key, None)
+                                    st.session_state.pop(edit_q_key, None)
+                                    st.session_state.pop(edit_dur_key, None)
+                                    fragment_rerun()
                     else:
                         db_queue, db_goal, db_start, db_input = slot_row.queue, slot_row.goal, slot_row.start_time, slot_row.input_number
                         db_t_not, db_s_not, db_sub, db_dur_min = slot_row.tech_notified, slot_row.supervisor_notified, slot_row.submitted, slot_row.duration_minutes
