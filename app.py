@@ -667,7 +667,8 @@ def execution_global_background_automation_engine():
                                 if tech_email:
                                     dispatch_individual_tech_notification(tech_email, worker, slot_num, label)
                                 if tech_webhook:
-                                    dispatch_individual_chat_alert(tech_webhook, f"⏱️ **Timer Expired!**\nYour tracking block timer has ended for *{label}* (Slot {slot_num}).\n\nPlease log counts.")
+                                    deadline_fmt = end_time.strftime("%I:%M %p").lstrip("0")
+                                    dispatch_individual_chat_alert(tech_webhook, f"⏱️ **Timer Expired!**\nYour tracking block timer has ended for *{label}* (Slot {slot_num}).\nDeadline was: **{deadline_fmt}**\n\nPlease log counts.")
                                 # Deliberately no manager-wide notification here -- this fires the
                                 # instant the timer hits zero, before the tech has had any chance
                                 # to miss the window. The individual tech reminder above is all
@@ -682,7 +683,9 @@ def execution_global_background_automation_engine():
                                 {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num}
                             )
                             if claim.rowcount > 0:
-                                dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**")
+                                deadline_fmt = end_time.strftime("%I:%M %p").lstrip("0")
+                                now_fmt = current_now.strftime("%I:%M %p").lstrip("0")
+                                dispatch_real_time_alert(f"⏰ **🚨 OVERDUE METRICS CRITICAL ALERT** 🚨 ⏰\nTechnician: {worker.upper()}\nDepartment: {label}\nSlot: {slot_num} | Status: **Missing counts 15m+ post-deadline.**\nDeadline was: **{deadline_fmt}** | Now: **{now_fmt}**")
                             state_changed = True
 
             chk_row = session.execute(
