@@ -817,6 +817,10 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
 
     volume_lookup = {r.queue_name: r.volume for r in vol_rows}
 
+    save_success = st.session_state.pop("_volume_save_success", None)
+    if save_success:
+        st.success(save_success)
+
     save_error = st.session_state.pop("_volume_save_error", None)
     if save_error:
         st.error(f"⚠️ Couldn't save volume numbers just now: {save_error}")
@@ -853,7 +857,7 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
                         ON CONFLICT (log_date, dept_prefix, queue_name) DO UPDATE SET volume = EXCLUDED.volume
                     """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "qname": queue_name, "vol": val})
                 session.commit()
-            st.success(f"{dept_label} volume saved.")
+            st.session_state["_volume_save_success"] = f"{dept_label} volume saved."
             st.rerun()
         except Exception as e:
             st.session_state["_volume_save_error"] = str(e)
@@ -1655,7 +1659,7 @@ def render_autoscheduler_tab():
                                     ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
                                 """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
                         session.commit()
-                    st.success("Exclusions saved.")
+                    st.session_state["_exclusions_save_success"] = "Exclusions saved."
                     st.rerun()
                 except Exception as e:
                     st.session_state["_exclusions_save_error"] = str(e)
