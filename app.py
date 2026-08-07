@@ -819,6 +819,16 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
 
     volume_lookup = {r.queue_name: r.volume for r in vol_rows}
 
+    # Custom display order for a 2-row, 5-column layout. Any queue not in this list (a
+    # different department, or a newly-added queue not yet placed) falls back to appearing
+    # after these in whatever order the database returned them, rather than being hidden.
+    CUSTOM_QUEUE_ORDER = [
+        "On Hold", "ERx Facility", "ERx Regular", "Autofill Facility", "Autofill Regular",
+        "Ekit Non-Controlled", "Ekit Controlled", "PA", "AI/Tech", "Reject",
+    ]
+    order_lookup = {name: i for i, name in enumerate(CUSTOM_QUEUE_ORDER)}
+    dept_queues = sorted(dept_queues, key=lambda q: order_lookup.get(q.queue_name, len(CUSTOM_QUEUE_ORDER)))
+
     st.markdown(f"<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Today's {dept_label} Queue Volume (start-of-day counts, editable anytime)</h4>", unsafe_allow_html=True)
 
     # Wrapped in st.form(): same fix that solved the checklist's rapid-refresh problem --
@@ -827,7 +837,7 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
     # the form's own submit button is clicked.
     with st.form(key=f"volume_form_{dept_prefix}", clear_on_submit=False):
         entered_values = {}
-        num_cols = min(len(dept_queues), 6) or 1
+        num_cols = 5
         cols = st.columns(num_cols)
         for i, q in enumerate(dept_queues):
             with cols[i % num_cols]:
