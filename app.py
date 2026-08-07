@@ -191,17 +191,22 @@ def initialize_system_database():
                     pause_started_at TEXT DEFAULT NULL,
                     actual_minutes_used INTEGER DEFAULT NULL,
                     submitted_at TEXT DEFAULT NULL,
+                    original_start_time TEXT DEFAULT NULL,
+                    total_paused_minutes INTEGER DEFAULT 0,
                     PRIMARY KEY (log_date, tech_name, slot_id)
                 )
             """))
             # Existing deployments already had this table without escalated/pro_rata_target/
-            # paused/pause_started_at/actual_minutes_used/submitted_at -- add them explicitly.
+            # paused/pause_started_at/actual_minutes_used/submitted_at/original_start_time/
+            # total_paused_minutes -- add them explicitly.
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS escalated INTEGER DEFAULT 0"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS pro_rata_target INTEGER DEFAULT NULL"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS paused INTEGER DEFAULT 0"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS pause_started_at TEXT DEFAULT NULL"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS actual_minutes_used INTEGER DEFAULT NULL"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS submitted_at TEXT DEFAULT NULL"))
+            session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS original_start_time TEXT DEFAULT NULL"))
+            session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS total_paused_minutes INTEGER DEFAULT 0"))
             
         session.execute(text("""
             CREATE TABLE IF NOT EXISTS dynamic_queues (
@@ -997,7 +1002,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 now_reset_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
                                 try:
                                     with db_conn.session as session:
-                                        session.execute(text(f"UPDATE {db_table} SET start_time=:st, tech_notified=0, supervisor_notified=0, submitted=0 WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": now_reset_str, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                        session.execute(text(f"UPDATE {db_table} SET start_time=:st, original_start_time=:st, total_paused_minutes=0, tech_notified=0, supervisor_notified=0, submitted=0 WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": now_reset_str, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
                                         session.commit()
                                     fragment_rerun()
                                 except Exception as e:
@@ -1020,12 +1025,18 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 try:
                                     pause_started = datetime.strptime(slot_row.pause_started_at, "%Y-%m-%d %H:%M:%S")
                                     paused_duration = now_eastern_naive() - pause_started
+                                    paused_minutes_this_time = max(0, int(paused_duration.total_seconds() / 60.0))
                                     old_start = datetime.strptime(slot_row.start_time, "%Y-%m-%d %H:%M:%S")
                                     # Shift the deadline forward by however long it was paused,
-                                    # so the tech doesn't lose that time off their block.
+                                    # so the tech doesn't lose that time off their block. This
+                                    # only touches the working start_time used for the deadline
+                                    # calculation -- original_start_time is left untouched, so
+                                    # "Started:" in the Logged Units display always reflects when
+                                    # the tech genuinely first clicked Start, not this adjustment.
                                     new_start = old_start + paused_duration
+                                    prior_paused_total = getattr(slot_row, "total_paused_minutes", 0) or 0
                                     with db_conn.session as session:
-                                        session.execute(text(f"UPDATE {db_table} SET paused=0, pause_started_at=NULL, start_time=:st WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": new_start.strftime("%Y-%m-%d %H:%M:%S"), "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                        session.execute(text(f"UPDATE {db_table} SET paused=0, pause_started_at=NULL, start_time=:st, total_paused_minutes=:tpm WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": new_start.strftime("%Y-%m-%d %H:%M:%S"), "tpm": prior_paused_total + paused_minutes_this_time, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
                                         session.commit()
                                     fragment_rerun()
                                 except Exception as e:
@@ -1078,10 +1089,10 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     with db_conn.session as session:
                                         session.execute(text(f"""
                                             INSERT INTO {db_table} 
-                                            (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes, input_number, tech_notified, supervisor_notified, submitted) 
-                                            VALUES (:c_date, :t_name, :s_id, :queue, :goal, :st, :dur, NULL, 0, 0, 0)
+                                            (log_date, tech_name, slot_id, queue, goal, start_time, duration_minutes, input_number, tech_notified, supervisor_notified, submitted, original_start_time, total_paused_minutes) 
+                                            VALUES (:c_date, :t_name, :s_id, :queue, :goal, :st, :dur, NULL, 0, 0, 0, :st, 0)
                                             ON CONFLICT (log_date, tech_name, slot_id) DO UPDATE 
-                                            SET queue=EXCLUDED.queue, goal=EXCLUDED.goal, start_time=EXCLUDED.start_time, duration_minutes=EXCLUDED.duration_minutes, submitted=0, input_number=NULL
+                                            SET queue=EXCLUDED.queue, goal=EXCLUDED.goal, start_time=EXCLUDED.start_time, duration_minutes=EXCLUDED.duration_minutes, submitted=0, input_number=NULL, original_start_time=EXCLUDED.original_start_time, total_paused_minutes=0
                                         """), {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num, "queue": chosen_q, "goal": base_goal_str, "st": now_str, "dur": chosen_dur_min})
                                         session.commit()
                                     # Local to this slot/fragment -- no need to force a full-page rerun.
@@ -1101,7 +1112,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             now_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
                             try:
                                 with db_conn.session as session:
-                                    session.execute(text(f"UPDATE {db_table} SET start_time=:st WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": now_str, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                    session.execute(text(f"UPDATE {db_table} SET start_time=:st, original_start_time=:st, total_paused_minutes=0 WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": now_str, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
                                     session.commit()
                                 fragment_rerun()
                             except Exception as e:
@@ -1163,6 +1174,8 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         db_pro_rata_target = getattr(slot_row, "pro_rata_target", None)
                         db_actual_minutes = getattr(slot_row, "actual_minutes_used", None)
                         db_submitted_at = getattr(slot_row, "submitted_at", None)
+                        db_original_start = getattr(slot_row, "original_start_time", None)
+                        db_total_paused = getattr(slot_row, "total_paused_minutes", 0)
                         
                         numeric_match = re.search(r'\d+', str(db_goal))
                         if numeric_match:
@@ -1295,11 +1308,18 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             target_note = f" — Expected: **{db_pro_rata_target}**" if db_pro_rata_target is not None else ""
                             minutes_note = f" *(based on {db_actual_minutes} min)*" if db_actual_minutes is not None else ""
                             time_note = ""
-                            if db_start and db_submitted_at:
+                            # Uses original_start_time -- the tech's true first Start Clock
+                            # click -- rather than db_start, which gets shifted forward by
+                            # Resume to keep the deadline correct after a pause. Falls back to
+                            # db_start for any slot that predates this fix and never got one set.
+                            true_start = db_original_start or db_start
+                            if true_start and db_submitted_at:
                                 try:
-                                    started_fmt = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S").strftime("%I:%M %p").lstrip("0")
+                                    started_fmt = datetime.strptime(true_start, "%Y-%m-%d %H:%M:%S").strftime("%I:%M %p").lstrip("0")
                                     submitted_fmt = datetime.strptime(db_submitted_at, "%Y-%m-%d %H:%M:%S").strftime("%I:%M %p").lstrip("0")
                                     time_note = f" | Started: **{started_fmt}**, Submitted: **{submitted_fmt}**"
+                                    if db_total_paused:
+                                        time_note += f" *(paused {db_total_paused} min total)*"
                                 except Exception:
                                     pass
                             if db_escalated:
@@ -2310,19 +2330,20 @@ with tab_analytics:
 
                 st.markdown("---")
                 st.subheader("📈 Checklist Compliance Trend")
-                st.caption("How many queues were marked Yes / No / still Pending on each day.")
-                checklist_trend_pivot = checklist_hist_df.groupby(["Date", "Status"]).size().unstack(fill_value=0)
-                for missing_status in ["Yes", "No", "Pending"]:
-                    if missing_status not in checklist_trend_pivot.columns:
-                        checklist_trend_pivot[missing_status] = 0
-                st.line_chart(checklist_trend_pivot[["Yes", "No", "Pending"]])
-                st.download_button(
-                    "⬇️ Export Checklist Trend Data (CSV)",
-                    data=checklist_trend_pivot.to_csv().encode("utf-8"),
-                    file_name=f"checklist_trend_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
+                st.caption("How often each checklist item was flagged 'No' on each day -- one line per queue.")
+                no_only_df = checklist_hist_df[checklist_hist_df["Status"] == "No"]
+                if no_only_df.empty:
+                    st.caption("No items were marked 'No' during this timeframe.")
+                else:
+                    checklist_trend_pivot = no_only_df.groupby(["Date", "Queue"]).size().unstack(fill_value=0)
+                    st.line_chart(checklist_trend_pivot)
+                    st.download_button(
+                        "⬇️ Export Checklist Trend Data (CSV)",
+                        data=checklist_trend_pivot.to_csv().encode("utf-8"),
+                        file_name=f"checklist_trend_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
 
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
