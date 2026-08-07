@@ -461,6 +461,17 @@ def initialize_system_database():
         """))
         session.commit()
 
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS red_tags (
+                log_date TEXT,
+                dept_prefix TEXT,
+                tech_name TEXT,
+                count INTEGER DEFAULT 0,
+                PRIMARY KEY (log_date, dept_prefix, tech_name)
+            )
+        """))
+        session.commit()
+
         # SELF-HEALING AUTOMATIC QUEUE RECOVERY SEEDER 
         res = session.execute(text("SELECT COUNT(*) as cnt FROM dynamic_queues")).fetchone()
         if res[0] == 0:
@@ -824,7 +835,7 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
     # after these in whatever order the database returned them, rather than being hidden.
     CUSTOM_QUEUE_ORDER = [
         "On Hold", "ERx Facility", "ERx Regular", "Autofill Facility", "Autofill Regular",
-        "Ekit Non-Controlled", "Ekit Controlled", "PA", "AI/Tech", "Reject",
+        "Reject", "AI/Tech", "PA", "Ekit Controlled", "Ekit Non-Controlled",
     ]
     order_lookup = {name: i for i, name in enumerate(CUSTOM_QUEUE_ORDER)}
     dept_queues = sorted(dept_queues, key=lambda q: order_lookup.get(q.queue_name, len(CUSTOM_QUEUE_ORDER)))
@@ -894,8 +905,10 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         # -- which fires on every button click inside it, plus automatically every 5s. This
         # was very likely the dominant source of the "lag on every submit" you were seeing.
         all_slot_rows = session.execute(text(f"SELECT * FROM {db_table} WHERE log_date=:c_date"), {"c_date": CURRENT_DATE}).fetchall()
+        red_tag_rows = session.execute(text("SELECT tech_name, count FROM red_tags WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": prefix}).fetchall()
 
     slot_lookup = {(r.tech_name, r.slot_id): r for r in all_slot_rows}
+    red_tag_lookup = {r.tech_name: r.count for r in red_tag_rows}
     active_roster = {row.tech_name: {"email": row.tech_email, "webhook": row.tech_webhook} for row in roster_rows}
 
     if not active_roster:
@@ -909,6 +922,26 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         tech_email = tech_profiles["email"]
         
         st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
+
+        red_tag_key = f"redtag_{prefix}_{w_id}_{CURRENT_DATE}"
+        if red_tag_key not in st.session_state:
+            st.session_state[red_tag_key] = int(red_tag_lookup.get(worker, 0))
+        with st.form(key=f"redtag_form_{prefix}_{w_id}_{CURRENT_DATE}", clear_on_submit=False):
+            rt_col1, rt_col2 = st.columns([3, 1])
+            rt_col1.number_input("🔴 Red Tags Today:", min_value=0, step=1, key=red_tag_key)
+            rt_save_clicked = rt_col2.form_submit_button("💾 Save", use_container_width=True)
+        if rt_save_clicked:
+            try:
+                with db_conn.session as session:
+                    session.execute(text("""
+                        INSERT INTO red_tags (log_date, dept_prefix, tech_name, count)
+                        VALUES (:c_date, :pfx, :t_name, :cnt)
+                        ON CONFLICT (log_date, dept_prefix, tech_name) DO UPDATE SET count = EXCLUDED.count
+                    """), {"c_date": CURRENT_DATE, "pfx": prefix, "t_name": worker, "cnt": st.session_state[red_tag_key]})
+                    session.commit()
+                st.success("Red Tags saved.")
+            except Exception as e:
+                st.error(f"⚠️ Couldn't save Red Tags right now: {str(e)}")
         
         if is_mgr_active:
             if st.button(f"👋 Remove {worker} from {dept_label} Screen", key=f"mgr_soft_remove_{prefix}_{w_id}", use_container_width=True):
@@ -1259,6 +1292,49 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 st.error(f"❌ Logged Units: **{db_input}** (Goal Missed{target_note}{minutes_note})")
                             else:
                                 st.success(f"✅ Logged Units: **{db_input}** (Goal Made{target_note}{minutes_note})")
+
+                            if is_mgr_active:
+                                adjust_armed_key = f"adjust_metrics_armed_{prefix}_{w_id}_{slot_num}"
+                                if not st.session_state.get(adjust_armed_key, False):
+                                    if st.button("✏️ Adjust Metrics", key=f"adjust_metrics_btn_{prefix}_{w_id}_{slot_num}", use_container_width=True):
+                                        st.session_state[adjust_armed_key] = True
+                                        fragment_rerun()
+                                else:
+                                    adjust_val_key = f"adjust_val_{prefix}_{w_id}_{slot_num}"
+                                    if adjust_val_key not in st.session_state:
+                                        st.session_state[adjust_val_key] = int(db_input) if db_input is not None else 0
+                                    with st.form(key=f"adjust_metrics_form_{prefix}_{w_id}_{slot_num}", clear_on_submit=False):
+                                        new_val = st.number_input("Corrected Logged Units:", min_value=0, step=1, key=adjust_val_key)
+                                        adj_col1, adj_col2 = st.columns(2)
+                                        adjust_save_clicked = adj_col1.form_submit_button("💾 Save Correction", use_container_width=True)
+                                        adjust_cancel_clicked = adj_col2.form_submit_button("Cancel", use_container_width=True)
+
+                                    if adjust_save_clicked:
+                                        # Re-evaluate goal-met/missed against the ALREADY-computed
+                                        # pro-rata target (from the original elapsed time) --
+                                        # correcting a typo shouldn't retroactively change how
+                                        # long the tech actually took, only whether the corrected
+                                        # count clears that same bar.
+                                        new_escalated = 1 if (db_pro_rata_target is not None and new_val < db_pro_rata_target) else 0
+                                        try:
+                                            with db_conn.session as session:
+                                                session.execute(text(f"UPDATE {db_table} SET input_number=:val, escalated=:esc WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"val": new_val, "esc": new_escalated, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                                # Keep the historical ledger (used by Cumulative
+                                                # Analytics) consistent with this correction too.
+                                                session.execute(text("""
+                                                    UPDATE metrics_history SET input_number=:val, escalated=:esc
+                                                    WHERE log_date=:c_date AND department=:dept AND tech_name=:t_name AND slot_id=:s_id
+                                                """), {"val": new_val, "esc": new_escalated, "c_date": CURRENT_DATE, "dept": dept_label, "t_name": worker, "s_id": slot_num})
+                                                session.commit()
+                                            st.session_state.pop(adjust_armed_key, None)
+                                            st.session_state.pop(adjust_val_key, None)
+                                            fragment_rerun()
+                                        except Exception as e:
+                                            st.error(f"⚠️ Couldn't save this correction right now: {str(e)}")
+                                    if adjust_cancel_clicked:
+                                        st.session_state.pop(adjust_armed_key, None)
+                                        st.session_state.pop(adjust_val_key, None)
+                                        fragment_rerun()
 
 # --- 7. CORE APP ROUTING INTERFACE ---
 tab_de, tab_cc, tab_sh, tab_fi, tab_sched, tab_analytics, tab_mgmt = st.tabs([
@@ -2071,6 +2147,11 @@ with tab_analytics:
         st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to view analytics.")
     else:
         st.header("📊 Cumulative Corporate Analytics Ledger")
+
+        with db_conn.session as session:
+            today_red_tags = session.execute(text("SELECT COALESCE(SUM(count), 0) as total FROM red_tags WHERE log_date=:c_date"), {"c_date": get_current_eastern_date()}).fetchone()
+        st.metric("🔴 Total Red Tags Today (All Techs)", int(today_red_tags.total))
+        st.markdown("---")
     
         date_cols = st.columns(2)
         start_filt = date_cols[0].date_input("Start History Date", value=datetime.now() - timedelta(days=30))
@@ -2120,6 +2201,14 @@ with tab_analytics:
                 })
             
                 st.dataframe(display_df.style.map(lambda val: 'background-color: #ffccd5' if val == '❌ Missed Goal' else 'background-color: #d1e7dd', subset=['True Performance Status']), use_container_width=True, hide_index=True)
+
+                st.download_button(
+                    "⬇️ Export This Report (CSV)",
+                    data=display_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"production_report_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
             
                 true_missed_count = (df_filtered["True Performance Status"] == "❌ Missed Goal").sum()
             
@@ -2142,10 +2231,42 @@ with tab_analytics:
             trend_view_option = st.radio("Group Trend Visualization By:", ["Individual Technician Trends", "Queue Volume Trends"], horizontal=True)
             if display_df.empty:
                 st.caption("No data to chart for the current technician selection.")
-            elif trend_view_option == "Individual Technician Trends":
-                st.line_chart(display_df.groupby(["Date", "Technician Name"])["Logged Units"].sum().unstack(fill_value=0))
             else:
-                st.line_chart(display_df.groupby(["Date", "Assigned Queue"])["Logged Units"].sum().unstack(fill_value=0))
+                if trend_view_option == "Individual Technician Trends":
+                    trend_pivot = display_df.groupby(["Date", "Technician Name"])["Logged Units"].sum().unstack(fill_value=0)
+                else:
+                    trend_pivot = display_df.groupby(["Date", "Assigned Queue"])["Logged Units"].sum().unstack(fill_value=0)
+                st.line_chart(trend_pivot)
+                st.download_button(
+                    "⬇️ Export Trend Data (CSV)",
+                    data=trend_pivot.to_csv().encode("utf-8"),
+                    file_name=f"trend_{trend_view_option.lower().replace(' ', '_')}_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+            st.markdown("---")
+            st.subheader("🔴 Red Tags History")
+            with db_conn.session as session:
+                red_tag_history = session.execute(text("""
+                    SELECT log_date, dept_prefix, tech_name, count FROM red_tags
+                    WHERE log_date >= :start AND log_date <= :end ORDER BY log_date DESC, tech_name
+                """), {"start": start_filt.strftime("%Y-%m-%d"), "end": end_filt.strftime("%Y-%m-%d")}).fetchall()
+            if not red_tag_history:
+                st.caption("No Red Tags logged during this timeframe.")
+            else:
+                red_tag_df = pd.DataFrame(red_tag_history).rename(columns={
+                    "log_date": "Date", "dept_prefix": "Department", "tech_name": "Technician Name", "count": "Red Tags"
+                })
+                st.dataframe(red_tag_df, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Export Red Tags History (CSV)",
+                    data=red_tag_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"red_tags_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
 @st.fragment
