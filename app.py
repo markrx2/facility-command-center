@@ -187,15 +187,17 @@ def initialize_system_database():
                     submitted INTEGER DEFAULT 0,
                     escalated INTEGER DEFAULT 0,
                     pro_rata_target INTEGER DEFAULT NULL,
+                    paused INTEGER DEFAULT 0,
+                    pause_started_at TEXT DEFAULT NULL,
                     PRIMARY KEY (log_date, tech_name, slot_id)
                 )
             """))
-            # Existing deployments already had this table without escalated/pro_rata_target --
-            # add them explicitly so the "Logged Units" display can show the correct
-            # red/green status and expected-goal number for already-submitted slots without
-            # needing to guess after the fact.
+            # Existing deployments already had this table without escalated/pro_rata_target/
+            # paused/pause_started_at -- add them explicitly.
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS escalated INTEGER DEFAULT 0"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS pro_rata_target INTEGER DEFAULT NULL"))
+            session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS paused INTEGER DEFAULT 0"))
+            session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS pause_started_at TEXT DEFAULT NULL"))
             
         session.execute(text("""
             CREATE TABLE IF NOT EXISTS dynamic_queues (
@@ -205,6 +207,16 @@ def initialize_system_database():
                 PRIMARY KEY (dept_prefix, queue_name)
             )
         """))
+        session.commit()
+
+        # Change the Ekit queues' goal unit from "rxs" to "lines" -- case-insensitive
+        # replace, idempotent (a no-op once the text no longer contains "rxs", so safe to
+        # run on every startup rather than needing a one-time guard).
+        session.execute(text("""
+            UPDATE dynamic_queues SET goal_target = regexp_replace(goal_target, 'rxs', 'lines', 'i')
+            WHERE queue_name IN ('Ekit Non-Controlled', 'Ekit Controlled') AND goal_target ~* 'rxs'
+        """))
+        session.commit()
         
         session.execute(text("""
             CREATE TABLE IF NOT EXISTS floor_backlogs (
@@ -592,7 +604,7 @@ def execution_global_background_automation_engine():
         with db_conn.session as session:
             for table_name, prefix, label in dept_mappings:
                 active_timers = session.execute(
-                    text(f"SELECT * FROM {table_name} WHERE log_date = :c_date AND submitted = 0 AND start_time IS NOT NULL"),
+                    text(f"SELECT * FROM {table_name} WHERE log_date = :c_date AND submitted = 0 AND start_time IS NOT NULL AND (paused = 0 OR paused IS NULL)"),
                     {"c_date": CURRENT_DATE}
                 ).fetchall()
                 
@@ -805,46 +817,47 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
 
     volume_lookup = {r.queue_name: r.volume for r in vol_rows}
 
-    autosave_error = st.session_state.pop("_volume_autosave_error", None)
-    if autosave_error:
-        st.error(f"⚠️ Couldn't save a volume number just now: {autosave_error}")
+    save_error = st.session_state.pop("_volume_save_error", None)
+    if save_error:
+        st.error(f"⚠️ Couldn't save volume numbers just now: {save_error}")
 
     st.markdown(f"<h4 style='color: #1e3a8a; font-size:15px; margin-bottom:4px;'>📊 Today's {dept_label} Queue Volume (start-of-day counts, editable anytime)</h4>", unsafe_allow_html=True)
 
-    def _save_volume_on_change(widget_key, dept_prefix, queue_name):
-        """
-        on_change callback -- saves synchronously so a failure is actually visible on screen
-        rather than only logged to a server console nobody's watching. A background-thread
-        version of this was tried for speed, but made it impossible to tell "the value isn't
-        showing because it never saved" apart from any other kind of display issue.
-        """
-        new_value = st.session_state.get(widget_key)
+    # Wrapped in st.form(): same fix that solved the checklist's rapid-refresh problem --
+    # widgets inside a form don't trigger any rerun while you're interacting with them, so
+    # nothing can land mid-edit and reset a number back to its old value. Nothing saves until
+    # the form's own submit button is clicked.
+    with st.form(key=f"volume_form_{dept_prefix}", clear_on_submit=False):
+        entered_values = {}
+        num_cols = min(len(dept_queues), 6) or 1
+        cols = st.columns(num_cols)
+        for i, q in enumerate(dept_queues):
+            with cols[i % num_cols]:
+                current_value = int(volume_lookup.get(q.queue_name, 0))
+                widget_key = f"vol_{dept_prefix}_{q.queue_name}_{CURRENT_DATE}"
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = current_value
+                st.number_input(q.queue_name, min_value=0, step=1, key=widget_key)
+                entered_values[q.queue_name] = widget_key
+
+        volume_save_clicked = st.form_submit_button(f"💾 Save {dept_label} Volume", use_container_width=True)
+
+    if volume_save_clicked:
         try:
             with db_conn.session as session:
-                session.execute(text("""
-                    INSERT INTO queue_volumes (log_date, dept_prefix, queue_name, volume)
-                    VALUES (:c_date, :pfx, :qname, :vol)
-                    ON CONFLICT (log_date, dept_prefix, queue_name) DO UPDATE SET volume = EXCLUDED.volume
-                """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "qname": queue_name, "vol": new_value})
+                for queue_name, widget_key in entered_values.items():
+                    val = st.session_state.get(widget_key, 0)
+                    session.execute(text("""
+                        INSERT INTO queue_volumes (log_date, dept_prefix, queue_name, volume)
+                        VALUES (:c_date, :pfx, :qname, :vol)
+                        ON CONFLICT (log_date, dept_prefix, queue_name) DO UPDATE SET volume = EXCLUDED.volume
+                    """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "qname": queue_name, "vol": val})
                 session.commit()
+            st.success(f"{dept_label} volume saved.")
+            st.rerun()
         except Exception as e:
-            st.session_state["_volume_autosave_error"] = str(e)
-
-    num_cols = min(len(dept_queues), 6) or 1
-    cols = st.columns(num_cols)
-    for i, q in enumerate(dept_queues):
-        with cols[i % num_cols]:
-            current_value = int(volume_lookup.get(q.queue_name, 0))
-            widget_key = f"vol_{dept_prefix}_{q.queue_name}_{CURRENT_DATE}"
-            # Seed only the very first time this key has ever existed in this session --
-            # never re-checked afterward. A coworker's saved change won't appear until this
-            # browser tab is reloaded (a fresh session, empty state, seeds fresh from the DB).
-            if widget_key not in st.session_state:
-                st.session_state[widget_key] = current_value
-            st.number_input(
-                q.queue_name, min_value=0, step=1, key=widget_key,
-                on_change=_save_volume_on_change, args=(widget_key, dept_prefix, q.queue_name)
-            )
+            st.session_state["_volume_save_error"] = str(e)
+            st.rerun()
 
     st.markdown("<hr style='margin: 8px 0px 14px 0px !important; border-top: 2px solid #cbd5e1;'>", unsafe_allow_html=True)
 
@@ -904,7 +917,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     slot_row = slot_lookup.get((worker, slot_num))
                     
                     if is_mgr_active:
-                        admin_btn_col1, admin_btn_col2 = st.columns(2)
+                        admin_btn_col1, admin_btn_col2, admin_btn_col3 = st.columns(3)
                         
                         if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
                             try:
@@ -912,7 +925,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     session.execute(text(f"""
                                         UPDATE {db_table} 
                                         SET queue=NULL, goal=NULL, start_time=NULL, duration_minutes=60, input_number=NULL, 
-                                            tech_notified=0, supervisor_notified=0, submitted=0 
+                                            tech_notified=0, supervisor_notified=0, submitted=0, paused=0, pause_started_at=NULL
                                         WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id
                                     """), {"c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
                                     session.commit()
@@ -934,6 +947,36 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     fragment_rerun()
                                 except Exception as e:
                                     st.error(f"⚠️ Couldn't reset this clock right now: {str(e)}")
+
+                        slot_is_active = slot_row is not None and slot_row.queue is not None and slot_row.start_time is not None and slot_row.submitted == 0
+                        slot_is_paused = slot_is_active and getattr(slot_row, "paused", 0)
+                        if slot_is_active and not slot_is_paused:
+                            if admin_btn_col3.button("⏸️ Pause", key=f"admin_pause_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
+                                try:
+                                    pause_start_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
+                                    with db_conn.session as session:
+                                        session.execute(text(f"UPDATE {db_table} SET paused=1, pause_started_at=:pst WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"pst": pause_start_str, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                        session.commit()
+                                    fragment_rerun()
+                                except Exception as e:
+                                    st.error(f"⚠️ Couldn't pause this slot right now: {str(e)}")
+                        elif slot_is_paused:
+                            if admin_btn_col3.button("▶️ Resume", key=f"admin_resume_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="primary"):
+                                try:
+                                    pause_started = datetime.strptime(slot_row.pause_started_at, "%Y-%m-%d %H:%M:%S")
+                                    paused_duration = now_eastern_naive() - pause_started
+                                    old_start = datetime.strptime(slot_row.start_time, "%Y-%m-%d %H:%M:%S")
+                                    # Shift the deadline forward by however long it was paused,
+                                    # so the tech doesn't lose that time off their block.
+                                    new_start = old_start + paused_duration
+                                    with db_conn.session as session:
+                                        session.execute(text(f"UPDATE {db_table} SET paused=0, pause_started_at=NULL, start_time=:st WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id"), {"st": new_start.strftime("%Y-%m-%d %H:%M:%S"), "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                        session.commit()
+                                    fragment_rerun()
+                                except Exception as e:
+                                    st.error(f"⚠️ Couldn't resume this slot right now: {str(e)}")
+                        else:
+                            admin_btn_col3.button("⏸️ Pause", key=f"admin_pause_disabled_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary", disabled=True)
                     
                     if not slot_row or slot_row.queue is None:
                         if goals_dict:
@@ -941,7 +984,10 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             base_goal_str = goals_dict[chosen_q]
                             
                             durations = {"30 Minutes": 30, "1 Hour": 60, "2 Hours": 120, "4 Hours": 240, "8 Hours": 480}
-                            chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), index=1, key=f"dur_{prefix}_{w_id}_{slot_num}")
+                            dur_key = f"dur_{prefix}_{w_id}_{slot_num}"
+                            if dur_key not in st.session_state:
+                                st.session_state[dur_key] = "1 Hour"
+                            chosen_dur_label = st.selectbox("Block Duration:", options=list(durations.keys()), key=dur_key)
                             chosen_dur_min = durations[chosen_dur_label]
                             
                             numeric_match = re.search(r'\d+', str(base_goal_str))
@@ -1011,7 +1057,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         fifteen_min_overdue_time = end_time + timedelta(minutes=15)
                         current_now = now_eastern_naive()
                         
-                        if current_now < end_time and not db_sub:
+                        if getattr(slot_row, "paused", 0):
+                            st.warning("⏸️ Paused by admin")
+                        elif current_now < end_time and not db_sub:
                             rem = end_time - current_now
                             total_rem_seconds = int(rem.total_seconds())
                             total_alloc_seconds = int(db_dur_min) * 60
@@ -1576,19 +1624,25 @@ def render_autoscheduler_tab():
             if excl_save_error:
                 st.error(f"⚠️ Couldn't save exclusion changes right now: {excl_save_error}")
 
-            excl_widget_keys = {}
-            for r in roster_rows:
-                tech_name = r.tech_name
-                t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
-                true_exclusions = sorted([q for q in existing_exclusions.get(tech_name, []) if q in dept_queue_names])
-                widget_key = f"excl_{dept_prefix}_{t_id}"
-                if widget_key not in st.session_state:
-                    st.session_state[widget_key] = true_exclusions
-                excl_widget_keys[tech_name] = widget_key
+            # Wrapped in st.form(): same fix that solved the checklist and ribbon's
+            # rapid-refresh problem -- nothing reruns while selecting, nothing saves until
+            # this form's own submit button is clicked.
+            with st.form(key=f"exclusions_form_{dept_prefix}", clear_on_submit=False):
+                excl_widget_keys = {}
+                for r in roster_rows:
+                    tech_name = r.tech_name
+                    t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
+                    true_exclusions = sorted([q for q in existing_exclusions.get(tech_name, []) if q in dept_queue_names])
+                    widget_key = f"excl_{dept_prefix}_{t_id}"
+                    if widget_key not in st.session_state:
+                        st.session_state[widget_key] = true_exclusions
+                    excl_widget_keys[tech_name] = widget_key
 
-                st.multiselect(f"{tech_name}", options=dept_queue_names, key=widget_key)
+                    st.multiselect(f"{tech_name}", options=dept_queue_names, key=widget_key)
 
-            if st.button(f"💾 Save {dept_label} Exclusions", key=f"excl_save_btn_{dept_prefix}", use_container_width=True):
+                excl_save_clicked = st.form_submit_button(f"💾 Save {dept_label} Exclusions", use_container_width=True)
+
+            if excl_save_clicked:
                 try:
                     with db_conn.session as session:
                         for tech_name, widget_key in excl_widget_keys.items():
@@ -1602,10 +1656,10 @@ def render_autoscheduler_tab():
                                 """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
                         session.commit()
                     st.success("Exclusions saved.")
-                    fragment_rerun()
+                    st.rerun()
                 except Exception as e:
                     st.session_state["_exclusions_save_error"] = str(e)
-                    fragment_rerun()
+                    st.rerun()
 
         st.markdown("---")
         st.subheader(f"⚙️ {dept_label} — Generate Proposal")
@@ -2022,14 +2076,16 @@ def render_daily_verification_section():
         with f_col:
             with st.container(border=True):
                 t_obj = datetime.strptime(chk.reminder_time, "%H:%M").time()
-                new_target_time = st.time_input("Set Verification Deadline (EST):", value=t_obj, key="checklist_deadline_widget")
+                if "checklist_deadline_widget" not in st.session_state:
+                    st.session_state["checklist_deadline_widget"] = t_obj
+                new_target_time = st.time_input("Set Verification Deadline (EST):", key="checklist_deadline_widget")
                 if st.button("Update Deadline", key="checklist_deadline_update_btn", use_container_width=True):
                     try:
                         with db_conn.session as session:
                             session.execute(text("UPDATE daily_checklist SET reminder_time=:rt, reminder_sent=0, supervisor_escaped=0 WHERE log_date=:c_date"), {"rt": new_target_time.strftime("%H:%M"), "c_date": CURRENT_DATE})
                             session.commit()
                         st.success(f"Deadline updated to {new_target_time.strftime('%H:%M')} EST.")
-                        fragment_rerun()
+                        st.rerun()
                     except Exception as e:
                         st.error(f"⚠️ Couldn't update the deadline right now: {str(e)}")
 
