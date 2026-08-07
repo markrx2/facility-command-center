@@ -190,16 +190,18 @@ def initialize_system_database():
                     paused INTEGER DEFAULT 0,
                     pause_started_at TEXT DEFAULT NULL,
                     actual_minutes_used INTEGER DEFAULT NULL,
+                    submitted_at TEXT DEFAULT NULL,
                     PRIMARY KEY (log_date, tech_name, slot_id)
                 )
             """))
             # Existing deployments already had this table without escalated/pro_rata_target/
-            # paused/pause_started_at/actual_minutes_used -- add them explicitly.
+            # paused/pause_started_at/actual_minutes_used/submitted_at -- add them explicitly.
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS escalated INTEGER DEFAULT 0"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS pro_rata_target INTEGER DEFAULT NULL"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS paused INTEGER DEFAULT 0"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS pause_started_at TEXT DEFAULT NULL"))
             session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS actual_minutes_used INTEGER DEFAULT NULL"))
+            session.execute(text(f"ALTER TABLE {t_name} ADD COLUMN IF NOT EXISTS submitted_at TEXT DEFAULT NULL"))
             
         session.execute(text("""
             CREATE TABLE IF NOT EXISTS dynamic_queues (
@@ -1160,6 +1162,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         db_escalated = getattr(slot_row, "escalated", 0)
                         db_pro_rata_target = getattr(slot_row, "pro_rata_target", None)
                         db_actual_minutes = getattr(slot_row, "actual_minutes_used", None)
+                        db_submitted_at = getattr(slot_row, "submitted_at", None)
                         
                         numeric_match = re.search(r'\d+', str(db_goal))
                         if numeric_match:
@@ -1260,9 +1263,9 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                         """), {"c_date": CURRENT_DATE, "dept": dept_label, "t_name": worker, "s_id": slot_num, "queue": db_queue, "goal": db_goal, "val": val, "esc": is_escalated, "ts": time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), "dur": actual_minutes_used})
                                         
                                         session.execute(text(f"""
-                                            UPDATE {db_table} SET input_number=:val, submitted=1, escalated=:esc, pro_rata_target=:prt, actual_minutes_used=:amu
+                                            UPDATE {db_table} SET input_number=:val, submitted=1, escalated=:esc, pro_rata_target=:prt, actual_minutes_used=:amu, submitted_at=:sat
                                             WHERE log_date=:c_date AND tech_name=:t_name AND slot_id=:s_id
-                                        """), {"val": val, "esc": is_escalated, "prt": dynamic_target_threshold, "amu": actual_minutes_used, "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
+                                        """), {"val": val, "esc": is_escalated, "prt": dynamic_target_threshold, "amu": actual_minutes_used, "sat": time_logged_now.strftime("%Y-%m-%d %H:%M:%S"), "c_date": CURRENT_DATE, "t_name": worker, "s_id": slot_num})
 
                                         session.commit()
 
@@ -1291,10 +1294,18 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         else:
                             target_note = f" — Expected: **{db_pro_rata_target}**" if db_pro_rata_target is not None else ""
                             minutes_note = f" *(based on {db_actual_minutes} min)*" if db_actual_minutes is not None else ""
+                            time_note = ""
+                            if db_start and db_submitted_at:
+                                try:
+                                    started_fmt = datetime.strptime(db_start, "%Y-%m-%d %H:%M:%S").strftime("%I:%M %p").lstrip("0")
+                                    submitted_fmt = datetime.strptime(db_submitted_at, "%Y-%m-%d %H:%M:%S").strftime("%I:%M %p").lstrip("0")
+                                    time_note = f" | Started: **{started_fmt}**, Submitted: **{submitted_fmt}**"
+                                except Exception:
+                                    pass
                             if db_escalated:
-                                st.error(f"❌ Logged Units: **{db_input}** (Goal Missed{target_note}{minutes_note})")
+                                st.error(f"❌ Logged Units: **{db_input}** (Goal Missed{target_note}{minutes_note}{time_note})")
                             else:
-                                st.success(f"✅ Logged Units: **{db_input}** (Goal Made{target_note}{minutes_note})")
+                                st.success(f"✅ Logged Units: **{db_input}** (Goal Made{target_note}{minutes_note}{time_note})")
 
                             if is_mgr_active:
                                 adjust_armed_key = f"adjust_metrics_armed_{prefix}_{w_id}_{slot_num}"
@@ -2266,6 +2277,33 @@ with tab_analytics:
                     "⬇️ Export Red Tags History (CSV)",
                     data=red_tag_df.to_csv(index=False).encode("utf-8"),
                     file_name=f"red_tags_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+            st.markdown("---")
+            st.subheader("📋 Daily Queue Verification Checklist History")
+            st.caption("Every day's checklist entries are already stored permanently -- this is a view into that accumulated history, since there wasn't previously a way to see it beyond today.")
+            with db_conn.session as session:
+                checklist_history = session.execute(text("""
+                    SELECT e.log_date, i.label, e.status, e.oldest_date, e.target_date, e.verified_by, e.notes
+                    FROM checklist_entries e
+                    JOIN checklist_items i ON e.item_key = i.item_key
+                    WHERE e.log_date >= :start AND e.log_date <= :end
+                    ORDER BY e.log_date DESC, i.sort_order
+                """), {"start": start_filt.strftime("%Y-%m-%d"), "end": end_filt.strftime("%Y-%m-%d")}).fetchall()
+            if not checklist_history:
+                st.caption("No checklist entries recorded during this timeframe.")
+            else:
+                checklist_hist_df = pd.DataFrame(checklist_history).rename(columns={
+                    "log_date": "Date", "label": "Queue", "status": "Status", "oldest_date": "Oldest Date",
+                    "target_date": "Target Date", "verified_by": "Verified By", "notes": "Notes",
+                })
+                st.dataframe(checklist_hist_df, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Export Checklist History (CSV)",
+                    data=checklist_hist_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"checklist_history_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
                     mime="text/csv",
                     use_container_width=True,
                 )
