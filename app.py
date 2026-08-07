@@ -2308,6 +2308,22 @@ with tab_analytics:
                     use_container_width=True,
                 )
 
+                st.markdown("---")
+                st.subheader("📈 Checklist Compliance Trend")
+                st.caption("How many queues were marked Yes / No / still Pending on each day.")
+                checklist_trend_pivot = checklist_hist_df.groupby(["Date", "Status"]).size().unstack(fill_value=0)
+                for missing_status in ["Yes", "No", "Pending"]:
+                    if missing_status not in checklist_trend_pivot.columns:
+                        checklist_trend_pivot[missing_status] = 0
+                st.line_chart(checklist_trend_pivot[["Yes", "No", "Pending"]])
+                st.download_button(
+                    "⬇️ Export Checklist Trend Data (CSV)",
+                    data=checklist_trend_pivot.to_csv().encode("utf-8"),
+                    file_name=f"checklist_trend_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
 @st.fragment
