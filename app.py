@@ -921,15 +921,18 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
         w_id = hashlib.md5(worker.encode('utf-8')).hexdigest()[:8]
         tech_email = tech_profiles["email"]
         
-        st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
-
         red_tag_key = f"redtag_{prefix}_{w_id}_{CURRENT_DATE}"
         if red_tag_key not in st.session_state:
             st.session_state[red_tag_key] = int(red_tag_lookup.get(worker, 0))
         with st.form(key=f"redtag_form_{prefix}_{w_id}_{CURRENT_DATE}", clear_on_submit=False):
-            rt_col1, rt_col2 = st.columns([3, 1])
-            rt_col1.number_input("🔴 Red Tags Today:", min_value=0, step=1, key=red_tag_key)
-            rt_save_clicked = rt_col2.form_submit_button("💾 Save", use_container_width=True)
+            header_col1, header_col2, header_col3 = st.columns([5, 1, 1])
+            with header_col1:
+                st.markdown(f"### 👤 TECHNICIAN: {worker.upper()} `({tech_email if tech_email else 'No Email Set'})`")
+            with header_col2:
+                st.number_input("🔴 Red Tags:", min_value=0, step=1, key=red_tag_key)
+            with header_col3:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                rt_save_clicked = st.form_submit_button("💾 Save", use_container_width=True)
         if rt_save_clicked:
             try:
                 with db_conn.session as session:
