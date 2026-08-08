@@ -2309,7 +2309,8 @@ with tab_analytics:
             st.caption("Every day's checklist entries are already stored permanently -- this is a view into that accumulated history, since there wasn't previously a way to see it beyond today.")
             with db_conn.session as session:
                 checklist_history = session.execute(text("""
-                    SELECT e.log_date, i.label, e.status, e.oldest_date, e.target_date, e.verified_by, e.notes
+                    SELECT e.log_date, i.label, e.status, e.oldest_date, e.target_date, e.verified_by, e.notes,
+                           i.aging_basis, i.red_threshold_days
                     FROM checklist_entries e
                     JOIN checklist_items i ON e.item_key = i.item_key
                     WHERE e.log_date >= :start AND e.log_date <= :end
@@ -2318,10 +2319,30 @@ with tab_analytics:
             if not checklist_history:
                 st.caption("No checklist entries recorded during this timeframe.")
             else:
+                def _compute_aging_asof(row):
+                    # Aging as of the entry's OWN log_date, not today -- using today's date
+                    # here would make every past day's "today_minus_oldest" entries show
+                    # whatever their aging would be right now, which is wrong for a
+                    # historical report; it should reflect what the aging actually was then.
+                    try:
+                        asof = datetime.strptime(row.log_date, "%Y-%m-%d").date()
+                        odt = datetime.strptime(row.oldest_date, "%Y-%m-%d").date() if row.oldest_date else asof
+                        tdt = datetime.strptime(row.target_date, "%Y-%m-%d").date() if row.target_date else asof
+                        delta = (asof - odt).days if row.aging_basis == "today_minus_oldest" else (tdt - odt).days
+                        threshold = row.red_threshold_days or 0
+                        return pd.Series([delta, "No" if delta >= threshold else "Yes"])
+                    except Exception:
+                        return pd.Series([None, None])
+
                 checklist_hist_df = pd.DataFrame(checklist_history).rename(columns={
                     "log_date": "Date", "label": "Queue", "status": "Status", "oldest_date": "Oldest Date",
                     "target_date": "Target Date", "verified_by": "Verified By", "notes": "Notes",
                 })
+                checklist_hist_df[["Aging (Days)", "Met Aging Goal"]] = pd.DataFrame(checklist_history)[
+                    ["log_date", "oldest_date", "target_date", "aging_basis", "red_threshold_days"]
+                ].apply(lambda r: _compute_aging_asof(r), axis=1)
+                checklist_hist_df = checklist_hist_df[["Date", "Queue", "Status", "Oldest Date", "Target Date", "Aging (Days)", "Met Aging Goal", "Verified By", "Notes"]]
+
                 st.dataframe(checklist_hist_df, use_container_width=True, hide_index=True)
                 st.download_button(
                     "⬇️ Export Checklist History (CSV)",
