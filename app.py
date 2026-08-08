@@ -2134,28 +2134,65 @@ def render_queue_management_tab():
             else:
                 for it in current_checklist_items:
                     with st.container(border=True):
-                        ic1, ic2 = st.columns([3, 1])
-                        ic1.markdown(f"**{it.label}**")
-                        basis_label = "Target date vs Oldest date" if it.aging_basis == "target_minus_oldest" else "Today vs Oldest date"
-                        ic1.caption(f"Aging basis: {basis_label} | Turns red at {it.red_threshold_days}+ days")
-                        if ic2.button("🗑️ Remove", key=f"del_checklist_item_{it.item_key}", use_container_width=True):
-                            try:
-                                with db_conn.session as session:
-                                    session.execute(text("DELETE FROM checklist_items WHERE item_key=:k"), {"k": it.item_key})
-                                    session.commit()
+                        edit_item_armed_key = f"edit_checklist_item_armed_{it.item_key}"
+                        if not st.session_state.get(edit_item_armed_key, False):
+                            ic1, ic2, ic3 = st.columns([3, 0.7, 0.7])
+                            ic1.markdown(f"**{it.label}**")
+                            ic1.caption(f"Turns red at {it.red_threshold_days}+ days old (Target Date auto-calculated from this)")
+                            if ic2.button("✏️ Edit", key=f"edit_checklist_item_{it.item_key}", use_container_width=True):
+                                st.session_state[edit_item_armed_key] = True
                                 fragment_rerun()
-                            except Exception as e:
-                                st.error(f"⚠️ Couldn't remove this item right now: {str(e)}")
+                            if ic3.button("🗑️ Remove", key=f"del_checklist_item_{it.item_key}", use_container_width=True):
+                                try:
+                                    with db_conn.session as session:
+                                        session.execute(text("DELETE FROM checklist_items WHERE item_key=:k"), {"k": it.item_key})
+                                        session.commit()
+                                    fragment_rerun()
+                                except Exception as e:
+                                    st.error(f"⚠️ Couldn't remove this item right now: {str(e)}")
+                        else:
+                            edit_label_key = f"edit_checklist_label_{it.item_key}"
+                            edit_threshold_key = f"edit_checklist_threshold_{it.item_key}"
+                            if edit_label_key not in st.session_state:
+                                st.session_state[edit_label_key] = it.label
+                            if edit_threshold_key not in st.session_state:
+                                st.session_state[edit_threshold_key] = it.red_threshold_days
+
+                            with st.form(key=f"edit_checklist_item_form_{it.item_key}", clear_on_submit=False):
+                                edit_c1, edit_c2 = st.columns([3, 1])
+                                edit_c1.text_input("Label", key=edit_label_key)
+                                edit_c2.number_input("Red threshold (days)", min_value=1, step=1, key=edit_threshold_key)
+                                save_col, cancel_col = st.columns(2)
+                                save_edit_clicked = save_col.form_submit_button("💾 Save Changes", use_container_width=True)
+                                cancel_edit_clicked = cancel_col.form_submit_button("Cancel", use_container_width=True)
+
+                            if save_edit_clicked:
+                                new_label = st.session_state[edit_label_key].strip()
+                                if new_label:
+                                    try:
+                                        with db_conn.session as session:
+                                            session.execute(text("""
+                                                UPDATE checklist_items SET label=:l, red_threshold_days=:t WHERE item_key=:k
+                                            """), {"l": new_label, "t": int(st.session_state[edit_threshold_key]), "k": it.item_key})
+                                            session.commit()
+                                        st.session_state.pop(edit_item_armed_key, None)
+                                        st.session_state.pop(edit_label_key, None)
+                                        st.session_state.pop(edit_threshold_key, None)
+                                        fragment_rerun()
+                                    except Exception as e:
+                                        st.error(f"⚠️ Couldn't save changes to this item right now: {str(e)}")
+                                else:
+                                    st.warning("Label can't be empty.")
+                            if cancel_edit_clicked:
+                                st.session_state.pop(edit_item_armed_key, None)
+                                st.session_state.pop(edit_label_key, None)
+                                st.session_state.pop(edit_threshold_key, None)
+                                fragment_rerun()
 
             st.markdown("---")
             st.caption("Add a new checklist row:")
-            add_c1, add_c2, add_c3, add_c4 = st.columns([2, 2, 1, 1])
+            add_c1, add_c3, add_c4 = st.columns([3, 1, 1])
             new_checklist_label = add_c1.text_input("Label", key="new_checklist_item_label")
-            new_checklist_basis = add_c2.selectbox(
-                "Aging basis", options=["target_minus_oldest", "today_minus_oldest"],
-                format_func=lambda x: "Target date vs Oldest date" if x == "target_minus_oldest" else "Today vs Oldest date",
-                key="new_checklist_item_basis"
-            )
             new_checklist_threshold = add_c3.number_input("Red threshold (days)", min_value=1, step=1, value=7, key="new_checklist_item_threshold")
             if add_c4.button("➕ Add", key="add_checklist_item_btn", use_container_width=True):
                 if new_checklist_label.strip():
@@ -2166,9 +2203,9 @@ def render_queue_management_tab():
                             max_order = max_order_row.m if max_order_row else 0
                             session.execute(text("""
                                 INSERT INTO checklist_items (item_key, label, aging_basis, red_threshold_days, sort_order)
-                                VALUES (:k, :l, :b, :t, :o)
-                                ON CONFLICT (item_key) DO UPDATE SET label=EXCLUDED.label, aging_basis=EXCLUDED.aging_basis, red_threshold_days=EXCLUDED.red_threshold_days
-                            """), {"k": item_key, "l": new_checklist_label.strip(), "b": new_checklist_basis, "t": int(new_checklist_threshold), "o": max_order + 1})
+                                VALUES (:k, :l, 'today_minus_oldest', :t, :o)
+                                ON CONFLICT (item_key) DO UPDATE SET label=EXCLUDED.label, red_threshold_days=EXCLUDED.red_threshold_days
+                            """), {"k": item_key, "l": new_checklist_label.strip(), "t": int(new_checklist_threshold), "o": max_order + 1})
                             session.commit()
                         fragment_rerun()
                     except Exception as e:
@@ -2322,14 +2359,15 @@ with tab_analytics:
             else:
                 def _compute_aging_asof(row):
                     # Aging as of the entry's OWN log_date, not today -- using today's date
-                    # here would make every past day's "today_minus_oldest" entries show
-                    # whatever their aging would be right now, which is wrong for a
-                    # historical report; it should reflect what the aging actually was then.
+                    # here would make every past day's entries show whatever their aging would
+                    # be right now, which is wrong for a historical report; it should reflect
+                    # what the aging actually was on that day. Always based on that day's date
+                    # minus Oldest Date -- Target Date is a reference value only, same as the
+                    # live checklist.
                     try:
                         asof = datetime.strptime(row.log_date, "%Y-%m-%d").date()
                         odt = datetime.strptime(row.oldest_date, "%Y-%m-%d").date() if row.oldest_date else asof
-                        tdt = datetime.strptime(row.target_date, "%Y-%m-%d").date() if row.target_date else asof
-                        delta = (asof - odt).days if row.aging_basis == "today_minus_oldest" else (tdt - odt).days
+                        delta = (asof - odt).days
                         threshold = row.red_threshold_days or 0
                         return pd.Series([delta, "No" if delta >= threshold else "Yes"])
                     except Exception:
@@ -2340,7 +2378,7 @@ with tab_analytics:
                     "target_date": "Target Date", "verified_by": "Verified By", "notes": "Notes",
                 })
                 checklist_hist_df[["Aging (Days)", "Met Aging Goal"]] = pd.DataFrame(checklist_history)[
-                    ["log_date", "oldest_date", "target_date", "aging_basis", "red_threshold_days"]
+                    ["log_date", "oldest_date", "red_threshold_days"]
                 ].apply(lambda r: _compute_aging_asof(r), axis=1)
                 checklist_hist_df = checklist_hist_df[["Date", "Queue", "Status", "Oldest Date", "Target Date", "Aging (Days)", "Met Aging Goal", "Verified By", "Notes"]]
 
@@ -2449,14 +2487,23 @@ def render_daily_verification_section():
                 st.info("No checklist items configured yet. Add some from ⚙️ Manage Checklist Items above.")
                 return
 
-            def parse_stored_date(val):
-                if not val or str(val).strip() == "": return datetime.now().date()
+            def parse_stored_date(val, fallback):
+                if not val or str(val).strip() == "": return fallback
                 try: return datetime.strptime(str(val).strip(), "%Y-%m-%d").date()
-                except: return datetime.now().date()
+                except: return fallback
 
-            def compute_aging(aging_basis, red_threshold, odt, tdt):
+            def compute_auto_target_date(red_threshold):
+                """Target Date = today - (threshold - 1) -- the latest an Oldest Date can be
+                and still not already be in the red zone as of today."""
+                return datetime.now().date() - timedelta(days=max(0, red_threshold - 1))
+
+            def compute_aging(red_threshold, odt):
+                # Redness is always based on today's actual date, not the (now reference-only)
+                # Target Date -- this used to branch on aging_basis (today_minus_oldest vs
+                # target_minus_oldest), but that distinction is retired now that Target Date
+                # is auto-computed from today rather than manually entered.
                 try:
-                    date_delta = (datetime.now().date() - odt).days if aging_basis == "today_minus_oldest" else (tdt - odt).days
+                    date_delta = (datetime.now().date() - odt).days
                     is_red = date_delta >= red_threshold
                     badge = f"🚨 {date_delta} Days" if is_red else (f"⚠️ {date_delta} Days" if date_delta > 0 else "✅ Current")
                     return date_delta, is_red, badge
@@ -2481,8 +2528,12 @@ def render_daily_verification_section():
                 for item in checklist_items:
                     entry = entries_by_key.get(item.item_key)
                     stored_status = entry.status if entry else "Pending"
-                    stored_odt = parse_stored_date(entry.oldest_date if entry else "")
-                    stored_tdt = parse_stored_date(entry.target_date if entry else "")
+                    auto_target = compute_auto_target_date(item.red_threshold_days)
+                    stored_odt = parse_stored_date(entry.oldest_date if entry else "", datetime.now().date())
+                    # Target Date defaults to the auto-computed value when there's no entry
+                    # yet for today -- an admin can still override it, and once they do, that
+                    # saved value is what's used from then on (same as any other saved field).
+                    stored_tdt = parse_stored_date(entry.target_date if entry else "", auto_target)
                     stored_by = entry.verified_by if entry else ""
                     stored_notes = entry.notes if entry else ""
 
@@ -2509,12 +2560,14 @@ def render_daily_verification_section():
                     # clicked, since nothing reruns inside a form) -- but the value stored into
                     # form_states below uses the actual current widget values, so deficiency
                     # detection on Submit is still correct even though the badge display lags.
-                    _, _, badge = compute_aging(item.aging_basis, item.red_threshold_days, stored_odt, stored_tdt)
+                    # Redness is based purely on today's date vs Oldest Date -- Target Date is
+                    # a reference value only and doesn't factor into the aging calculation.
+                    _, _, badge = compute_aging(item.red_threshold_days, stored_odt)
                     cols[4].markdown(badge)
                     curr_by = cols[5].text_input("Verified By", key=by_key, label_visibility="collapsed")
                     curr_notes = cols[6].text_input("Notes/Explanations", key=notes_key, label_visibility="collapsed")
 
-                    live_delta, live_is_red, _ = compute_aging(item.aging_basis, item.red_threshold_days, curr_odt, curr_tdt)
+                    live_delta, live_is_red, _ = compute_aging(item.red_threshold_days, curr_odt)
                     form_states[item.item_key] = {
                         "label": item.label, "status": curr_status, "odt": str(curr_odt), "tdt": str(curr_tdt),
                         "by": curr_by, "notes": curr_notes, "is_red": live_is_red, "delta": live_delta
