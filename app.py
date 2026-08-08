@@ -2229,8 +2229,8 @@ with tab_analytics:
         st.markdown("---")
     
         date_cols = st.columns(2)
-        start_filt = date_cols[0].date_input("Start History Date", value=datetime.now() - timedelta(days=30))
-        end_filt = date_cols[1].date_input("End History Date", value=datetime.now())
+        start_filt = date_cols[0].date_input("Start History Date", value=datetime.now() - timedelta(days=30), format="MM/DD/YYYY")
+        end_filt = date_cols[1].date_input("End History Date", value=datetime.now(), format="MM/DD/YYYY")
     
         query = text("""
             SELECT log_date, department, tech_name, queue, goal, input_number, duration_minutes 
@@ -2274,12 +2274,19 @@ with tab_analytics:
                 ]].rename(columns={
                     "log_date": "Date", "tech_name": "Technician Name", "department": "Department", "queue": "Assigned Queue", "input_number": "Logged Units"
                 })
+                # display_df's Date column stays in sortable ISO form -- it feeds the trend
+                # chart's chronological grouping below, where MM/DD/YYYY strings would sort
+                # incorrectly across year boundaries (e.g. "01/01/2026" would alphabetically
+                # sort before "12/01/2025"). table_view_df is a separate copy, reformatted for
+                # display and export only.
+                table_view_df = display_df.copy()
+                table_view_df["Date"] = pd.to_datetime(table_view_df["Date"]).dt.strftime("%m/%d/%Y")
             
-                st.dataframe(display_df.style.map(lambda val: 'background-color: #ffccd5' if val == '❌ Missed Goal' else 'background-color: #d1e7dd', subset=['True Performance Status']), use_container_width=True, hide_index=True)
+                st.dataframe(table_view_df.style.map(lambda val: 'background-color: #ffccd5' if val == '❌ Missed Goal' else 'background-color: #d1e7dd', subset=['True Performance Status']), use_container_width=True, hide_index=True)
 
                 st.download_button(
                     "⬇️ Export This Report (CSV)",
-                    data=display_df.to_csv(index=False).encode("utf-8"),
+                    data=table_view_df.to_csv(index=False).encode("utf-8"),
                     file_name=f"production_report_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
                     mime="text/csv",
                     use_container_width=True,
@@ -2311,6 +2318,9 @@ with tab_analytics:
                     trend_pivot = display_df.groupby(["Date", "Technician Name"])["Logged Units"].sum().unstack(fill_value=0)
                 else:
                     trend_pivot = display_df.groupby(["Date", "Assigned Queue"])["Logged Units"].sum().unstack(fill_value=0)
+                # Reformatted AFTER grouping/sorting is already correctly done using sortable
+                # ISO dates -- safe to relabel the index now without affecting chronological order.
+                trend_pivot.index = pd.to_datetime(trend_pivot.index).strftime("%m/%d/%Y")
                 st.line_chart(trend_pivot)
                 st.download_button(
                     "⬇️ Export Trend Data (CSV)",
@@ -2333,6 +2343,7 @@ with tab_analytics:
                 red_tag_df = pd.DataFrame(red_tag_history).rename(columns={
                     "log_date": "Date", "dept_prefix": "Department", "tech_name": "Technician Name", "count": "Red Tags"
                 })
+                red_tag_df["Date"] = pd.to_datetime(red_tag_df["Date"]).dt.strftime("%m/%d/%Y")
                 st.dataframe(red_tag_df, use_container_width=True, hide_index=True)
                 st.download_button(
                     "⬇️ Export Red Tags History (CSV)",
@@ -2382,10 +2393,18 @@ with tab_analytics:
                 ].apply(lambda r: _compute_aging_asof(r), axis=1)
                 checklist_hist_df = checklist_hist_df[["Date", "Queue", "Status", "Oldest Date", "Target Date", "Aging (Days)", "Met Aging Goal", "Verified By", "Notes"]]
 
-                st.dataframe(checklist_hist_df, use_container_width=True, hide_index=True)
+                # checklist_hist_df's Date/Oldest Date/Target Date columns stay in sortable ISO
+                # form -- Date feeds the trend chart's chronological grouping below, where
+                # MM/DD/YYYY strings would sort incorrectly across year boundaries.
+                # checklist_table_view is a separate copy, reformatted for display/export only.
+                checklist_table_view = checklist_hist_df.copy()
+                for date_col in ["Date", "Oldest Date", "Target Date"]:
+                    checklist_table_view[date_col] = pd.to_datetime(checklist_table_view[date_col], errors="coerce").dt.strftime("%m/%d/%Y")
+
+                st.dataframe(checklist_table_view, use_container_width=True, hide_index=True)
                 st.download_button(
                     "⬇️ Export Checklist History (CSV)",
-                    data=checklist_hist_df.to_csv(index=False).encode("utf-8"),
+                    data=checklist_table_view.to_csv(index=False).encode("utf-8"),
                     file_name=f"checklist_history_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
                     mime="text/csv",
                     use_container_width=True,
@@ -2409,14 +2428,18 @@ with tab_analytics:
                         st.caption("Select at least one category to see the chart.")
                     else:
                         checklist_trend_pivot = filtered_trend_df.groupby(["Date", "Queue"])["Aging (Days)"].mean().unstack(fill_value=0)
+                        # Reformatted AFTER grouping/sorting is already correctly done using
+                        # sortable ISO dates -- safe to relabel now without affecting order.
+                        checklist_trend_pivot.index = pd.to_datetime(checklist_trend_pivot.index).strftime("%m/%d/%Y")
 
                         # Altair instead of st.line_chart specifically for legend control --
                         # with up to 14 categories, the default single-row legend runs off the
                         # side and gets cut off. This wraps it into multiple rows below the
                         # chart instead, so every category name is actually visible.
                         chart_data = checklist_trend_pivot.reset_index().melt(id_vars="Date", var_name="Queue", value_name="Aging (Days)")
+                        chronological_date_order = list(dict.fromkeys(chart_data["Date"]))
                         chart = alt.Chart(chart_data).mark_line(point=True).encode(
-                            x=alt.X("Date:N", title="Date"),
+                            x=alt.X("Date:N", title="Date", sort=chronological_date_order),
                             y=alt.Y("Aging (Days):Q", title="Aging (Days)"),
                             color=alt.Color("Queue:N", legend=alt.Legend(orient="bottom", columns=3, title="Queue")),
                             tooltip=["Date", "Queue", "Aging (Days)"]
@@ -2554,8 +2577,8 @@ def render_daily_verification_section():
                     cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
                     cols[0].markdown(item.label)
                     curr_status = cols[1].selectbox("Status", options=opt, key=status_key, label_visibility="collapsed")
-                    curr_odt = cols[2].date_input("Oldest Date", key=odt_key, label_visibility="collapsed")
-                    curr_tdt = cols[3].date_input("Target Date", key=tdt_key, label_visibility="collapsed")
+                    curr_odt = cols[2].date_input("Oldest Date", key=odt_key, label_visibility="collapsed", format="MM/DD/YYYY")
+                    curr_tdt = cols[3].date_input("Target Date", key=tdt_key, label_visibility="collapsed", format="MM/DD/YYYY")
                     # Displayed badge uses the last-SAVED state (won't update until Save is
                     # clicked, since nothing reruns inside a form) -- but the value stored into
                     # form_states below uses the actual current widget values, so deficiency
