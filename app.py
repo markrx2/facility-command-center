@@ -2354,12 +2354,12 @@ with tab_analytics:
 
                 st.markdown("---")
                 st.subheader("📈 Checklist Compliance Trend")
-                st.caption("How often each checklist item was flagged 'No' on each day -- one line per queue.")
-                no_only_df = checklist_hist_df[checklist_hist_df["Status"] == "No"]
-                if no_only_df.empty:
-                    st.caption("No items were marked 'No' during this timeframe.")
+                st.caption("Aging (in days) for each checklist item over time -- one line per queue.")
+                aging_trend_df = checklist_hist_df.dropna(subset=["Aging (Days)"])
+                if aging_trend_df.empty:
+                    st.caption("No aging data available for this timeframe.")
                 else:
-                    checklist_trend_pivot = no_only_df.groupby(["Date", "Queue"]).size().unstack(fill_value=0)
+                    checklist_trend_pivot = aging_trend_df.groupby(["Date", "Queue"])["Aging (Days)"].mean().unstack(fill_value=0)
                     st.line_chart(checklist_trend_pivot)
                     st.download_button(
                         "⬇️ Export Checklist Trend Data (CSV)",
