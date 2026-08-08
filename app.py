@@ -2407,7 +2407,13 @@ def render_daily_verification_section():
         with db_conn.session as session:
             chk = session.execute(text("SELECT * FROM daily_checklist WHERE log_date = :c_date"), {"c_date": CURRENT_DATE}).fetchone()
             if not chk:
-                session.execute(text("INSERT INTO daily_checklist (log_date, reminder_sent, supervisor_escaped, reminder_time) VALUES (:c_date, 0, 0, '17:00') ON CONFLICT (log_date) DO NOTHING"), {"c_date": CURRENT_DATE})
+                # Carry forward whatever deadline was most recently configured, rather than
+                # hardcoding 17:00 -- this is what was causing the deadline to silently reset
+                # to 17:00 every morning regardless of what was set the day before. Falls back
+                # to 17:00 only if there's truly no prior day's row to carry forward from.
+                prior_row = session.execute(text("SELECT reminder_time FROM daily_checklist ORDER BY log_date DESC LIMIT 1")).fetchone()
+                carry_forward_time = prior_row.reminder_time if prior_row and prior_row.reminder_time else "17:00"
+                session.execute(text("INSERT INTO daily_checklist (log_date, reminder_sent, supervisor_escaped, reminder_time) VALUES (:c_date, 0, 0, :rt) ON CONFLICT (log_date) DO NOTHING"), {"c_date": CURRENT_DATE, "rt": carry_forward_time})
                 session.commit()
                 chk = session.execute(text("SELECT * FROM daily_checklist WHERE log_date = :c_date"), {"c_date": CURRENT_DATE}).fetchone()
 
