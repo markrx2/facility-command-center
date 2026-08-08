@@ -1,6 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
+import altair as alt
 import re
 import hashlib
 from datetime import datetime, timedelta, time as dtime
@@ -2354,20 +2355,43 @@ with tab_analytics:
 
                 st.markdown("---")
                 st.subheader("📈 Checklist Compliance Trend")
-                st.caption("Aging (in days) for each checklist item over time -- one line per queue.")
+                st.caption("Aging (in days) for each checklist item over time.")
                 aging_trend_df = checklist_hist_df.dropna(subset=["Aging (Days)"])
                 if aging_trend_df.empty:
                     st.caption("No aging data available for this timeframe.")
                 else:
-                    checklist_trend_pivot = aging_trend_df.groupby(["Date", "Queue"])["Aging (Days)"].mean().unstack(fill_value=0)
-                    st.line_chart(checklist_trend_pivot)
-                    st.download_button(
-                        "⬇️ Export Checklist Trend Data (CSV)",
-                        data=checklist_trend_pivot.to_csv().encode("utf-8"),
-                        file_name=f"checklist_trend_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
-                        mime="text/csv",
-                        use_container_width=True,
+                    all_categories = sorted(aging_trend_df["Queue"].unique().tolist())
+                    selected_categories = st.multiselect(
+                        "Show categories:", options=all_categories, default=all_categories,
+                        key="checklist_trend_category_filter"
                     )
+                    filtered_trend_df = aging_trend_df[aging_trend_df["Queue"].isin(selected_categories)]
+
+                    if filtered_trend_df.empty:
+                        st.caption("Select at least one category to see the chart.")
+                    else:
+                        checklist_trend_pivot = filtered_trend_df.groupby(["Date", "Queue"])["Aging (Days)"].mean().unstack(fill_value=0)
+
+                        # Altair instead of st.line_chart specifically for legend control --
+                        # with up to 14 categories, the default single-row legend runs off the
+                        # side and gets cut off. This wraps it into multiple rows below the
+                        # chart instead, so every category name is actually visible.
+                        chart_data = checklist_trend_pivot.reset_index().melt(id_vars="Date", var_name="Queue", value_name="Aging (Days)")
+                        chart = alt.Chart(chart_data).mark_line(point=True).encode(
+                            x=alt.X("Date:N", title="Date"),
+                            y=alt.Y("Aging (Days):Q", title="Aging (Days)"),
+                            color=alt.Color("Queue:N", legend=alt.Legend(orient="bottom", columns=3, title="Queue")),
+                            tooltip=["Date", "Queue", "Aging (Days)"]
+                        ).properties(height=400)
+                        st.altair_chart(chart, use_container_width=True)
+
+                        st.download_button(
+                            "⬇️ Export Checklist Trend Data (CSV)",
+                            data=checklist_trend_pivot.to_csv().encode("utf-8"),
+                            file_name=f"checklist_trend_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
 
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
 st.markdown("<br>", unsafe_allow_html=True)
