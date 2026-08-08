@@ -2421,6 +2421,10 @@ def render_daily_verification_section():
 
         with f_col:
             with st.container(border=True):
+                deadline_update_success = st.session_state.pop("_deadline_update_success", None)
+                if deadline_update_success:
+                    st.success(deadline_update_success)
+
                 t_obj = datetime.strptime(chk.reminder_time, "%H:%M").time()
                 if "checklist_deadline_widget" not in st.session_state:
                     st.session_state["checklist_deadline_widget"] = t_obj
@@ -2430,7 +2434,7 @@ def render_daily_verification_section():
                         with db_conn.session as session:
                             session.execute(text("UPDATE daily_checklist SET reminder_time=:rt, reminder_sent=0, supervisor_escaped=0 WHERE log_date=:c_date"), {"rt": new_target_time.strftime("%H:%M"), "c_date": CURRENT_DATE})
                             session.commit()
-                        st.success(f"Deadline updated to {new_target_time.strftime('%H:%M')} EST.")
+                        st.session_state["_deadline_update_success"] = f"Deadline updated to {new_target_time.strftime('%H:%M')} EST."
                         st.rerun()
                     except Exception as e:
                         st.error(f"⚠️ Couldn't update the deadline right now: {str(e)}")
