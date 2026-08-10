@@ -794,7 +794,7 @@ with st.sidebar.form(key="sidebar_personnel_deployment_form", clear_on_submit=Tr
     new_worker_email = st.text_input("Employee Workspace Email:", value=default_email, placeholder="johndoe@company.com").strip()
     new_worker_webhook = st.text_input("Employee Personal Google Chat Webhook:", value=default_webhook, placeholder="https://chat.googleapis.com/v1/spaces/...").strip()
     
-    submit_deployment = st.form_submit_button("Deploy to Department Grid", type="primary", use_container_width=True)
+    submit_deployment = st.form_submit_button("Deploy to Department Grid", type="primary", width='stretch')
 
 if submit_deployment:
     if not new_worker_name or not new_worker_email:
@@ -870,7 +870,7 @@ def render_dynamic_volume_ribbon(dept_prefix, dept_label):
                 st.number_input(q.queue_name, min_value=0, step=1, key=widget_key)
                 entered_values[q.queue_name] = widget_key
 
-        volume_save_clicked = st.form_submit_button(f"💾 Save {dept_label} Volume", use_container_width=True)
+        volume_save_clicked = st.form_submit_button(f"💾 Save {dept_label} Volume", width='stretch')
 
     # Shown below the Save button rather than above the whole section.
     save_success = st.session_state.pop("_volume_save_success", None)
@@ -943,7 +943,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                 st.number_input("🔴 Red Tags:", min_value=0, step=1, key=red_tag_key)
             with header_col3:
                 st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-                rt_save_clicked = st.form_submit_button("💾 Save", use_container_width=True)
+                rt_save_clicked = st.form_submit_button("💾 Save", width='stretch')
         if rt_save_clicked:
             try:
                 with db_conn.session as session:
@@ -958,7 +958,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                 st.error(f"⚠️ Couldn't save Red Tags right now: {str(e)}")
         
         if is_mgr_active:
-            if st.button(f"👋 Remove {worker} from {dept_label} Screen", key=f"mgr_soft_remove_{prefix}_{w_id}", use_container_width=True):
+            if st.button(f"👋 Remove {worker} from {dept_label} Screen", key=f"mgr_soft_remove_{prefix}_{w_id}", width='stretch'):
                 try:
                     with db_conn.session as session:
                         session.execute(text("UPDATE global_roster SET is_active = 0 WHERE dept_prefix=:pfx AND tech_name=:t_name"), {"pfx": prefix, "t_name": worker})
@@ -983,7 +983,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                     if is_mgr_active:
                         admin_btn_col1, admin_btn_col2, admin_btn_col3 = st.columns(3)
                         
-                        if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
+                        if admin_btn_col1.button("🔴 Reset Slot", key=f"admin_slot_rst_{prefix}_{w_id}_{slot_num}", width='stretch', type="secondary"):
                             try:
                                 with db_conn.session as session:
                                     session.execute(text(f"""
@@ -1001,7 +1001,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             except Exception as e:
                                 st.error(f"⚠️ Couldn't reset this slot right now: {str(e)}")
                             
-                        if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary", disabled=(slot_row is None or slot_row.start_time is None)):
+                        if admin_btn_col2.button("🔄 Force Clock Reset", key=f"admin_clk_rst_{prefix}_{w_id}_{slot_num}", width='stretch', type="secondary", disabled=(slot_row is None or slot_row.start_time is None)):
                             if slot_row is not None and slot_row.start_time is not None:
                                 now_reset_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
                                 try:
@@ -1015,7 +1015,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         slot_is_active = slot_row is not None and slot_row.queue is not None and slot_row.start_time is not None and slot_row.submitted == 0
                         slot_is_paused = slot_is_active and getattr(slot_row, "paused", 0)
                         if slot_is_active and not slot_is_paused:
-                            if admin_btn_col3.button("⏸️ Pause", key=f"admin_pause_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary"):
+                            if admin_btn_col3.button("⏸️ Pause", key=f"admin_pause_{prefix}_{w_id}_{slot_num}", width='stretch', type="secondary"):
                                 try:
                                     pause_start_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
                                     with db_conn.session as session:
@@ -1025,7 +1025,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 except Exception as e:
                                     st.error(f"⚠️ Couldn't pause this slot right now: {str(e)}")
                         elif slot_is_paused:
-                            if admin_btn_col3.button("▶️ Resume", key=f"admin_resume_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="primary"):
+                            if admin_btn_col3.button("▶️ Resume", key=f"admin_resume_{prefix}_{w_id}_{slot_num}", width='stretch', type="primary"):
                                 try:
                                     pause_started = datetime.strptime(slot_row.pause_started_at, "%Y-%m-%d %H:%M:%S")
                                     paused_duration = now_eastern_naive() - pause_started
@@ -1046,7 +1046,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                 except Exception as e:
                                     st.error(f"⚠️ Couldn't resume this slot right now: {str(e)}")
                         else:
-                            admin_btn_col3.button("⏸️ Pause", key=f"admin_pause_disabled_{prefix}_{w_id}_{slot_num}", use_container_width=True, type="secondary", disabled=True)
+                            admin_btn_col3.button("⏸️ Pause", key=f"admin_pause_disabled_{prefix}_{w_id}_{slot_num}", width='stretch', type="secondary", disabled=True)
                     
                     if not slot_row or slot_row.queue is None:
                         if goals_dict:
@@ -1085,7 +1085,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     
                                 st.caption(f"🎯 Scheduled Target: **{calculated_goal_str}** *(Base: {base_goal_str}/hr)*")
                                 
-                                start_clicked = st.form_submit_button("🚀 Start Clock", use_container_width=True)
+                                start_clicked = st.form_submit_button("🚀 Start Clock", width='stretch')
 
                             if start_clicked:
                                 now_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
@@ -1112,7 +1112,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         # to jump ahead rather than wait for the sequence.
                         st.markdown(f"Queue: `{slot_row.queue}` ({slot_row.duration_minutes} min)")
                         st.info("⏳ Queued — click Start Now Anyway to begin this slot.")
-                        if st.button("▶️ Start Now Anyway", key=f"queued_start_now_{prefix}_{w_id}_{slot_num}", use_container_width=True):
+                        if st.button("▶️ Start Now Anyway", key=f"queued_start_now_{prefix}_{w_id}_{slot_num}", width='stretch'):
                             now_str = now_eastern_naive().strftime("%Y-%m-%d %H:%M:%S")
                             try:
                                 with db_conn.session as session:
@@ -1125,7 +1125,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         if is_mgr_active and goals_dict:
                             edit_armed_key = f"edit_queued_armed_{prefix}_{w_id}_{slot_num}"
                             if not st.session_state.get(edit_armed_key, False):
-                                if st.button("✏️ Edit Assignment", key=f"edit_queued_btn_{prefix}_{w_id}_{slot_num}", use_container_width=True):
+                                if st.button("✏️ Edit Assignment", key=f"edit_queued_btn_{prefix}_{w_id}_{slot_num}", width='stretch'):
                                     st.session_state[edit_armed_key] = True
                                     fragment_rerun()
                             else:
@@ -1142,8 +1142,8 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     new_edit_q = st.selectbox("Change Queue To:", options=list(goals_dict.keys()), key=edit_q_key)
                                     new_edit_dur_label = st.selectbox("Change Duration To:", options=list(edit_durations.keys()), key=edit_dur_key)
                                     edit_col1, edit_col2 = st.columns(2)
-                                    update_clicked = edit_col1.form_submit_button("💾 Update Assignment", use_container_width=True)
-                                    cancel_clicked = edit_col2.form_submit_button("Cancel", use_container_width=True)
+                                    update_clicked = edit_col1.form_submit_button("💾 Update Assignment", width='stretch')
+                                    cancel_clicked = edit_col2.form_submit_button("Cancel", width='stretch')
 
                                 if update_clicked:
                                     new_edit_dur_min = edit_durations[new_edit_dur_label]
@@ -1260,7 +1260,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                         
                         if not db_sub:
                             val = st.number_input("Log Production Volume:", min_value=0, step=1, value=None, key=f"num_{prefix}_{w_id}_{slot_num}")
-                            if st.button("Submit Metrics", key=f"sub_{prefix}_{w_id}_{slot_num}", type="primary", use_container_width=True) and val is not None:
+                            if st.button("Submit Metrics", key=f"sub_{prefix}_{w_id}_{slot_num}", type="primary", width='stretch') and val is not None:
                                 time_logged_now = now_eastern_naive()
                                 elapsed_delta = time_logged_now - start_time
                                 actual_minutes_used = max(1, int(elapsed_delta.total_seconds() / 60.0))
@@ -1334,7 +1334,7 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                             if is_mgr_active:
                                 adjust_armed_key = f"adjust_metrics_armed_{prefix}_{w_id}_{slot_num}"
                                 if not st.session_state.get(adjust_armed_key, False):
-                                    if st.button("✏️ Adjust Metrics", key=f"adjust_metrics_btn_{prefix}_{w_id}_{slot_num}", use_container_width=True):
+                                    if st.button("✏️ Adjust Metrics", key=f"adjust_metrics_btn_{prefix}_{w_id}_{slot_num}", width='stretch'):
                                         st.session_state[adjust_armed_key] = True
                                         fragment_rerun()
                                 else:
@@ -1344,8 +1344,8 @@ def render_synchronized_matrix(db_table, prefix, dept_label):
                                     with st.form(key=f"adjust_metrics_form_{prefix}_{w_id}_{slot_num}", clear_on_submit=False):
                                         new_val = st.number_input("Corrected Logged Units:", min_value=0, step=1, key=adjust_val_key)
                                         adj_col1, adj_col2 = st.columns(2)
-                                        adjust_save_clicked = adj_col1.form_submit_button("💾 Save Correction", use_container_width=True)
-                                        adjust_cancel_clicked = adj_col2.form_submit_button("Cancel", use_container_width=True)
+                                        adjust_save_clicked = adj_col1.form_submit_button("💾 Save Correction", width='stretch')
+                                        adjust_cancel_clicked = adj_col2.form_submit_button("Cancel", width='stretch')
 
                                     if adjust_save_clicked:
                                         # Re-evaluate goal-met/missed against the ALREADY-computed
@@ -1688,7 +1688,7 @@ def render_autoscheduler_tab():
         st.subheader(f"🗓️ {dept_label} — Today's Shift Schedule")
 
         if HOMEBASE_API_KEY:
-            if st.button(f"🔄 Sync Shifts from Homebase", key=f"hb_sync_{dept_prefix}", use_container_width=True):
+            if st.button(f"🔄 Sync Shifts from Homebase", key=f"hb_sync_{dept_prefix}", width='stretch'):
                 result, error = sync_homebase_shifts(dept_prefix)
                 st.session_state[f"hb_sync_outcome_{dept_prefix}"] = {"result": result, "error": error}
                 if not error:
@@ -1861,8 +1861,7 @@ def render_autoscheduler_tab():
 
                 st.multiselect(f"{tech_name}", options=dept_queue_names, key=widget_key)
 
-            excl_save_clicked = st.button(f"💾 Save {dept_label} Exclusions", key=f"excl_save_btn_{dept_prefix}", use_container_width=True)
-            st.caption(f"🔧 DIAGNOSTIC: dept_prefix={dept_prefix} | excl_save_clicked = {excl_save_clicked}")
+            excl_save_clicked = st.button(f"💾 Save {dept_label} Exclusions", key=f"excl_save_btn_{dept_prefix}", width='stretch')
 
             # Shown below the Save button rather than above it -- this was previously being
             # set but never actually displayed anywhere, which is why no confirmation ever
@@ -1874,29 +1873,44 @@ def render_autoscheduler_tab():
                 st.error(f"⚠️ Couldn't save exclusion changes right now: {excl_save_error}")
 
             if excl_save_clicked:
-                st.caption(f"🔧 DIAGNOSTIC: entered save block for {dept_prefix}, processing {len(excl_widget_keys)} techs")
                 try:
                     with db_conn.session as session:
-                        for tech_name, widget_key in excl_widget_keys.items():
-                            chosen_exclusions = st.session_state.get(widget_key, [])
-                            st.caption(f"🔧 DIAGNOSTIC: {tech_name} -> {chosen_exclusions}")
-                            # Case/whitespace-insensitive delete -- ensures this cleans up any
-                            # existing rows for this tech regardless of stored capitalization,
-                            # rather than leaving old, differently-capitalized rows orphaned
-                            # behind while inserting a fresh set under the current casing.
-                            session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx AND LOWER(TRIM(tech_name))=LOWER(TRIM(:t_name))"), {"pfx": dept_prefix, "t_name": tech_name})
-                            for q in chosen_exclusions:
-                                session.execute(text("""
-                                    INSERT INTO tech_queue_exclusions (dept_prefix, tech_name, queue_name)
-                                    VALUES (:pfx, :t_name, :q)
-                                    ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
-                                """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
+                        # Batched to exactly 2 database calls total, regardless of how many
+                        # techs or exclusions are involved -- one DELETE covering the whole
+                        # department, then one single bulk INSERT for everything being added
+                        # back. Previously this was 1 + N calls (one INSERT per exclusion per
+                        # tech), which for 10 techs with 2 exclusions each meant 21 separate
+                        # round trips for one Save click.
+                        session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx"), {"pfx": dept_prefix})
+                        insert_rows = [
+                            (tech_name, q)
+                            for tech_name, widget_key in excl_widget_keys.items()
+                            for q in st.session_state.get(widget_key, [])
+                        ]
+                        if insert_rows:
+                            # Explicit multi-row VALUES clause -- guarantees exactly one SQL
+                            # statement/round trip regardless of database driver behavior,
+                            # unlike passing a list of dicts to execute() (which some drivers
+                            # silently expand back into N separate statements anyway).
+                            values_clauses = []
+                            params = {"pfx": dept_prefix}
+                            for i, (tech_name, q) in enumerate(insert_rows):
+                                values_clauses.append(f"(:pfx, :t_name_{i}, :q_{i})")
+                                params[f"t_name_{i}"] = tech_name
+                                params[f"q_{i}"] = q
+                            insert_sql = f"""
+                                INSERT INTO tech_queue_exclusions (dept_prefix, tech_name, queue_name)
+                                VALUES {", ".join(values_clauses)}
+                                ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
+                            """
+                            session.execute(text(insert_sql), params)
                         session.commit()
-                        st.caption("🔧 DIAGNOSTIC: commit succeeded")
                     st.session_state["_exclusions_save_success"] = "Exclusions saved."
-                    st.rerun()
+                    # Fragment-scoped instead of a full page reload -- this fragment alone
+                    # needs to refresh, not the entire app (worker grids, checklist, ribbon,
+                    # everything else), which was very likely adding meaningfully to the delay.
+                    fragment_rerun()
                 except Exception as e:
-                    st.caption(f"🔧 DIAGNOSTIC: exception caught: {str(e)}")
                     st.session_state["_exclusions_save_error"] = str(e)
                     st.rerun()
 
@@ -1906,11 +1920,11 @@ def render_autoscheduler_tab():
 
         gen_col1, gen_col2 = st.columns(2)
         one_pm_today = datetime.combine(now_eastern_naive().date(), dtime(13, 0))
-        if gen_col1.button(f"▶️ Generate Standard Proposal (1:00 PM anchor)", key=f"gen_std_{dept_prefix}", use_container_width=True):
+        if gen_col1.button(f"▶️ Generate Standard Proposal (1:00 PM anchor)", key=f"gen_std_{dept_prefix}", width='stretch'):
             summary = generate_schedule_proposal(dept_prefix, one_pm_today)
             st.session_state[f"last_proposal_summary_{dept_prefix}"] = summary
             fragment_rerun()
-        if gen_col2.button(f"🔁 Recalculate Now (current time anchor)", key=f"gen_now_{dept_prefix}", use_container_width=True):
+        if gen_col2.button(f"🔁 Recalculate Now (current time anchor)", key=f"gen_now_{dept_prefix}", width='stretch'):
             summary = generate_schedule_proposal(dept_prefix, now_eastern_naive())
             st.session_state[f"last_proposal_summary_{dept_prefix}"] = summary
             fragment_rerun()
@@ -1979,7 +1993,7 @@ def render_autoscheduler_tab():
                             except Exception as e:
                                 st.error(f"⚠️ Couldn't add this assignment right now: {str(e)}")
 
-            if st.button(f"💾 Save Adjustments", key=f"save_adj_{dept_prefix}", use_container_width=True):
+            if st.button(f"💾 Save Adjustments", key=f"save_adj_{dept_prefix}", width='stretch'):
                 try:
                     with db_conn.session as session:
                         for tech_name, slot, q, dur in edited_updates:
@@ -1999,7 +2013,7 @@ def render_autoscheduler_tab():
                     st.error(f"⚠️ Couldn't save adjustments right now: {str(e)}")
 
             approve_col1, approve_col2 = st.columns(2)
-            if approve_col1.button(f"✅ Approve & Apply {dept_label} Schedule", key=f"approve_{dept_prefix}", type="primary", use_container_width=True):
+            if approve_col1.button(f"✅ Approve & Apply {dept_label} Schedule", key=f"approve_{dept_prefix}", type="primary", width='stretch'):
                 try:
                     skipped = apply_schedule_proposal(dept_prefix, db_table)
                     if skipped:
@@ -2010,7 +2024,7 @@ def render_autoscheduler_tab():
                     fragment_rerun()
                 except Exception as e:
                     st.error(f"⚠️ Couldn't apply this schedule right now: {str(e)}")
-            if approve_col2.button(f"🗑️ Discard Proposal", key=f"discard_{dept_prefix}", use_container_width=True):
+            if approve_col2.button(f"🗑️ Discard Proposal", key=f"discard_{dept_prefix}", width='stretch'):
                 try:
                     with db_conn.session as session:
                         session.execute(text("DELETE FROM schedule_proposals WHERE log_date=:c_date AND dept_prefix=:pfx"), {"c_date": CURRENT_DATE, "pfx": dept_prefix})
@@ -2072,7 +2086,7 @@ def render_queue_management_tab():
                 new_q_name = st.text_input("New Queue Name:", placeholder="e.g., Priority Tier 3 Verification", key="mgmt_q_name_input").strip()
                 new_q_goal = st.text_input("Production Unit Goal Target (PER 1 HOUR):", placeholder="e.g., 50 rxs", key="mgmt_goal_input").strip()
             
-                if st.button("Save New Queue Component", type="primary", use_container_width=True, key="mgmt_save_btn"):
+                if st.button("Save New Queue Component", type="primary", width='stretch', key="mgmt_save_btn"):
                     if new_q_name and new_q_goal:
                         try:
                             with db_conn.session as session:
@@ -2106,13 +2120,13 @@ def render_queue_management_tab():
                         status_note = "" if staff.is_active else " *(inactive/removed from screen)*"
                         s_col1.markdown(f"👤 **{s_name}** `({d_lbl})`{status_note}")
                         if not st.session_state.get(staff_wipe_armed_key, False):
-                            if s_col2.button("🚨 Wipe", key=f"del_staff_{s_prefix}_{s_id}", type="secondary", use_container_width=True):
+                            if s_col2.button("🚨 Wipe", key=f"del_staff_{s_prefix}_{s_id}", type="secondary", width='stretch'):
                                 st.session_state[staff_wipe_armed_key] = True
                                 st.rerun()
                         else:
                             st.warning(f"⚠️ This permanently deletes {s_name}'s profile and today's timer data for {d_lbl} only. This cannot be undone.")
                             confirm_col1, confirm_col2 = st.columns(2)
-                            if confirm_col1.button(f"✅ Confirm Wipe {s_name}", key=f"del_staff_confirm_{s_prefix}_{s_id}", type="primary", use_container_width=True):
+                            if confirm_col1.button(f"✅ Confirm Wipe {s_name}", key=f"del_staff_confirm_{s_prefix}_{s_id}", type="primary", width='stretch'):
                                 try:
                                     with db_conn.session as session:
                                         session.execute(text("DELETE FROM global_roster WHERE dept_prefix=:prefix AND tech_name=:name"), {"prefix": s_prefix, "name": s_name})
@@ -2126,7 +2140,7 @@ def render_queue_management_tab():
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"⚠️ Couldn't remove this profile right now: {str(e)}")
-                            if confirm_col2.button("Cancel", key=f"del_staff_cancel_{s_prefix}_{s_id}", use_container_width=True):
+                            if confirm_col2.button("Cancel", key=f"del_staff_cancel_{s_prefix}_{s_id}", width='stretch'):
                                 st.session_state.pop(staff_wipe_armed_key, None)
                                 st.rerun()
                         st.markdown("<hr style='margin:2px 0px !important;'>", unsafe_allow_html=True)
@@ -2146,7 +2160,7 @@ def render_queue_management_tab():
                         with st.container(border=True):
                             st.markdown(f"**[{dept_lbl}]** `{q_name}`")
                             st.caption(f"Base Hourly Vector: {q_goal} per hour")
-                            if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{q_id}", use_container_width=True):
+                            if st.button("🗑️ Delete Line", key=f"del_{q_prefix}_{q_id}", width='stretch'):
                                 try:
                                     with db_conn.session as session:
                                         session.execute(text("DELETE FROM dynamic_queues WHERE dept_prefix=:prefix AND queue_name=:name"), {"prefix": q_prefix, "name": q_name})
@@ -2171,10 +2185,10 @@ def render_queue_management_tab():
                             ic1, ic2, ic3 = st.columns([3, 0.7, 0.7])
                             ic1.markdown(f"**{it.label}**")
                             ic1.caption(f"Turns red at {it.red_threshold_days}+ days old (Target Date auto-calculated from this)")
-                            if ic2.button("✏️ Edit", key=f"edit_checklist_item_{it.item_key}", use_container_width=True):
+                            if ic2.button("✏️ Edit", key=f"edit_checklist_item_{it.item_key}", width='stretch'):
                                 st.session_state[edit_item_armed_key] = True
                                 fragment_rerun()
-                            if ic3.button("🗑️ Remove", key=f"del_checklist_item_{it.item_key}", use_container_width=True):
+                            if ic3.button("🗑️ Remove", key=f"del_checklist_item_{it.item_key}", width='stretch'):
                                 try:
                                     with db_conn.session as session:
                                         session.execute(text("DELETE FROM checklist_items WHERE item_key=:k"), {"k": it.item_key})
@@ -2195,8 +2209,8 @@ def render_queue_management_tab():
                                 edit_c1.text_input("Label", key=edit_label_key)
                                 edit_c2.number_input("Red threshold (days)", min_value=1, step=1, key=edit_threshold_key)
                                 save_col, cancel_col = st.columns(2)
-                                save_edit_clicked = save_col.form_submit_button("💾 Save Changes", use_container_width=True)
-                                cancel_edit_clicked = cancel_col.form_submit_button("Cancel", use_container_width=True)
+                                save_edit_clicked = save_col.form_submit_button("💾 Save Changes", width='stretch')
+                                cancel_edit_clicked = cancel_col.form_submit_button("Cancel", width='stretch')
 
                             if save_edit_clicked:
                                 new_label = st.session_state[edit_label_key].strip()
@@ -2226,7 +2240,7 @@ def render_queue_management_tab():
             add_c1, add_c3, add_c4 = st.columns([3, 1, 1])
             new_checklist_label = add_c1.text_input("Label", key="new_checklist_item_label")
             new_checklist_threshold = add_c3.number_input("Red threshold (days)", min_value=1, step=1, value=7, key="new_checklist_item_threshold")
-            if add_c4.button("➕ Add", key="add_checklist_item_btn", use_container_width=True):
+            if add_c4.button("➕ Add", key="add_checklist_item_btn", width='stretch'):
                 if new_checklist_label.strip():
                     try:
                         item_key = re.sub(r'[^a-z0-9_]', '_', new_checklist_label.strip().lower())
@@ -2314,14 +2328,14 @@ with tab_analytics:
                 table_view_df = display_df.copy()
                 table_view_df["Date"] = pd.to_datetime(table_view_df["Date"]).dt.strftime("%m/%d/%Y")
             
-                st.dataframe(table_view_df.style.map(lambda val: 'background-color: #ffccd5' if val == '❌ Missed Goal' else 'background-color: #d1e7dd', subset=['True Performance Status']), use_container_width=True, hide_index=True)
+                st.dataframe(table_view_df.style.map(lambda val: 'background-color: #ffccd5' if val == '❌ Missed Goal' else 'background-color: #d1e7dd', subset=['True Performance Status']), width='stretch', hide_index=True)
 
                 st.download_button(
                     "⬇️ Export This Report (CSV)",
                     data=table_view_df.to_csv(index=False).encode("utf-8"),
                     file_name=f"production_report_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width='stretch',
                 )
             
                 true_missed_count = (df_filtered["True Performance Status"] == "❌ Missed Goal").sum()
@@ -2359,7 +2373,7 @@ with tab_analytics:
                     data=trend_pivot.to_csv().encode("utf-8"),
                     file_name=f"trend_{trend_view_option.lower().replace(' ', '_')}_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width='stretch',
                 )
 
             st.markdown("---")
@@ -2376,13 +2390,13 @@ with tab_analytics:
                     "log_date": "Date", "dept_prefix": "Department", "tech_name": "Technician Name", "count": "Red Tags"
                 })
                 red_tag_df["Date"] = pd.to_datetime(red_tag_df["Date"]).dt.strftime("%m/%d/%Y")
-                st.dataframe(red_tag_df, use_container_width=True, hide_index=True)
+                st.dataframe(red_tag_df, width='stretch', hide_index=True)
                 st.download_button(
                     "⬇️ Export Red Tags History (CSV)",
                     data=red_tag_df.to_csv(index=False).encode("utf-8"),
                     file_name=f"red_tags_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width='stretch',
                 )
 
             st.markdown("---")
@@ -2433,13 +2447,13 @@ with tab_analytics:
                 for date_col in ["Date", "Oldest Date", "Target Date"]:
                     checklist_table_view[date_col] = pd.to_datetime(checklist_table_view[date_col], errors="coerce").dt.strftime("%m/%d/%Y")
 
-                st.dataframe(checklist_table_view, use_container_width=True, hide_index=True)
+                st.dataframe(checklist_table_view, width='stretch', hide_index=True)
                 st.download_button(
                     "⬇️ Export Checklist History (CSV)",
                     data=checklist_table_view.to_csv(index=False).encode("utf-8"),
                     file_name=f"checklist_history_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width='stretch',
                 )
 
                 st.markdown("---")
@@ -2476,14 +2490,14 @@ with tab_analytics:
                             color=alt.Color("Queue:N", legend=alt.Legend(orient="bottom", columns=3, title="Queue")),
                             tooltip=["Date", "Queue", "Aging (Days)"]
                         ).properties(height=400)
-                        st.altair_chart(chart, use_container_width=True)
+                        st.altair_chart(chart, width='stretch')
 
                         st.download_button(
                             "⬇️ Export Checklist Trend Data (CSV)",
                             data=checklist_trend_pivot.to_csv().encode("utf-8"),
                             file_name=f"checklist_trend_{start_filt.strftime('%Y-%m-%d')}_to_{end_filt.strftime('%Y-%m-%d')}.csv",
                             mime="text/csv",
-                            use_container_width=True,
+                            width='stretch',
                         )
 
 # --- 10. BUSINESS-WIDE VERIFICATION CHECKLIST (BATCH SUBMISSION ENGINE) ---
@@ -2522,7 +2536,7 @@ def render_daily_verification_section():
                 if "checklist_deadline_widget" not in st.session_state:
                     st.session_state["checklist_deadline_widget"] = t_obj
                 new_target_time = st.time_input("Set Verification Deadline (EST):", key="checklist_deadline_widget")
-                if st.button("Update Deadline", key="checklist_deadline_update_btn", use_container_width=True):
+                if st.button("Update Deadline", key="checklist_deadline_update_btn", width='stretch'):
                     try:
                         with db_conn.session as session:
                             session.execute(text("UPDATE daily_checklist SET reminder_time=:rt, reminder_sent=0, supervisor_escaped=0 WHERE log_date=:c_date"), {"rt": new_target_time.strftime("%H:%M"), "c_date": CURRENT_DATE})
@@ -2628,7 +2642,7 @@ def render_daily_verification_section():
                         "by": curr_by, "notes": curr_notes, "is_red": live_is_red, "delta": live_delta
                     }
 
-                checklist_save_clicked = st.form_submit_button("💾 Save Checklist Changes", use_container_width=True)
+                checklist_save_clicked = st.form_submit_button("💾 Save Checklist Changes", width='stretch')
 
             if checklist_save_clicked:
                 try:
@@ -2665,12 +2679,12 @@ def render_daily_verification_section():
 
             if already_submitted_today and not st.session_state.get(resubmit_armed_key, False):
                 submit_clicked = False
-                if st.button("🔁 Resubmit Anyway", key="checklist_resubmit_arm_btn", use_container_width=True):
+                if st.button("🔁 Resubmit Anyway", key="checklist_resubmit_arm_btn", width='stretch'):
                     st.session_state[resubmit_armed_key] = True
                     fragment_rerun()
             else:
                 button_label = "⚠️ Confirm Resubmit (will re-send Chat alerts for flagged items)" if already_submitted_today else "💾 Submit Daily Verification Report"
-                submit_clicked = st.button(button_label, type="primary", use_container_width=True, key="submit_daily_report_btn")
+                submit_clicked = st.button(button_label, type="primary", width='stretch', key="submit_daily_report_btn")
 
             if submit_clicked:
                 deficiency_list = []
