@@ -1834,38 +1834,34 @@ def render_autoscheduler_tab():
         else:
             excl_save_error = st.session_state.pop("_exclusions_save_error", None)
 
-            # Wrapped in st.form(): same fix that solved the checklist and ribbon's
-            # rapid-refresh problem -- nothing reruns while selecting, nothing saves until
-            # this form's own submit button is clicked.
-            with st.form(key=f"exclusions_form_{dept_prefix}", clear_on_submit=False):
-                excl_widget_keys = {}
-                for r in roster_rows:
-                    tech_name = r.tech_name
-                    t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
-                    # Looked up by normalized name -- a stored capitalization/whitespace
-                    # difference between global_roster and tech_queue_exclusions (e.g. "Alisa
-                    # osio" vs "Alisa Osio") previously made this lookup silently return
-                    # nothing even though the exclusions genuinely existed in the database,
-                    # since a plain dictionary lookup is case-sensitive.
-                    true_exclusions = sorted([q for q in existing_exclusions.get(normalize_name(tech_name), []) if q in dept_queue_names])
-                    widget_key = f"excl_{dept_prefix}_{t_id}"
-                    if widget_key not in st.session_state:
-                        st.session_state[widget_key] = true_exclusions
-                    excl_widget_keys[tech_name] = widget_key
+            # Plain widgets with seed-once protection instead of st.form() -- confirmed via
+            # diagnostic testing that st.form_submit_button() was never registering as
+            # clicked in this specific section (excl_save_clicked was always False, with no
+            # exception and no success/error message, meaning the save code never even ran).
+            # This is the only one of the three form-based sections (checklist, ribbon,
+            # exclusions) that lives inside a per-department loop with multiple simultaneous
+            # forms on the same page -- checklist and ribbon, without that structure, are
+            # confirmed working with st.form(). Seed-once (never passing a default on every
+            # render) is the actual mechanism that stops a rapid refresh from clearing an
+            # in-progress selection -- it doesn't require a form to work.
+            excl_widget_keys = {}
+            for r in roster_rows:
+                tech_name = r.tech_name
+                t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
+                # Looked up by normalized name -- a stored capitalization/whitespace
+                # difference between global_roster and tech_queue_exclusions (e.g. "Alisa
+                # osio" vs "Alisa Osio") previously made this lookup silently return
+                # nothing even though the exclusions genuinely existed in the database,
+                # since a plain dictionary lookup is case-sensitive.
+                true_exclusions = sorted([q for q in existing_exclusions.get(normalize_name(tech_name), []) if q in dept_queue_names])
+                widget_key = f"excl_{dept_prefix}_{t_id}"
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = true_exclusions
+                excl_widget_keys[tech_name] = widget_key
 
-                    st.multiselect(f"{tech_name}", options=dept_queue_names, key=widget_key)
+                st.multiselect(f"{tech_name}", options=dept_queue_names, key=widget_key)
 
-                excl_save_clicked = st.form_submit_button(f"💾 Save {dept_label} Exclusions", use_container_width=True)
-
-            # TEMPORARY DIAGNOSTIC -- remove once the save issue is confirmed fixed. Shows
-            # exactly what's happening the moment Save is clicked, since the confirmation
-            # message has been reported as never appearing across multiple techs and rounds
-            # of fixes, which needs direct evidence rather than more guessing.
-            st.caption(f"🔧 DIAGNOSTIC: excl_save_clicked = {excl_save_clicked}")
-            if excl_save_clicked:
-                st.caption(f"🔧 DIAGNOSTIC: about to save for {len(excl_widget_keys)} techs: {list(excl_widget_keys.keys())}")
-                for _dt, _dk in excl_widget_keys.items():
-                    st.caption(f"🔧 DIAGNOSTIC: {_dt} -> {st.session_state.get(_dk, 'KEY NOT FOUND')}")
+            excl_save_clicked = st.button(f"💾 Save {dept_label} Exclusions", key=f"excl_save_btn_{dept_prefix}", use_container_width=True)
 
             # Shown below the Save button rather than above it -- this was previously being
             # set but never actually displayed anywhere, which is why no confirmation ever
@@ -1881,7 +1877,6 @@ def render_autoscheduler_tab():
                     with db_conn.session as session:
                         for tech_name, widget_key in excl_widget_keys.items():
                             chosen_exclusions = st.session_state.get(widget_key, [])
-                            st.caption(f"🔧 DIAGNOSTIC: writing {tech_name} -> {chosen_exclusions}")
                             # Case/whitespace-insensitive delete -- ensures this cleans up any
                             # existing rows for this tech regardless of stored capitalization,
                             # rather than leaving old, differently-capitalized rows orphaned
@@ -1894,7 +1889,6 @@ def render_autoscheduler_tab():
                                     ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
                                 """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
                         session.commit()
-                        st.caption("🔧 DIAGNOSTIC: commit succeeded")
                     st.session_state["_exclusions_save_success"] = "Exclusions saved."
                     st.rerun()
                 except Exception as e:
