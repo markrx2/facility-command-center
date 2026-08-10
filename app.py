@@ -1684,7 +1684,10 @@ def render_autoscheduler_tab():
         st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to use the auto-scheduler.")
         return
 
+    _t_frag_start = time.time()
+    _dept_timings = []
     for dept_prefix, db_table, dept_label in AUTOSCHEDULER_DEPTS:
+        _t_dept_start = time.time()
         st.subheader(f"🗓️ {dept_label} — Today's Shift Schedule")
 
         if HOMEBASE_API_KEY:
@@ -2073,6 +2076,15 @@ def render_autoscheduler_tab():
                         status_txt = "▶️ Active"
                     parts.append(f"{r.queue} ({r.duration_minutes} min, {status_txt})")
                 st.markdown(f"👤 **{tech_name}**: " + " → ".join(parts))
+
+        _dept_timings.append((dept_label, time.time() - _t_dept_start))
+
+    # TEMPORARY DIAGNOSTIC -- shows how long each department's section took to render, and
+    # the total for the whole fragment. This is what runs on every rerun of this tab
+    # (including right after a Save), so if this total is large, it explains the perceived
+    # delay even though the database calls themselves are fast.
+    _timing_str = " | ".join(f"{lbl}={t:.2f}s" for lbl, t in _dept_timings)
+    st.caption(f"🔧 DIAGNOSTIC: fragment total={time.time()-_t_frag_start:.2f}s | {_timing_str}")
 
 with tab_sched:
     render_autoscheduler_tab()
