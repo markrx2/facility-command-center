@@ -410,6 +410,15 @@ def initialize_system_database():
             """), {"o": next_order + 1})
             session.commit()
 
+        # Reorder: Central Fill ahead of Inbound Fax, Ekit Controlled ahead of Ekit
+        # Non-Controlled. Idempotent (always sets the same target values), so safe to run
+        # on every startup rather than needing a one-time guard.
+        session.execute(text("UPDATE checklist_items SET sort_order=4 WHERE item_key='central_fill_queue'"))
+        session.execute(text("UPDATE checklist_items SET sort_order=5 WHERE item_key='inbound_fax'"))
+        session.execute(text("UPDATE checklist_items SET sort_order=15 WHERE item_key='ekit_controlled_check'"))
+        session.execute(text("UPDATE checklist_items SET sort_order=16 WHERE item_key='ekit_non_controlled_check'"))
+        session.commit()
+
         # --- AUTO-SCHEDULER SUPPORT TABLES ---
         # queue_volumes replaces the old fixed-9-field floor_backlogs ribbon going forward.
         # One row per (day, department, queue) so the ribbon can grow automatically as queues
