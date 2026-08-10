@@ -1684,10 +1684,7 @@ def render_autoscheduler_tab():
         st.warning("🔒 Access Locked: Enter the manager password in the left sidebar to use the auto-scheduler.")
         return
 
-    _t_frag_start = time.time()
-    _dept_timings = []
     for dept_prefix, db_table, dept_label in AUTOSCHEDULER_DEPTS:
-        _t_dept_start = time.time()
         st.subheader(f"🗓️ {dept_label} — Today's Shift Schedule")
 
         if HOMEBASE_API_KEY:
@@ -1872,25 +1869,17 @@ def render_autoscheduler_tab():
             excl_save_success = st.session_state.pop("_exclusions_save_success", None)
             if excl_save_success:
                 st.success(excl_save_success)
-            excl_save_timing = st.session_state.pop("_exclusions_save_timing", None)
-            if excl_save_timing:
-                st.info(excl_save_timing)
             if excl_save_error:
                 st.error(f"⚠️ Couldn't save exclusion changes right now: {excl_save_error}")
 
             if excl_save_clicked:
                 try:
-                    t_start = time.time()
                     with db_conn.session as session:
-                        t_connected = time.time()
                         # Batched to exactly 2 database calls total, regardless of how many
                         # techs or exclusions are involved -- one DELETE covering the whole
                         # department, then one single bulk INSERT for everything being added
-                        # back. Previously this was 1 + N calls (one INSERT per exclusion per
-                        # tech), which for 10 techs with 2 exclusions each meant 21 separate
-                        # round trips for one Save click.
+                        # back.
                         session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx"), {"pfx": dept_prefix})
-                        t_delete = time.time()
                         insert_rows = [
                             (tech_name, q)
                             for tech_name, widget_key in excl_widget_keys.items()
@@ -1913,13 +1902,7 @@ def render_autoscheduler_tab():
                                 ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
                             """
                             session.execute(text(insert_sql), params)
-                        t_insert = time.time()
                         session.commit()
-                        t_commit = time.time()
-                    st.session_state["_exclusions_save_timing"] = (
-                        f"⏱️ TIMING: connect={t_connected-t_start:.2f}s | delete={t_delete-t_connected:.2f}s | "
-                        f"insert={t_insert-t_delete:.2f}s | commit={t_commit-t_insert:.2f}s | total={t_commit-t_start:.2f}s"
-                    )
                     st.session_state["_exclusions_save_success"] = "Exclusions saved."
                     # Fragment-scoped instead of a full page reload -- this fragment alone
                     # needs to refresh, not the entire app (worker grids, checklist, ribbon,
@@ -2076,15 +2059,6 @@ def render_autoscheduler_tab():
                         status_txt = "▶️ Active"
                     parts.append(f"{r.queue} ({r.duration_minutes} min, {status_txt})")
                 st.markdown(f"👤 **{tech_name}**: " + " → ".join(parts))
-
-        _dept_timings.append((dept_label, time.time() - _t_dept_start))
-
-    # TEMPORARY DIAGNOSTIC -- shows how long each department's section took to render, and
-    # the total for the whole fragment. This is what runs on every rerun of this tab
-    # (including right after a Save), so if this total is large, it explains the perceived
-    # delay even though the database calls themselves are fast.
-    _timing_str = " | ".join(f"{lbl}={t:.2f}s" for lbl, t in _dept_timings)
-    st.caption(f"🔧 DIAGNOSTIC: fragment total={time.time()-_t_frag_start:.2f}s | {_timing_str}")
 
 with tab_sched:
     render_autoscheduler_tab()
