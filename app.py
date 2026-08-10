@@ -1857,6 +1857,16 @@ def render_autoscheduler_tab():
 
                 excl_save_clicked = st.form_submit_button(f"💾 Save {dept_label} Exclusions", use_container_width=True)
 
+            # TEMPORARY DIAGNOSTIC -- remove once the save issue is confirmed fixed. Shows
+            # exactly what's happening the moment Save is clicked, since the confirmation
+            # message has been reported as never appearing across multiple techs and rounds
+            # of fixes, which needs direct evidence rather than more guessing.
+            st.caption(f"🔧 DIAGNOSTIC: excl_save_clicked = {excl_save_clicked}")
+            if excl_save_clicked:
+                st.caption(f"🔧 DIAGNOSTIC: about to save for {len(excl_widget_keys)} techs: {list(excl_widget_keys.keys())}")
+                for _dt, _dk in excl_widget_keys.items():
+                    st.caption(f"🔧 DIAGNOSTIC: {_dt} -> {st.session_state.get(_dk, 'KEY NOT FOUND')}")
+
             # Shown below the Save button rather than above it -- this was previously being
             # set but never actually displayed anywhere, which is why no confirmation ever
             # appeared even though the save itself was working.
@@ -1871,6 +1881,7 @@ def render_autoscheduler_tab():
                     with db_conn.session as session:
                         for tech_name, widget_key in excl_widget_keys.items():
                             chosen_exclusions = st.session_state.get(widget_key, [])
+                            st.caption(f"🔧 DIAGNOSTIC: writing {tech_name} -> {chosen_exclusions}")
                             # Case/whitespace-insensitive delete -- ensures this cleans up any
                             # existing rows for this tech regardless of stored capitalization,
                             # rather than leaving old, differently-capitalized rows orphaned
@@ -1883,6 +1894,7 @@ def render_autoscheduler_tab():
                                     ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
                                 """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
                         session.commit()
+                        st.caption("🔧 DIAGNOSTIC: commit succeeded")
                     st.session_state["_exclusions_save_success"] = "Exclusions saved."
                     st.rerun()
                 except Exception as e:
