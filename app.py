@@ -1537,7 +1537,7 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
 
     exclusions = {}
     for r in exclusion_rows:
-        exclusions.setdefault(r.tech_name, set()).add(r.queue_name)
+        exclusions.setdefault(normalize_name(r.tech_name), set()).add(r.queue_name)
 
     volumes = {r.queue_name: r.volume for r in volume_rows}
     rates = {r.queue_name: parse_hourly_rate(r.goal_target) for r in queue_rows}
@@ -1579,7 +1579,7 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
             for queue_name, alloc_minutes in allocations:
                 remaining_alloc = alloc_minutes
                 while remaining_alloc > 0.5:
-                    eligible = [t for t in tech_capacity if t["remaining"] >= MIN_ASSIGNMENT_MINUTES and t["slots_used"] < 5 and queue_name not in exclusions.get(t["tech"], set())]
+                    eligible = [t for t in tech_capacity if t["remaining"] >= MIN_ASSIGNMENT_MINUTES and t["slots_used"] < 5 and queue_name not in exclusions.get(normalize_name(t["tech"]), set())]
                     if not eligible:
                         summary["unmet"][queue_name] = summary["unmet"].get(queue_name, 0) + round(remaining_alloc)
                         break
@@ -1691,6 +1691,19 @@ def render_autoscheduler_tab():
             if st.button(f"🔄 Sync Shifts from Homebase", key=f"hb_sync_{dept_prefix}", use_container_width=True):
                 result, error = sync_homebase_shifts(dept_prefix)
                 st.session_state[f"hb_sync_outcome_{dept_prefix}"] = {"result": result, "error": error}
+                if not error:
+                    # A sync is a deliberate, legitimate external change -- unlike an
+                    # accidental overwrite, this SHOULD replace whatever's currently in each
+                    # tech's dropdown, even for techs whose widget had already loaded earlier
+                    # in this session (the normal "seed once" protection would otherwise leave
+                    # those stuck on their pre-sync value, which was the actual bug: only
+                    # dropdowns that hadn't loaded yet picked up the sync's changes).
+                    stale_keys = [
+                        k for k in list(st.session_state.keys())
+                        if k.startswith(f"shift_choice_{dept_prefix}_") or k.startswith(f"shift_start_{dept_prefix}_") or k.startswith(f"shift_end_{dept_prefix}_")
+                    ]
+                    for k in stale_keys:
+                        del st.session_state[k]
                 # Rerun so the shift dropdowns below immediately reflect the freshly-synced
                 # data (they were previously stale on this same render since we skipped the
                 # rerun to preserve the message -- this way we get both: the message is
@@ -1814,7 +1827,7 @@ def render_autoscheduler_tab():
         dept_queue_names = [q.queue_name for q in dept_queue_rows]
         existing_exclusions = {}
         for r in existing_exclusion_rows:
-            existing_exclusions.setdefault(r.tech_name, []).append(r.queue_name)
+            existing_exclusions.setdefault(normalize_name(r.tech_name), []).append(r.queue_name)
 
         if not dept_queue_names:
             st.caption("No queues configured yet for this department.")
@@ -1829,7 +1842,12 @@ def render_autoscheduler_tab():
                 for r in roster_rows:
                     tech_name = r.tech_name
                     t_id = hashlib.md5(tech_name.encode('utf-8')).hexdigest()[:8]
-                    true_exclusions = sorted([q for q in existing_exclusions.get(tech_name, []) if q in dept_queue_names])
+                    # Looked up by normalized name -- a stored capitalization/whitespace
+                    # difference between global_roster and tech_queue_exclusions (e.g. "Alisa
+                    # osio" vs "Alisa Osio") previously made this lookup silently return
+                    # nothing even though the exclusions genuinely existed in the database,
+                    # since a plain dictionary lookup is case-sensitive.
+                    true_exclusions = sorted([q for q in existing_exclusions.get(normalize_name(tech_name), []) if q in dept_queue_names])
                     widget_key = f"excl_{dept_prefix}_{t_id}"
                     if widget_key not in st.session_state:
                         st.session_state[widget_key] = true_exclusions
@@ -1853,7 +1871,11 @@ def render_autoscheduler_tab():
                     with db_conn.session as session:
                         for tech_name, widget_key in excl_widget_keys.items():
                             chosen_exclusions = st.session_state.get(widget_key, [])
-                            session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx AND tech_name=:t_name"), {"pfx": dept_prefix, "t_name": tech_name})
+                            # Case/whitespace-insensitive delete -- ensures this cleans up any
+                            # existing rows for this tech regardless of stored capitalization,
+                            # rather than leaving old, differently-capitalized rows orphaned
+                            # behind while inserting a fresh set under the current casing.
+                            session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx AND LOWER(TRIM(tech_name))=LOWER(TRIM(:t_name))"), {"pfx": dept_prefix, "t_name": tech_name})
                             for q in chosen_exclusions:
                                 session.execute(text("""
                                     INSERT INTO tech_queue_exclusions (dept_prefix, tech_name, queue_name)
@@ -1865,7 +1887,6 @@ def render_autoscheduler_tab():
                     st.rerun()
                 except Exception as e:
                     st.session_state["_exclusions_save_error"] = str(e)
-                    st.rerun()
                     st.rerun()
 
         st.markdown("---")
