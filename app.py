@@ -1862,6 +1862,7 @@ def render_autoscheduler_tab():
                 st.multiselect(f"{tech_name}", options=dept_queue_names, key=widget_key)
 
             excl_save_clicked = st.button(f"💾 Save {dept_label} Exclusions", key=f"excl_save_btn_{dept_prefix}", use_container_width=True)
+            st.caption(f"🔧 DIAGNOSTIC: dept_prefix={dept_prefix} | excl_save_clicked = {excl_save_clicked}")
 
             # Shown below the Save button rather than above it -- this was previously being
             # set but never actually displayed anywhere, which is why no confirmation ever
@@ -1873,10 +1874,12 @@ def render_autoscheduler_tab():
                 st.error(f"⚠️ Couldn't save exclusion changes right now: {excl_save_error}")
 
             if excl_save_clicked:
+                st.caption(f"🔧 DIAGNOSTIC: entered save block for {dept_prefix}, processing {len(excl_widget_keys)} techs")
                 try:
                     with db_conn.session as session:
                         for tech_name, widget_key in excl_widget_keys.items():
                             chosen_exclusions = st.session_state.get(widget_key, [])
+                            st.caption(f"🔧 DIAGNOSTIC: {tech_name} -> {chosen_exclusions}")
                             # Case/whitespace-insensitive delete -- ensures this cleans up any
                             # existing rows for this tech regardless of stored capitalization,
                             # rather than leaving old, differently-capitalized rows orphaned
@@ -1889,9 +1892,11 @@ def render_autoscheduler_tab():
                                     ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
                                 """), {"pfx": dept_prefix, "t_name": tech_name, "q": q})
                         session.commit()
+                        st.caption("🔧 DIAGNOSTIC: commit succeeded")
                     st.session_state["_exclusions_save_success"] = "Exclusions saved."
                     st.rerun()
                 except Exception as e:
+                    st.caption(f"🔧 DIAGNOSTIC: exception caught: {str(e)}")
                     st.session_state["_exclusions_save_error"] = str(e)
                     st.rerun()
 
