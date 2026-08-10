@@ -1869,12 +1869,17 @@ def render_autoscheduler_tab():
             excl_save_success = st.session_state.pop("_exclusions_save_success", None)
             if excl_save_success:
                 st.success(excl_save_success)
+            excl_save_timing = st.session_state.pop("_exclusions_save_timing", None)
+            if excl_save_timing:
+                st.info(excl_save_timing)
             if excl_save_error:
                 st.error(f"⚠️ Couldn't save exclusion changes right now: {excl_save_error}")
 
             if excl_save_clicked:
                 try:
+                    t_start = time.time()
                     with db_conn.session as session:
+                        t_connected = time.time()
                         # Batched to exactly 2 database calls total, regardless of how many
                         # techs or exclusions are involved -- one DELETE covering the whole
                         # department, then one single bulk INSERT for everything being added
@@ -1882,6 +1887,7 @@ def render_autoscheduler_tab():
                         # tech), which for 10 techs with 2 exclusions each meant 21 separate
                         # round trips for one Save click.
                         session.execute(text("DELETE FROM tech_queue_exclusions WHERE dept_prefix=:pfx"), {"pfx": dept_prefix})
+                        t_delete = time.time()
                         insert_rows = [
                             (tech_name, q)
                             for tech_name, widget_key in excl_widget_keys.items()
@@ -1904,7 +1910,13 @@ def render_autoscheduler_tab():
                                 ON CONFLICT (dept_prefix, tech_name, queue_name) DO NOTHING
                             """
                             session.execute(text(insert_sql), params)
+                        t_insert = time.time()
                         session.commit()
+                        t_commit = time.time()
+                    st.session_state["_exclusions_save_timing"] = (
+                        f"⏱️ TIMING: connect={t_connected-t_start:.2f}s | delete={t_delete-t_connected:.2f}s | "
+                        f"insert={t_insert-t_delete:.2f}s | commit={t_commit-t_insert:.2f}s | total={t_commit-t_start:.2f}s"
+                    )
                     st.session_state["_exclusions_save_success"] = "Exclusions saved."
                     # Fragment-scoped instead of a full page reload -- this fragment alone
                     # needs to refresh, not the entire app (worker grids, checklist, ribbon,
