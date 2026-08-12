@@ -1763,6 +1763,9 @@ def render_autoscheduler_tab():
             user interaction, never based on a full-form snapshot.
             """
             chosen = st.session_state.get(widget_key)
+            if chosen is None:
+                # Same situation as _save_custom_time -- nothing valid to save yet.
+                return
             try:
                 with db_conn.session as session:
                     if chosen == "Not Working Today":
@@ -1786,6 +1789,11 @@ def render_autoscheduler_tab():
 
         def _save_custom_time(dept_prefix, tech_name, db_column, widget_key):
             new_time = st.session_state.get(widget_key)
+            if new_time is None:
+                # Widget's session state was cleared (e.g. by a Homebase sync's cleanup)
+                # before this callback fired -- nothing valid to save yet, the widget will
+                # re-seed with a real value on the next render.
+                return
             try:
                 with db_conn.session as session:
                     session.execute(text(f"UPDATE tech_shifts SET {db_column}=:val WHERE log_date=:c_date AND dept_prefix=:pfx AND tech_name=:t_name"), {"val": new_time.strftime("%H:%M"), "c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": tech_name})
