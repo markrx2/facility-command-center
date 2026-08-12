@@ -1698,9 +1698,7 @@ def render_autoscheduler_tab():
 
         if HOMEBASE_API_KEY:
             if st.button(f"🔄 Sync Shifts from Homebase", key=f"hb_sync_{dept_prefix}", width='stretch'):
-                st.session_state[f"hb_sync_diag_{dept_prefix}"] = "🔧 DIAGNOSTIC: button click detected, calling sync_homebase_shifts..."
                 result, error = sync_homebase_shifts(dept_prefix)
-                st.session_state[f"hb_sync_diag_{dept_prefix}"] = f"🔧 DIAGNOSTIC: sync_homebase_shifts returned -- result={result} | error={error}"
                 st.session_state[f"hb_sync_outcome_{dept_prefix}"] = {"result": result, "error": error}
                 if not error:
                     # A sync is a deliberate, legitimate external change -- unlike an
@@ -1721,10 +1719,6 @@ def render_autoscheduler_tab():
                 # persisted in session_state below instead of a one-off st.success() call,
                 # so it survives this rerun instead of needing the rerun to be skipped.
                 fragment_rerun()
-
-            hb_sync_diag = st.session_state.pop(f"hb_sync_diag_{dept_prefix}", None)
-            if hb_sync_diag:
-                st.caption(hb_sync_diag)
 
             outcome = st.session_state.get(f"hb_sync_outcome_{dept_prefix}")
             if outcome:
