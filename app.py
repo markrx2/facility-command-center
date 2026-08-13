@@ -1576,22 +1576,37 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
 
         if total_required > 0 and total_capacity > 0:
             scale = min(1.0, total_capacity / total_required)
-            allocations = sorted(
-                [[name, req * scale] for name, req in required_minutes.items()],
-                key=lambda x: x[1], reverse=True
-            )
             for name, req in required_minutes.items():
                 unmet_amt = req - (req * scale)
                 if unmet_amt > 0.5:
                     summary["unmet"][name] = round(unmet_amt)
 
-            for queue_name, alloc_minutes in allocations:
-                remaining_alloc = alloc_minutes
-                while remaining_alloc > 0.5:
+            # Round-robin across queues instead of fully draining the largest queue before
+            # moving to the next. The old approach processed queues sequentially (largest
+            # first) and fully satisfied each one's entire need -- potentially consuming
+            # every slot of the first few eligible techs -- before any other queue got a
+            # single assignment. That let one large queue monopolize the whole workforce,
+            # leaving smaller queues unmet and techs not needed for the dominant queue
+            # completely unassigned. Now every queue with remaining need gets exactly one
+            # chunk assigned per round, then the next round begins -- so assignments spread
+            # across queues and techs together, round by round, rather than queue by queue.
+            remaining_by_queue = {name: req * scale for name, req in required_minutes.items()}
+            active_queues = [name for name, amt in remaining_by_queue.items() if amt > 0.5]
+
+            while active_queues:
+                # Largest-remaining-first within each round, so bigger needs still get first
+                # call on the best-fit tech -- just not at the total exclusion of every other
+                # queue the way the old sequential version did.
+                active_queues.sort(key=lambda name: remaining_by_queue[name], reverse=True)
+                made_progress = False
+
+                for queue_name in list(active_queues):
+                    remaining_alloc = remaining_by_queue[queue_name]
                     eligible = [t for t in tech_capacity if t["remaining"] >= MIN_ASSIGNMENT_MINUTES and t["slots_used"] < 5 and queue_name not in exclusions.get(normalize_name(t["tech"]), set())]
                     if not eligible:
                         summary["unmet"][queue_name] = summary["unmet"].get(queue_name, 0) + round(remaining_alloc)
-                        break
+                        active_queues.remove(queue_name)
+                        continue
 
                     # Prefer a tech who can cover a full target-sized (or bigger) block of
                     # what's still needed here, rather than immediately reaching for whoever
@@ -1617,7 +1632,18 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
                         VALUES (:c_date, :pfx, :t_name, :slot, :queue, :dur)
                     """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": pick["tech"], "slot": pick["slots_used"], "queue": queue_name, "dur": int(chunk_rounded)})
                     pick["remaining"] -= chunk_rounded
-                    remaining_alloc -= chunk_rounded
+                    remaining_by_queue[queue_name] -= chunk_rounded
+                    made_progress = True
+
+                    if remaining_by_queue[queue_name] <= 0.5:
+                        active_queues.remove(queue_name)
+
+                if not made_progress:
+                    # No tech eligible for any remaining queue this round -- nothing further
+                    # to assign, mark what's left as unmet and stop.
+                    for queue_name in active_queues:
+                        summary["unmet"][queue_name] = summary["unmet"].get(queue_name, 0) + round(remaining_by_queue[queue_name])
+                    break
         session.commit()
 
     summary["unused_capacity"] = round(sum(t["remaining"] for t in tech_capacity))
@@ -1935,13 +1961,32 @@ def render_autoscheduler_tab():
 
         gen_col1, gen_col2 = st.columns(2)
         one_pm_today = datetime.combine(now_eastern_naive().date(), dtime(13, 0))
+
+        def _clear_stale_proposal_widgets(dept_prefix):
+            """
+            Proposal-adjustment widget keys are based on tech/slot, not on which specific
+            proposal generated them -- a regenerated proposal reuses the same keys as the
+            one it replaced. Without clearing these, seed-once protection leaves them
+            permanently stuck showing whatever an earlier proposal computed (potentially
+            from a much earlier test, even under old since-changed settings), never
+            refreshing to reflect a freshly-generated proposal's actual numbers.
+            """
+            stale_keys = [
+                k for k in list(st.session_state.keys())
+                if k.startswith(f"padj_q_{dept_prefix}_") or k.startswith(f"padj_d_{dept_prefix}_") or k.startswith(f"padj_rm_{dept_prefix}_")
+            ]
+            for k in stale_keys:
+                del st.session_state[k]
+
         if gen_col1.button(f"▶️ Generate Standard Proposal (1:00 PM anchor)", key=f"gen_std_{dept_prefix}", width='stretch'):
             summary = generate_schedule_proposal(dept_prefix, one_pm_today)
             st.session_state[f"last_proposal_summary_{dept_prefix}"] = summary
+            _clear_stale_proposal_widgets(dept_prefix)
             fragment_rerun()
         if gen_col2.button(f"🔁 Recalculate Now (current time anchor)", key=f"gen_now_{dept_prefix}", width='stretch'):
             summary = generate_schedule_proposal(dept_prefix, now_eastern_naive())
             st.session_state[f"last_proposal_summary_{dept_prefix}"] = summary
+            _clear_stale_proposal_widgets(dept_prefix)
             fragment_rerun()
 
         with db_conn.session as session:
@@ -2636,7 +2681,17 @@ def render_daily_verification_section():
                             st.session_state[key] = stored_val
 
                     cols = st.columns([2.2, 1.0, 1.0, 1.0, 0.9, 1.3, 1.6])
-                    cols[0].markdown(item.label)
+                    _CHECKLIST_COLOR_GROUPS = {
+                        "on_hold_queue": "#dbeafe", "rejection_queue": "#dbeafe", "erx_queue": "#dbeafe",
+                        "central_fill_queue": "#dbeafe", "inbound_fax": "#dbeafe",
+                        "billing": "#dcfce7", "ordering": "#dcfce7",
+                        "dispense": "#fef9c3", "return_fourteen_queue": "#fef9c3",
+                        "ai_tech_check": "#f3e8ff", "data_re_entry": "#f3e8ff", "pa_queue": "#f3e8ff",
+                        "future_bill": "#f3e8ff", "untransmitted_claims": "#f3e8ff",
+                        "ekit_controlled_check": "#f3e8ff", "ekit_non_controlled_check": "#f3e8ff",
+                    }
+                    _label_bg = _CHECKLIST_COLOR_GROUPS.get(item.item_key, "transparent")
+                    cols[0].markdown(f"<div style='background-color:{_label_bg}; padding:4px 8px; border-radius:4px;'>{item.label}</div>", unsafe_allow_html=True)
                     curr_status = cols[1].selectbox("Status", options=opt, key=status_key, label_visibility="collapsed")
                     curr_odt = cols[2].date_input("Oldest Date", key=odt_key, label_visibility="collapsed", format="MM/DD/YYYY")
                     curr_tdt = cols[3].date_input("Target Date", key=tdt_key, label_visibility="collapsed", format="MM/DD/YYYY")
