@@ -1599,13 +1599,28 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
                 # queue the way the old sequential version did.
                 active_queues.sort(key=lambda name: remaining_by_queue[name], reverse=True)
                 made_progress = False
+                # Techs already assigned something in THIS round -- excluded from being
+                # picked again until the next round. Without this, several different queues
+                # could each independently pick the same "best fit" tech within one pass,
+                # burning through their 5-slot cap on a string of small assignments well
+                # before their actual remaining shift time ran out.
+                used_this_round = set()
 
                 for queue_name in list(active_queues):
                     remaining_alloc = remaining_by_queue[queue_name]
-                    eligible = [t for t in tech_capacity if t["remaining"] >= MIN_ASSIGNMENT_MINUTES and t["slots_used"] < 5 and queue_name not in exclusions.get(normalize_name(t["tech"]), set())]
-                    if not eligible:
+                    # Anyone who could EVER still qualify, ignoring this round's used set --
+                    # this distinguishes "genuinely nobody left for this queue" (mark unmet)
+                    # from "just not available this particular round" (try again next round).
+                    globally_eligible = [t for t in tech_capacity if t["remaining"] >= MIN_ASSIGNMENT_MINUTES and t["slots_used"] < 5 and queue_name not in exclusions.get(normalize_name(t["tech"]), set())]
+                    if not globally_eligible:
                         summary["unmet"][queue_name] = summary["unmet"].get(queue_name, 0) + round(remaining_alloc)
                         active_queues.remove(queue_name)
+                        continue
+
+                    eligible = [t for t in globally_eligible if t["tech"] not in used_this_round]
+                    if not eligible:
+                        # Everyone who could do this is already claimed by another queue
+                        # this round -- leave it active and try again next round.
                         continue
 
                     # Prefer a tech who can cover a full target-sized (or bigger) block of
@@ -1634,6 +1649,7 @@ def generate_schedule_proposal(dept_prefix, reference_dt):
                     pick["remaining"] -= chunk_rounded
                     remaining_by_queue[queue_name] -= chunk_rounded
                     made_progress = True
+                    used_this_round.add(pick["tech"])
 
                     if remaining_by_queue[queue_name] <= 0.5:
                         active_queues.remove(queue_name)
@@ -2052,6 +2068,31 @@ def render_autoscheduler_tab():
                                 fragment_rerun()
                             except Exception as e:
                                 st.error(f"⚠️ Couldn't add this assignment right now: {str(e)}")
+
+            # Techs who exist in the roster but aren't in this proposal at all -- e.g.
+            # someone whose shift didn't overlap the reference time used to generate it, or
+            # anyone the algorithm simply didn't need for today's volume. Previously the only
+            # way to get them into the schedule was to leave this screen and use the worker
+            # grid's manual Start Clock instead, bypassing proposal review/approval entirely.
+            missing_techs = [r.tech_name for r in roster_rows if r.tech_name not in by_tech_display]
+            if missing_techs and dept_queue_names:
+                st.markdown("---")
+                with st.expander(f"➕ Add a tech not currently in this proposal ({len(missing_techs)} available)"):
+                    mt_c1, mt_c2, mt_c3, mt_c4 = st.columns([2, 2, 1, 1])
+                    add_tech_name = mt_c1.selectbox("Technician", options=missing_techs, key=f"padj_missing_tech_{dept_prefix}")
+                    add_tech_q = mt_c2.selectbox("Queue", options=dept_queue_names, key=f"padj_missing_q_{dept_prefix}")
+                    add_tech_dur = mt_c3.number_input("Min", min_value=5, step=5, value=60, key=f"padj_missing_d_{dept_prefix}")
+                    if mt_c4.button("Add", key=f"padj_missing_add_{dept_prefix}"):
+                        try:
+                            with db_conn.session as session:
+                                session.execute(text("""
+                                    INSERT INTO schedule_proposals (log_date, dept_prefix, tech_name, proposal_slot, queue_name, duration_minutes)
+                                    VALUES (:c_date, :pfx, :t_name, 1, :queue, :dur)
+                                """), {"c_date": CURRENT_DATE, "pfx": dept_prefix, "t_name": add_tech_name, "queue": add_tech_q, "dur": int(add_tech_dur)})
+                                session.commit()
+                            fragment_rerun()
+                        except Exception as e:
+                            st.error(f"⚠️ Couldn't add this tech to the proposal right now: {str(e)}")
 
             if st.button(f"💾 Save Adjustments", key=f"save_adj_{dept_prefix}", width='stretch'):
                 try:
