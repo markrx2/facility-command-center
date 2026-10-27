@@ -129,7 +129,7 @@ def initialize_system_database():
     
     # Establish a structured SQLAlchemy URL object instance to protect special character passwords
     url_object = URL.create(
-        drivername="postgresql",
+        drivername="postgresql+psycopg2",
         username=db_config["username"],
         password=db_config["password"],
         host=db_config["host"],
